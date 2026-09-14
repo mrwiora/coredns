@@ -1012,14 +1012,21 @@ Requirements Specification and ready for external review.</p>  <div class="wrap"
 (function () {
   var tabs = document.querySelectorAll('.doc-tabs button');
   var wraps = { req: document.querySelector('.shell.layout'), test: document.getElementById('wrap-test'), report: document.getElementById('wrap-report') };
+  // Clicking one of these three top-level tabs jumps to the newly-shown
+  // document's own first section -- the same "jump to a headline"
+  // behavior a left-rail TOC link (e.g. "1 Introduction") already has,
+  // via that section's existing scroll-margin-top (so it lands below
+  // the sticky tab bar, not hidden behind it). Deliberately *not*
+  // window.scrollTo({top:0}): that jumps past the tab bar all the way
+  // back up to the masthead/coversheet on every switch, which is
+  // disorienting rather than useful.
+  var firstSection = { req: 'req-1', test: 'ts-1', report: 'tr-1' };
   tabs.forEach(function (btn) {
     btn.addEventListener('click', function () {
       tabs.forEach(function (b) { b.setAttribute('aria-selected', b === btn ? 'true' : 'false'); });
       Object.keys(wraps).forEach(function (k) { wraps[k].hidden = (k !== btn.dataset.doc); });
-      // Deliberately no scrollTo here: jumping to the top (past the tab
-      // bar, back up to the masthead/coversheet) on every tab switch is
-      // disorienting -- switching documents should just swap the
-      // content in place, wherever the reader currently is.
+      var target = document.getElementById(firstSection[btn.dataset.doc]);
+      if (target) target.scrollIntoView({ block: 'start' });
     });
   });
 })();
