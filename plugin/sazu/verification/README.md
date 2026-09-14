@@ -132,7 +132,7 @@ real gaps that are more useful tracked openly than hidden. Both go in
 
 ```yaml
 coverage_exceptions:
-- id: AUTH-04
+- id: SOME-REQ-01
   reason: |-
     Known gap: no automated test exercises this path yet. Not
     fabricated coverage -- an honest note that this is still open.
@@ -143,11 +143,17 @@ An exception downgrades the missing-citation warning to a `NOTE:` line
 build. **Never add an exception just to silence a warning** — if a
 requirement has no test and no real reason it can't, the right fix is
 to write the test, not to add an exception explaining why one isn't
-needed. The two genuine gaps recorded here as of this migration
-(`AUTH-04`, `CARRIER-06`) were *found* by this validation catching
-them for the first time — leave them as an example of what an honest
-exception entry looks like, and fix them for real (remove the
-exception, add a real citation) if you write the tests they describe.
+needed. `coverage_exceptions` is empty as of this writing: this
+migration's first run found six requirements with no citation at
+all — four legitimately verified by the whole suite passing rather
+than one dedicated test (`NFR-01`, `NFR-03`, `NFR-04`, `NFR-05`), and
+two genuine gaps (`AUTH-04`, `CARRIER-06`). All six were eventually
+resolved the honest way: the four legitimate ones by finding (or, for
+`NFR-01`, writing) one concrete existing test case worth citing even
+though the property is really about the whole suite passing, and the
+two genuine gaps by writing the missing test and citing it for real —
+never by leaving an exception in place past the point where a real
+citation was possible.
 
 ### What the validator checks
 

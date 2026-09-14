@@ -21,6 +21,36 @@ func openTestDB(t *testing.T) *DB {
 	return db
 }
 
+// TestDBUsesPureGoSQLiteDriver is NFR-01: db.go opens its connection via
+// sql.Open("sqlite", ...), the name modernc.org/sqlite (pure Go, no cgo)
+// registers itself under -- never "sqlite3", the name mattn/go-sqlite3
+// (cgo) uses. Checking sql.Drivers() proves it's actually this driver
+// wired up at runtime, not just imported and unused; the broader "the
+// whole suite builds and runs" property (no cgo toolchain required at
+// all) is still what Test Specification §3.14 relies on, since nothing
+// short of an actual CGO_ENABLED=0 build proves that -- this test proves
+// the narrower, still-real property that this package specifically
+// isn't using the cgo alternative.
+func TestDBUsesPureGoSQLiteDriver(t *testing.T) {
+	openTestDB(t)
+
+	var found, foundCGOAlternative bool
+	for _, name := range sql.Drivers() {
+		switch name {
+		case "sqlite":
+			found = true
+		case "sqlite3":
+			foundCGOAlternative = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected modernc.org/sqlite's pure-Go driver registered as %q, got %v", "sqlite", sql.Drivers())
+	}
+	if foundCGOAlternative {
+		t.Fatalf("mattn/go-sqlite3's cgo driver is registered as %q -- NFR-01 requires the pure-Go driver only", "sqlite3")
+	}
+}
+
 func TestDBCommitUpdateThenLoadAllReproducesOnboarding(t *testing.T) {
 	db := openTestDB(t)
 

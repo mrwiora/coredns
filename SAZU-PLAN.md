@@ -1011,11 +1011,14 @@ noted there with its own reasoning:
   re-push accidentally dropping a ZSK) that is far lower-stakes than
   what the KSK check already guards.
 
-Two further, smaller gaps were found (not by design review this time,
+Six further, smaller gaps were found (not by design review this time,
 but by the Verification Dossier's own new cross-validation -- see
-**Done**, above): `AUTH-04` (fail-closed SERVFAIL when no wire bytes are
-captured) and `CARRIER-06` (`cmd/sazuctl`'s own `sendOverHTTP`, pushing
-over an `http(s)://` target) each had no automated test. Both are now
-fixed -- see **Done**, above -- and no longer listed in
-`plugin/sazu/verification/data/requirements.yaml`'s
-`coverage_exceptions`.
+**Done**, above): `AUTH-04` and `CARRIER-06` had no automated test at
+all, and `NFR-01`, `NFR-03`, `NFR-04`, `NFR-05` had no test *cited*
+even though (for three of them) one already existed. All six are now
+fixed the same honest way -- a real test written where none existed
+(`AUTH-04`, `CARRIER-06`, and `NFR-01`'s `TestDBUsesPureGoSQLiteDriver`
+checking `sql.Drivers()` for the pure-Go driver), a real citation added
+where an existing test already covered the requirement (`NFR-03`,
+`NFR-04`, `NFR-05`) -- and `requirements.yaml`'s `coverage_exceptions`
+is now empty: every requirement in the dossier has a real citation.

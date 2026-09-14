@@ -598,21 +598,3 @@ non_functional_requirements:
     All defaults SHALL be safe-by-default; insecure modes SHALL require explicit,
     clearly-named opt-in (<code class="inline">insecure_skip_chain_validation</code>).
   category: Security posture
-coverage_exceptions:
-- id: NFR-01
-  reason: |-
-    Verified narratively, not per-test-case: the whole suite building and testing
-    successfully with the pure-Go SQLite driver (no cgo) is itself the verification. See
-    Test Specification §3.14.
-- id: NFR-03
-  reason: |-
-    Verified by the PERSIST area's transactional-rollback test cases (TestDBCommitUpdateRollsBackOnMalformedOp)
-    rather than a dedicated NFR-tagged case of its own.
-- id: NFR-04
-  reason: |-
-    Verified by CARRIER's regression-baseline cases (§3.8) proving pre-existing HTTPS/HTTP3
-    behavior is unchanged by the opcode opt-in this NFR describes.
-- id: NFR-05
-  reason: |-
-    Verified implicitly: every chain-of-trust/algorithm-floor/rate-limiting test case in this
-    catalogue passes with its respective safeguard left at its default (opt-in, not opt-out).

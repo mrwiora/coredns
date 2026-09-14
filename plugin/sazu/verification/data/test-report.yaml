@@ -5,7 +5,7 @@ document:
 execution_summary:
   stats:
   - label: tests run
-    value: 2155
+    value: 2156
   - label: failures
     value: 0
   - label: errors
@@ -58,6 +58,24 @@ execution_summary:
     class="inline">plugin/sazu</code>, 3 in <code class="inline">plugin/sazu/cmd/sazuctl</code>
     once its table-driven subtests are counted individually), 0 failures, 0 errors, no other
     package affected.
+  - |-
+    A sixth run closed the four remaining <code class="inline">coverage_exceptions</code>
+    entries (NFR-01, NFR-03, NFR-04, NFR-05) the same honest way: each now carries a real
+    citation in the Test Specification's NFR area (TC-NFR-04 … 07) instead of an exception.
+    Three cite an already-existing, already-passing test case that genuinely does verify the
+    requirement even though it wasn't previously cited as doing so (<code
+    class="inline">TestDBCommitUpdateRollsBackOnMalformedOp</code> for NFR-03, <code
+    class="inline">TestServerHTTPSRejectsUpdate</code>/<code
+    class="inline">TestServerHTTPS3RejectsUpdate</code> for NFR-04, <code
+    class="inline">TestParseSazu</code>'s no-options case for NFR-05); one is a genuinely new
+    test, <code class="inline">TestDBUsesPureGoSQLiteDriver</code> (<code
+    class="inline">db_test.go</code>), which checks <code
+    class="inline">sql.Drivers()</code> directly to confirm modernc.org/sqlite's pure-Go
+    driver is what's actually registered under the name <code class="inline">sqlite</code>
+    and that no cgo-based alternative is, for NFR-01. <code
+    class="inline">coverage_exceptions</code> is now empty: every requirement in this
+    document has a real citation. +1 test (<code class="inline">plugin/sazu</code>), 0
+    failures, 0 errors.
 results_by_package:
   rows:
   - package: core/dnsserver
@@ -65,7 +83,7 @@ results_by_package:
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu
-    tests: '217'
+    tests: '218'
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu/cmd/sazuctl
@@ -157,7 +175,7 @@ results_by_area:
     result: |-
       <span class="pill ok">PASS</span>
   - area: NFR
-    cases: TC-NFR-01 … 03
+    cases: TC-NFR-01 … 07
     result: |-
       <span class="pill ok">PASS</span>
   narrative:

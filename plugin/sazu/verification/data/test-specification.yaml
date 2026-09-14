@@ -890,15 +890,19 @@ areas:
 - id: nfr
   title: NFR
   abstract: |-
-    Non-functional requirements (§4 of the Requirements Specification) are mostly verified
-    by the rest of the suite passing at all rather than a dedicated test file of their own:
-    NFR-01 (no cgo) by every package here building and testing successfully with CGO_ENABLED
-    implicitly unset; NFR-03 (persistence consistency) by the PERSIST area's
-    transactional-rollback cases (TC-PERSIST is in §3.12); NFR-04 (HTTPS/HTTP3 backward
-    compatibility) by CARRIER's regression-baseline cases (§3.8); NFR-05 (safe defaults) by
-    every chain-of-trust/algorithm-floor/rate-limiting case throughout this catalogue
-    passing with its respective safeguard left at its default. NFR-02 (per-zone, not global,
-    update serialization) is the one specific enough to warrant its own dedicated tests.
+    NFR-02 (per-zone, not global, update serialization) is specific enough to warrant its
+    own dedicated tests (TC-NFR-01 … 03, below). The other four are each still cited from a
+    concrete, already-existing test case rather than a dedicated one of their own, since
+    each is a property of the *rest of the suite passing*, not of any single scenario: NFR-01
+    (no cgo) by <code class="inline">TestDBUsesPureGoSQLiteDriver</code> directly checking
+    which driver is registered, and by every package here still building and testing
+    successfully with CGO_ENABLED implicitly unset; NFR-03 (persistence consistency) by the
+    PERSIST area's transactional-rollback case (§3.12); NFR-04 (HTTPS/HTTP3 backward
+    compatibility) by CARRIER's default-rejects-UPDATE case (§3.8); NFR-05 (safe defaults) by
+    <code class="inline">TestParseSazu</code>'s no-options case directly asserting
+    <code class="inline">insecureSkipChainValidation</code> defaults to false, plus every
+    chain-of-trust/algorithm-floor/rate-limiting case throughout this catalogue passing with
+    its respective safeguard left at that default.
   cases:
   - id: TC-NFR-01
     objective: |-
@@ -924,6 +928,33 @@ areas:
     functions: |-
       TestConcurrentUpdatesToSameZoneStillSerializeCorrectly
     verifies: NFR-02
+  - id: TC-NFR-04
+    objective: |-
+      The registered <code class="inline">database/sql</code> driver named
+      <code class="inline">sqlite</code> is modernc.org/sqlite's pure-Go implementation; no
+      cgo-based alternative (mattn/go-sqlite3, which registers as <code
+      class="inline">sqlite3</code>) is registered.
+    functions: TestDBUsesPureGoSQLiteDriver
+    verifies: NFR-01
+  - id: TC-NFR-05
+    objective: |-
+      A persistence failure mid-transaction leaves the on-disk database exactly as it was
+      before the attempt, never partially applied.
+    functions: TestDBCommitUpdateRollsBackOnMalformedOp
+    verifies: NFR-03
+  - id: TC-NFR-06
+    objective: |-
+      With no opcode explicitly allowed, the HTTPS and HTTP3 servers reject UPDATE exactly as
+      they did before this carrier existed -- adding the opt-in changes nothing for a Config
+      that never uses it.
+    functions: TestServerHTTPSRejectsUpdate, TestServerHTTPS3RejectsUpdate (core/dnsserver)
+    verifies: NFR-04
+  - id: TC-NFR-07
+    objective: |-
+      With no Corefile options set, a fresh config's chain-of-trust validation is not
+      skipped: <code class="inline">insecure_skip_chain_validation</code> defaults to off.
+    functions: TestParseSazu (no-options case)
+    verifies: NFR-05
 suite_inventory:
   intro: |-
     Per-file function counts, for exhaustive cross-reference against the repository. A
@@ -957,7 +988,7 @@ suite_inventory:
     count: 8
     area: AUTH (wire-byte capture)
   - file: db_test.go
-    count: 11
+    count: 12
     area: |-
       PERSIST / CONTACT / OPS / KEY (ZSK persistence, schema migration)
   - file: chain_test.go
