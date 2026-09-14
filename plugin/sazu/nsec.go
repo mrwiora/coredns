@@ -36,7 +36,7 @@ import (
 // all until the next full push is a safe degradation; serving a stale
 // one that contradicts what the zone actually now contains is not.
 
-// canonicalCompare orders a and b per RFC 4034 §6.1 ("Canonical DNS Name
+// CanonicalCompare orders a and b per RFC 4034 §6.1 ("Canonical DNS Name
 // Order"): labels compare from most-significant (rightmost) to least,
 // case-insensitively (US-ASCII only), with a name that is a proper
 // right-hand suffix of another sorting first. Returns a value whose sign
@@ -49,7 +49,7 @@ import (
 // using a \DDD numeric escape (RFC 1035 §5.1) for a byte outside normal
 // printable ASCII compares by its literal escaped text, not the byte it
 // represents, which no real SAZU deployment will ever need to push.
-func canonicalCompare(a, b string) int {
+func CanonicalCompare(a, b string) int {
 	la, lb := reversedLabels(a), reversedLabels(b)
 	for i := 0; i < len(la) && i < len(lb); i++ {
 		if c := strings.Compare(la[i], lb[i]); c != 0 {
@@ -68,18 +68,18 @@ func reversedLabels(name string) []string {
 	return out
 }
 
-// sortNamesCanonically sorts names in place in RFC 4034 §6.1 order.
-func sortNamesCanonically(names []string) {
-	sort.Slice(names, func(i, j int) bool { return canonicalCompare(names[i], names[j]) < 0 })
+// SortNamesCanonically sorts names in place in RFC 4034 §6.1 order.
+func SortNamesCanonically(names []string) {
+	sort.Slice(names, func(i, j int) bool { return CanonicalCompare(names[i], names[j]) < 0 })
 }
 
-// closestEncloser returns the longest suffix of qname present in owners
+// ClosestEncloser returns the longest suffix of qname present in owners
 // (a set of lowercased FQDNs) -- RFC 4035 §3.1.3's "closest encloser,"
 // used to locate the wildcard slot ("*."+closest encloser) that also has
 // to be proven nonexistent for a complete NXDOMAIN answer. Terminates
 // unconditionally as long as some suffix of qname (at minimum, the
 // zone's own apex) is in owners, which NegativeProof's caller guarantees.
-func closestEncloser(qname string, owners map[string]bool) string {
+func ClosestEncloser(qname string, owners map[string]bool) string {
 	labels := dns.SplitDomainName(dns.Fqdn(qname))
 	for i := 0; i <= len(labels); i++ {
 		candidate := dns.Fqdn(strings.ToLower(strings.Join(labels[i:], ".")))
@@ -90,20 +90,20 @@ func closestEncloser(qname string, owners map[string]bool) string {
 	return "" // unreachable given the guarantee above
 }
 
-// coveringOwner returns which member of sortedOwners (already in
+// CoveringOwner returns which member of sortedOwners (already in
 // RFC 4034 canonical order, deduplicated) holds the NSEC record covering
 // name: the largest owner canonically less than name, or -- since the
 // NSEC chain is circular -- the last owner in the chain if name
 // canonically precedes every one of them. ok is false only when
 // sortedOwners is empty (no NSEC chain exists for this zone at all).
-func coveringOwner(name string, sortedOwners []string) (owner string, ok bool) {
+func CoveringOwner(name string, sortedOwners []string) (owner string, ok bool) {
 	if len(sortedOwners) == 0 {
 		return "", false
 	}
 	name = strings.ToLower(dns.Fqdn(name))
 	best := -1
 	for i, o := range sortedOwners {
-		if canonicalCompare(o, name) < 0 {
+		if CanonicalCompare(o, name) < 0 {
 			best = i
 			continue
 		}
@@ -146,7 +146,7 @@ func BuildNSECChain(soa *dns.SOA, adds []dns.RR) []dns.RR {
 	for name := range typesByName {
 		names = append(names, name)
 	}
-	sortNamesCanonically(names)
+	SortNamesCanonically(names)
 
 	out := make([]dns.RR, 0, len(names))
 	for i, name := range names {

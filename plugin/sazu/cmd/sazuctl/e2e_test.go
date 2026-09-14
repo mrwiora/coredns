@@ -234,6 +234,63 @@ func TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC(t *testing.T) {
 	}
 }
 
+// TestE2EPushUpdateIncrementalChainMaintenance exercises the full local
+// chain-cache mechanism end to end through the actual CLI: push-zone
+// (-nsec3) writes a cache (see nseccache.go) after onboarding, then
+// push-update adds a brand-new name and, because that cache exists,
+// patches the existing chain incrementally (sazu.ComputeChainPatch)
+// instead of the server discarding it until the next full push -- proven
+// by the chain still producing a valid NSEC3 proof covering both the
+// original and the newly added name right afterward, with no gap.
+func TestE2EPushUpdateIncrementalChainMaintenance(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-chain-cache.example."
+	dir := t.TempDir()
+	kskPath := filepath.Join(dir, "ksk.private")
+	zoneFile := writeTestZoneFile(t, zone)
+
+	if err := runPushZone([]string{
+		"-zone", zone, "-key", kskPath, "-zonefile", zoneFile,
+		"-nsec3", "-target", addr,
+	}); err != nil {
+		t.Fatalf("push-zone -nsec3: %v", err)
+	}
+	if _, err := os.Stat(chainCachePath(zone)); err != nil {
+		t.Fatalf("expected push-zone to write a local chain cache: %v", err)
+	}
+
+	if err := runPushUpdate([]string{
+		"-zone", zone, "-key", kskPath,
+		"-add", "mail." + zone + " 300 IN A 203.0.113.20",
+		"-target", addr,
+	}); err != nil {
+		t.Fatalf("push-update: %v", err)
+	}
+	if answer := queryA(t, addr, "mail."+zone); len(answer) != 1 {
+		t.Fatalf("expected the incrementally-pushed name to be servable, got %d answers", len(answer))
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("nope."+zone), dns.TypeA)
+	m.SetEdns0(4096, true)
+	resp, _, err := new(dns.Client).Exchange(m, addr)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	var sawNSEC3 bool
+	for _, rr := range resp.Ns {
+		if _, ok := rr.(*dns.NSEC3); ok {
+			sawNSEC3 = true
+		}
+	}
+	if !sawNSEC3 {
+		t.Fatalf("expected the chain to still produce an NSEC3 proof after an incremental push-update (not purged), got %+v", resp.Ns)
+	}
+}
+
 // TestE2EZSKFullLifecycle exercises the ZSK use case end to end through
 // the actual sazuctl CLI entry points: onboarding a KSK, registering a
 // ZSK (add-zsk), authenticating a routine push with the ZSK alone,

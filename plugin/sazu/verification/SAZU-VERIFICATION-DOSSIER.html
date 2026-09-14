@@ -251,7 +251,7 @@
     <tr><td class="k">Document set</td><td class="v">SAZU-REQ-1.2 &middot; SAZU-TS-1.2 &middot; SAZU-TR-1.2</td></tr>
     <tr><td class="k">Subject system</td><td class="v">SAZU on CoreDNS &mdash; <code class="inline">plugin/sazu</code>, <code class="inline">plugin/sazu/cmd/*</code>, <code class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code></td></tr>
     <tr><td class="k">Branch / commit</td><td class="v">feat/sazu @ <code class="inline">5101e77e8</code></td></tr>
-    <tr><td class="k">Status</td><td class="v"><span class="pill ok">all requirements implemented</span> &nbsp;<span class="pill ok">2168/2168 tests passing</span></td></tr>
+    <tr><td class="k">Status</td><td class="v"><span class="pill ok">all requirements implemented</span> &nbsp;<span class="pill ok">2181/2181 tests passing</span></td></tr>
     <tr><td class="k">Derivation</td><td class="v">Requirements traced to the SAZU protocol design and its governing RFCs; test cases traced to the actual Go test suite; results from a full <code class="inline">go test ./...</code> run.</td></tr>
   </table>
 </div>
@@ -394,8 +394,9 @@ than as CONTENT-04's generic case.</td><td class="src">§12</td></tr>    <tr><td
 its covered RRset's TTL.</td><td class="src">RFC 4034 §3</td></tr>    <tr><td class="reqid">CONTENT-07</td><td>A full-zone push SHALL compute an RFC 4034/4035 NSEC chain covering every owner name,
 served as an authenticated denial-of-existence proof (closest-encloser/wildcard-slot for
 NXDOMAIN; direct NSEC for NODATA) when the querier sets the DO bit.</td><td class="src">RFC 4034/4035 §3.1.3</td></tr>    <tr><td class="reqid">CONTENT-08</td><td>Every negative response (NXDOMAIN or NODATA) SHALL carry the zone's SOA in the Authority
-section.</td><td class="src">RFC 2308 §3</td></tr>    <tr><td class="reqid">CONTENT-09</td><td>A partial (differential) push SHALL invalidate any existing NSEC or NSEC3 chain until
-the next full push recomputes it.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTENT-10</td><td>Signing, serving, and content verification SHALL be correct for arbitrary RR types with
+section.</td><td class="src">RFC 2308 §3</td></tr>    <tr><td class="reqid">CONTENT-09</td><td>A partial (differential) push carrying no valid patch of its own to an existing
+NSEC/NSEC3 chain SHALL invalidate that chain until the next full push recomputes it,
+rather than serve a proof that may now be incorrect.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTENT-10</td><td>Signing, serving, and content verification SHALL be correct for arbitrary RR types with
 no type-specific special-casing (verified at minimum for A, AAAA, CNAME, MX, TXT, NS,
 SRV, PTR, CAA, NAPTR, DNAME).</td><td class="src">RFC 4034 (generic RRSIG)</td></tr>    <tr><td class="reqid">CONTENT-11</td><td>RRSIGs SHALL be included alongside an answer only when the querying client sets the
 EDNS0 DO bit.</td><td class="src">RFC 4035</td></tr>    <tr><td class="reqid">CONTENT-12</td><td>The plugin's static Corefile zone scope (e.g. a wildcard root) SHALL be independent of
@@ -404,7 +405,15 @@ onboarded SHALL fall through to the next plugin rather than being swallowed.</td
 owner-name set from enumeration, as an opt-in alternative to plain NSEC (CONTENT-07);
 the closest-encloser/next-closer-name/wildcard-cover proof for NXDOMAIN, and the
 matching record for NODATA, SHALL be served when the querier sets the DO bit, exactly
-as for plain NSEC.</td><td class="src">RFC 5155 &middot; §7.2</td></tr>  </table></div>
+as for plain NSEC.</td><td class="src">RFC 5155 &middot; §7.2</td></tr>    <tr><td class="reqid">CONTENT-14</td><td>A partial (differential) push carrying a correctly-computed NSEC/NSEC3 chain patch,
+accompanied by an RFC 2136 §2.4.2 value-dependent prerequisite asserting the prior
+value of every neighbor record it touches, SHALL have that patch applied directly
+(without invalidating the rest of the chain) if every asserted prerequisite still
+holds, and SHALL be rejected outright, with the zone's actual current record attached
+for the first prerequisite that does not, otherwise.</td><td class="src">RFC 2136 &middot; §2.4.2 (engineering decision)</td></tr>    <tr><td class="reqid">CONTENT-15</td><td>A push that carries an apex DNSKEY but changes no other served content (a KSK/ZSK
+rollover, or a ZSK registration/retirement) SHALL NOT invalidate an existing
+NSEC/NSEC3 chain -- only a push that actually changes zone content, with no valid
+chain patch of its own, SHALL.</td><td class="src">Engineering decision</td></tr>  </table></div>
   <h3 class="subhead" id="req-contact"><span class="secno">3.6</span> CONTACT &mdash; Registration record</h3>
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CONTACT-01</td><td>A contact-address registration SHALL ride an ordinary authenticated UPDATE, addressed to
@@ -506,7 +515,7 @@ clearly-named opt-in (<code class="inline">insecure_skip_chain_validation</code>
   <h2><span class="secno">5</span> Traceability summary</h2>
   <p>Every requirement above is verified by at least one automated test case; the mapping is maintained in the companion <a href="#" onclick="document.querySelector('[data-doc=test]').click();return false;">Test Specification</a> (&sect;3, per-area tables) and its execution recorded in the <a href="#" onclick="document.querySelector('[data-doc=report]').click();return false;">Test Report</a> (&sect;3). No requirement in this document is currently unverified or outstanding.</p>
   <div class="stats">
-    <div class="stat"><div class="v ok">85</div><div class="l">requirements specified</div></div>
+    <div class="stat"><div class="v ok">87</div><div class="l">requirements specified</div></div>
     <div class="stat"><div class="v ok">13</div><div class="l">functional areas</div></div>
     <div class="stat"><div class="v ok">5</div><div class="l">non-functional</div></div>
     <div class="stat"><div class="v ok">0</div><div class="l">unimplemented</div></div>
@@ -662,7 +671,23 @@ verifying NSEC3 proof for both NODATA and NXDOMAIN (closest-encloser match inclu
 and a partial push invalidates the NSEC3 chain the same way it does a plain NSEC one.</td><td class="mono">TestNODATACarriesValidNSEC3Proof, TestNXDOMAINCarriesValidNSEC3Proof,
 TestPartialPushInvalidatesNSEC3UntilNextFullPush (nsec3_test.go)</td><td>CONTENT-13, CONTENT-08, CONTENT-09</td></tr>    <tr><td class="tcid">TC-CONTENT-17</td><td>cmd/sazuctl's "push-zone -nsec3" flag (plus -nsec3-salt/-nsec3-opt-out) genuinely
 changes what the server ends up serving for a real NXDOMAIN query -- NSEC3, with the
-Opt-Out flag set, and no plain NSEC alongside it.</td><td class="mono">TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-13</td></tr>  </table></div>
+Opt-Out flag set, and no plain NSEC alongside it.</td><td class="mono">TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-13</td></tr>    <tr><td class="tcid">TC-CONTENT-18</td><td>ComputeChainPatch correctly computes an insertion (splitting the predecessor),
+a full removal (merging the predecessor past the doomed name), a bitmap-only edit
+(no topology change), and a no-op (a type already present) -- for both NSEC and
+NSEC3 -- and, specifically, two new names landing in the same canonical/hash-order
+gap in one push thread correctly rather than needing a separate hand-rolled case.</td><td class="mono">8 functions in chainpatch_test.go (TestComputeChainPatch*)</td><td>CONTENT-14</td></tr>    <tr><td class="tcid">TC-CONTENT-19</td><td>End-to-end, the server applies a well-formed incremental chain patch directly (the
+chain keeps serving a valid proof covering old and new names alike, never purged),
+and rejects a patch whose prerequisite no longer matches the server's actual current
+record outright -- nothing partially applied -- returning that actual record so the
+client can reconcile.</td><td class="mono">TestServerAcceptsIncrementalChainPatchWithoutPurging,
+TestServerRejectsStaleChainPatchAndReturnsCurrentValue,
+TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue (prereq_test.go)</td><td>CONTENT-14</td></tr>    <tr><td class="tcid">TC-CONTENT-20</td><td>A KSK rollover -- which carries an apex DNSKEY, same as a full push, but changes no
+served content and supplies no replacement chain -- leaves an existing NSEC3 chain
+fully intact and still validly signed, rather than being purged on the mistaken
+assumption that carrying an apex DNSKEY alone means "full push."</td><td class="mono">TestKSKRolloverDoesNotPurgeExistingChain</td><td>CONTENT-15</td></tr>    <tr><td class="tcid">TC-CONTENT-21</td><td>End-to-end through the actual sazuctl CLI: push-zone -nsec3 writes a local chain
+cache, and a subsequent push-update adding a brand-new name uses it automatically
+to patch the chain incrementally -- proven by the chain still producing a valid
+NSEC3 proof covering both the original and the newly added name afterward.</td><td class="mono">TestE2EPushUpdateIncrementalChainMaintenance (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-14</td></tr>  </table></div>
   <h3 class="subhead" id="ts-contact"><span class="secno">3.6</span> CONTACT</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CONTACT-01</td><td>A contact add/delete op is correctly split from the update ops; non-contact ops pass
 through untouched; no contact op yields no update.</td><td class="mono">TestSplitContactOpsExtractsAddOp, TestSplitContactOpsExtractsDeleteOp,
@@ -832,7 +857,7 @@ single Go test function may contain several sub-assertions or table-driven cases
 Test Report's totals count these individually, per <code class="inml">go test
 -json</code>).</p>
   <div class="wrap"><table class="spec">
-    <tr><th>File</th><th class="num">Test funcs</th><th>Primary area</th></tr>    <tr><td class="mono">handler_test.go</td><td class="num">29</td><td>End-to-end: onboarding, rollover, quotas, audit, DO/NSEC</td></tr>    <tr><td class="mono">store_test.go</td><td class="num">21</td><td>CONTENT (in-memory zone store)</td></tr>    <tr><td class="mono">prereq_test.go</td><td class="num">10</td><td>CONTENT (RFC 2136 prerequisites/ops)</td></tr>    <tr><td class="mono">nsec_test.go</td><td class="num">10</td><td>CONTENT (NSEC chain)</td></tr>    <tr><td class="mono">nsec3_test.go</td><td class="num">11</td><td>CONTENT (NSEC3 chain)</td></tr>    <tr><td class="mono">contact_test.go</td><td class="num">10</td><td>CONTACT</td></tr>    <tr><td class="mono">transport_test.go</td><td class="num">9</td><td>SEC (transport gate)</td></tr>    <tr><td class="mono">sign_test.go</td><td class="num">9</td><td>CONTENT (signing/verification)</td></tr>    <tr><td class="mono">rawcapture_test.go</td><td class="num">8</td><td>AUTH (wire-byte capture)</td></tr>    <tr><td class="mono">db_test.go</td><td class="num">12</td><td>PERSIST / CONTACT / OPS / KEY (ZSK persistence, schema migration)</td></tr>    <tr><td class="mono">chain_test.go</td><td class="num">8</td><td>CHAIN (crypto primitives)</td></tr>    <tr><td class="mono">sig0_test.go</td><td class="num">6</td><td>AUTH</td></tr>    <tr><td class="mono">push_test.go</td><td class="num">6</td><td>CONTENT (zone-file / full push)</td></tr>    <tr><td class="mono">ipratelimit_test.go</td><td class="num">6</td><td>SEC (per-IP limiter)</td></tr>    <tr><td class="mono">setup_test.go</td><td class="num">5</td><td>OPS (Corefile)</td></tr>    <tr><td class="mono">ratelimit_test.go</td><td class="num">5</td><td>SEC (per-zone quota)</td></tr>    <tr><td class="mono">key_test.go</td><td class="num">5</td><td>CUSTODY</td></tr>    <tr><td class="mono">keycrypt_test.go</td><td class="num">5</td><td>CUSTODY (encryption primitive)</td></tr>    <tr><td class="mono">rrtypes_test.go</td><td class="num">3</td><td>CONTENT (RR-type coverage)</td></tr>    <tr><td class="mono">ratelimit_sweep_test.go</td><td class="num">3</td><td>SEC (memory bound)</td></tr>    <tr><td class="mono">https_test.go</td><td class="num">3</td><td>CARRIER</td></tr>    <tr><td class="mono">zsk_test.go</td><td class="num">8</td><td>KEY (ZSK lifecycle, end to end)</td></tr>    <tr><td class="mono">keys_test.go</td><td class="num">9</td><td>KEY (registry, KSK + optional ZSKs)</td></tr>    <tr><td class="mono">cmd/sazuctl/zoneyaml_test.go</td><td class="num">16</td><td>CLIENT (YAML zone format conversion)</td></tr>    <tr><td class="mono">cmd/sazuctl/main_test.go</td><td class="num">8</td><td>CLIENT (guidance templates, transport choice, small helpers)</td></tr>    <tr><td class="mono">cmd/sazuctl/e2e_test.go</td><td class="num">7</td><td>CLIENT (CLI-level, end to end: KSK/ZSK use cases, init-zone/zone-convert)</td></tr>    <tr><td class="mono">cmd/sazuctl/https_test.go</td><td class="num">1</td><td>CARRIER (sendOverHTTP client-side round trip)</td></tr>    <tr><td class="mono">concurrency_test.go</td><td class="num">4</td><td>NFR (per-zone update locking)</td></tr>    <tr><td class="mono">algorithm_test.go</td><td class="num">2</td><td>ALGO</td></tr>    <tr><td class="mono">cmd/sazu_watchd/alert_test.go</td><td class="num">7</td><td>WATCH (notifier)</td></tr>    <tr><td class="mono">cmd/sazu_watchd/watch_test.go</td><td class="num">6</td><td>WATCH (check loop)</td></tr>    <tr><td class="mono">plugin/pkg/doh/doh_test.go</td><td class="num">9</td><td>CARRIER</td></tr>    <tr><td class="mono">plugin/pkg/dnsutil/message_test.go</td><td class="num">3</td><td>CARRIER (baseline)</td></tr>    <tr><td class="mono">core/dnsserver/server_https_test.go, server_https3_test.go (relevant subset)</td><td class="num">4</td><td>CARRIER</td></tr>  </table></div>
+    <tr><th>File</th><th class="num">Test funcs</th><th>Primary area</th></tr>    <tr><td class="mono">handler_test.go</td><td class="num">29</td><td>End-to-end: onboarding, rollover, quotas, audit, DO/NSEC</td></tr>    <tr><td class="mono">store_test.go</td><td class="num">21</td><td>CONTENT (in-memory zone store)</td></tr>    <tr><td class="mono">prereq_test.go</td><td class="num">11</td><td>CONTENT (RFC 2136 prerequisites/ops)</td></tr>    <tr><td class="mono">nsec_test.go</td><td class="num">10</td><td>CONTENT (NSEC chain)</td></tr>    <tr><td class="mono">nsec3_test.go</td><td class="num">11</td><td>CONTENT (NSEC3 chain)</td></tr>    <tr><td class="mono">chainpatch_test.go</td><td class="num">11</td><td>CONTENT (incremental NSEC/NSEC3 chain patching)</td></tr>    <tr><td class="mono">contact_test.go</td><td class="num">10</td><td>CONTACT</td></tr>    <tr><td class="mono">transport_test.go</td><td class="num">9</td><td>SEC (transport gate)</td></tr>    <tr><td class="mono">sign_test.go</td><td class="num">9</td><td>CONTENT (signing/verification)</td></tr>    <tr><td class="mono">rawcapture_test.go</td><td class="num">8</td><td>AUTH (wire-byte capture)</td></tr>    <tr><td class="mono">db_test.go</td><td class="num">12</td><td>PERSIST / CONTACT / OPS / KEY (ZSK persistence, schema migration)</td></tr>    <tr><td class="mono">chain_test.go</td><td class="num">8</td><td>CHAIN (crypto primitives)</td></tr>    <tr><td class="mono">sig0_test.go</td><td class="num">6</td><td>AUTH</td></tr>    <tr><td class="mono">push_test.go</td><td class="num">6</td><td>CONTENT (zone-file / full push)</td></tr>    <tr><td class="mono">ipratelimit_test.go</td><td class="num">6</td><td>SEC (per-IP limiter)</td></tr>    <tr><td class="mono">setup_test.go</td><td class="num">5</td><td>OPS (Corefile)</td></tr>    <tr><td class="mono">ratelimit_test.go</td><td class="num">5</td><td>SEC (per-zone quota)</td></tr>    <tr><td class="mono">key_test.go</td><td class="num">5</td><td>CUSTODY</td></tr>    <tr><td class="mono">keycrypt_test.go</td><td class="num">5</td><td>CUSTODY (encryption primitive)</td></tr>    <tr><td class="mono">rrtypes_test.go</td><td class="num">3</td><td>CONTENT (RR-type coverage)</td></tr>    <tr><td class="mono">ratelimit_sweep_test.go</td><td class="num">3</td><td>SEC (memory bound)</td></tr>    <tr><td class="mono">https_test.go</td><td class="num">3</td><td>CARRIER</td></tr>    <tr><td class="mono">zsk_test.go</td><td class="num">8</td><td>KEY (ZSK lifecycle, end to end)</td></tr>    <tr><td class="mono">keys_test.go</td><td class="num">9</td><td>KEY (registry, KSK + optional ZSKs)</td></tr>    <tr><td class="mono">cmd/sazuctl/zoneyaml_test.go</td><td class="num">16</td><td>CLIENT (YAML zone format conversion)</td></tr>    <tr><td class="mono">cmd/sazuctl/main_test.go</td><td class="num">8</td><td>CLIENT (guidance templates, transport choice, small helpers)</td></tr>    <tr><td class="mono">cmd/sazuctl/e2e_test.go</td><td class="num">8</td><td>CLIENT (CLI-level, end to end: KSK/ZSK use cases, init-zone/zone-convert)</td></tr>    <tr><td class="mono">cmd/sazuctl/https_test.go</td><td class="num">1</td><td>CARRIER (sendOverHTTP client-side round trip)</td></tr>    <tr><td class="mono">concurrency_test.go</td><td class="num">4</td><td>NFR (per-zone update locking)</td></tr>    <tr><td class="mono">algorithm_test.go</td><td class="num">2</td><td>ALGO</td></tr>    <tr><td class="mono">cmd/sazu_watchd/alert_test.go</td><td class="num">7</td><td>WATCH (notifier)</td></tr>    <tr><td class="mono">cmd/sazu_watchd/watch_test.go</td><td class="num">6</td><td>WATCH (check loop)</td></tr>    <tr><td class="mono">plugin/pkg/doh/doh_test.go</td><td class="num">9</td><td>CARRIER</td></tr>    <tr><td class="mono">plugin/pkg/dnsutil/message_test.go</td><td class="num">3</td><td>CARRIER (baseline)</td></tr>    <tr><td class="mono">core/dnsserver/server_https_test.go, server_https3_test.go (relevant subset)</td><td class="num">4</td><td>CARRIER</td></tr>  </table></div>
 </section>
 
 <section id="ts-5">
@@ -870,7 +895,7 @@ reproducing the exact multi-zone scanning scenario TC-SEC-06 automates.</li>  </
 
 <section id="tr-1">
   <h2><span class="secno">1</span> Execution summary</h2>
-  <div class="stats">    <div class="stat"><span class="stat-n">2168</span><span class="stat-l">tests run</span></div>    <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">failures</span></div>    <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">errors</span></div>    <div class="stat"><span class="stat-n">2</span><span class="stat-l">skipped</span></div>    <div class="stat"><span class="stat-n">110</span><span class="stat-l">packages</span></div>  </div>
+  <div class="stats">    <div class="stat"><span class="stat-n">2181</span><span class="stat-l">tests run</span></div>    <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">failures</span></div>    <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">errors</span></div>    <div class="stat"><span class="stat-n">2</span><span class="stat-l">skipped</span></div>    <div class="stat"><span class="stat-n">110</span><span class="stat-l">packages</span></div>  </div>
   <div class="wrap"><table class="spec">
     <tr><th>Item</th><th>Value</th></tr>    <tr><td>Command</td><td class="mono">go test -json ./...</td></tr>    <tr><td>Result</td><td><span class="pill ok">PASS</span> (exit code 0)</td></tr>    <tr><td>Commit</td><td class="mono">5101e77e8</td></tr>    <tr><td>Branch</td><td class="mono">feat/sazu</td></tr>    <tr><td>Report format</td><td>JUnit XML, generated from the JSON stream via <code class="inline">go-junit-report
 v2</code></td></tr>  </table></div>  <p>This is the fourth full run performed during this engineering effort. The first, at
@@ -935,12 +960,36 @@ proof for both NODATA and NXDOMAIN plus the partial-push invalidation behavior
 and the actual <code class="inline">sazuctl push-zone -nsec3</code> CLI flag proven to
 change what the server serves (cmd/sazuctl/e2e_test.go). +12 tests (11 in <code
 class="inline">plugin/sazu</code>, 1 in <code class="inline">plugin/sazu/cmd/sazuctl</code>),
+0 failures, 0 errors, also re-run clean under <code class="inline">go test -race</code>.</p>  <p>An eighth run closed the "a partial push always invalidates the chain" limitation
+CONTENT-09 previously stated unconditionally (now narrowed to "carrying no valid patch
+of its own"): <code class="inline">plugin/sazu/chainpatch.go</code>'s <code
+class="inline">ComputeChainPatch</code> (CONTENT-14) lets <code
+class="inline">push-update</code> patch an existing NSEC/NSEC3 chain incrementally,
+using a small local cache <code class="inline">sazuctl</code> keeps per zone (written by
+every full push, updated by every successful patch) rather than any network round trip
+to reconstruct chain state. Server side, this reuses RFC 2136 §2.4.2 value-dependent
+prerequisites (already how the SOA-serial staleness guard works) to reject a patch
+outright, with the zone's actual current record attached, if the client's cache has
+drifted (<code class="inline">ERR_STALE_CHAIN</code>) -- covered directly
+(<code class="inline">TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue</code>)
+and end to end (<code class="inline">TestServerAcceptsIncrementalChainPatchWithoutPurging</code>,
+<code class="inline">TestServerRejectsStaleChainPatchAndReturnsCurrentValue</code>), plus
+the CLI's automatic cache-driven wiring
+(<code class="inline">TestE2EPushUpdateIncrementalChainMaintenance</code>). This run also
+found and fixed a genuine, previously invisible bug (CONTENT-15) this feature's own
+testing was the first thing to notice: a KSK/ZSK rollover or ZSK add/retire carries an
+apex DNSKEY, same as a full push, so purging "on isFullPush" -- the pre-existing
+condition -- discarded the chain on every key rotation even though rotation touches no
+served content and supplies no replacement chain; fixed by keying the purge decision on
+whether a real SOA (an actual full push) or other real content change is present instead
+(<code class="inline">TestKSKRolloverDoesNotPurgeExistingChain</code>). +13 tests (12 in
+<code class="inline">plugin/sazu</code>, 1 in <code class="inline">plugin/sazu/cmd/sazuctl</code>),
 0 failures, 0 errors, also re-run clean under <code class="inline">go test -race</code>.</p></section>
 
 <section id="tr-2">
   <h2><span class="secno">2</span> Results by package</h2>
   <div class="wrap"><table class="spec">
-    <tr><th>Package</th><th class="num">Tests</th><th>Result</th></tr>    <tr><td class="mono">core/dnsserver</td><td class="num">221</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu</td><td class="num">229</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu/cmd/sazuctl</td><td class="num">34</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/pkg/doh</td><td class="num">15</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu/cmd/sazu_watchd</td><td class="num">13</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/pkg/dnsutil</td><td class="num">10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">(remaining 104 pre-existing CoreDNS packages, unmodified by this work)</td><td class="num">1646</td><td><span class="pill ok">PASS</span> (2 skipped)</td></tr>  </table></div>  <p>The counts for the three packages this work modified directly at the core-integration
+    <tr><th>Package</th><th class="num">Tests</th><th>Result</th></tr>    <tr><td class="mono">core/dnsserver</td><td class="num">221</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu</td><td class="num">241</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu/cmd/sazuctl</td><td class="num">35</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/pkg/doh</td><td class="num">15</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu/cmd/sazu_watchd</td><td class="num">13</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/pkg/dnsutil</td><td class="num">10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">(remaining 104 pre-existing CoreDNS packages, unmodified by this work)</td><td class="num">1646</td><td><span class="pill ok">PASS</span> (2 skipped)</td></tr>  </table></div>  <p>The counts for the three packages this work modified directly at the core-integration
 layer (<code class="inline">core/dnsserver</code>, <code
 class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code>)
 include their full pre-existing test suites plus the additions listed in the companion
@@ -955,7 +1004,7 @@ to how it's exercised, just how much of it now has direct coverage.</p></section
   <p class="sec-abstract">Cross-referenced against the Test Specification §3. Every functional area's full
 test-case set passed.</p>
   <div class="wrap"><table class="spec">
-    <tr><th>Area</th><th>Test cases</th><th>Result</th></tr>    <tr><td>AUTH</td><td>TC-AUTH-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CHAIN</td><td>TC-CHAIN-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>KEY</td><td>TC-KEY-01 … 19</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>ALGO</td><td>TC-ALGO-01 … 02</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CONTENT</td><td>TC-CONTENT-01 … 17</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CONTACT</td><td>TC-CONTACT-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CUSTODY</td><td>TC-CUSTODY-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CARRIER</td><td>TC-CARRIER-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>SEC</td><td>TC-SEC-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>OPS</td><td>TC-OPS-01 … 03</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>WATCH</td><td>TC-WATCH-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>PERSIST</td><td>TC-PERSIST-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CLIENT</td><td>TC-CLIENT-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>NFR</td><td>TC-NFR-01 … 07</td><td><span class="pill ok">PASS</span></td></tr>  </table></div>  <p>CLIENT requirements are directly and automatically tested, not just exercised
+    <tr><th>Area</th><th>Test cases</th><th>Result</th></tr>    <tr><td>AUTH</td><td>TC-AUTH-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CHAIN</td><td>TC-CHAIN-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>KEY</td><td>TC-KEY-01 … 19</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>ALGO</td><td>TC-ALGO-01 … 02</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CONTENT</td><td>TC-CONTENT-01 … 21</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CONTACT</td><td>TC-CONTACT-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CUSTODY</td><td>TC-CUSTODY-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CARRIER</td><td>TC-CARRIER-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>SEC</td><td>TC-SEC-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>OPS</td><td>TC-OPS-01 … 03</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>WATCH</td><td>TC-WATCH-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>PERSIST</td><td>TC-PERSIST-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CLIENT</td><td>TC-CLIENT-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>NFR</td><td>TC-NFR-01 … 07</td><td><span class="pill ok">PASS</span></td></tr>  </table></div>  <p>CLIENT requirements are directly and automatically tested, not just exercised
 indirectly: <code class="inline">cmd/sazuctl/e2e_test.go</code> drives the actual <code
 class="inline">run*</code> subcommand entry points (the same code <code
 class="inline">main</code> dispatches to for a real command-line invocation) against a
@@ -1068,11 +1117,11 @@ cleanly instead of hanging it.</td></tr>  </table></div>
 </section>
 
 <section id="tr-7">
-  <h2><span class="secno">7</span> Conclusion and sign-off</h2>  <p>All 85 requirements in the companion Requirements Specification are traced to at least
+  <h2><span class="secno">7</span> Conclusion and sign-off</h2>  <p>All 87 requirements in the companion Requirements Specification are traced to at least
 one passing automated test case, or to a manually-verified real-binary scenario for the
 small remaining subset (the real self-signed-TLS HTTPS carrier and the real three-binary
 <code class="inline">sazu-watchd</code> chain) that automated coverage reaches only
-indirectly. The full repository test suite — 2168 tests across 110 packages, including
+indirectly. The full repository test suite — 2181 tests across 110 packages, including
 every package this work touched directly and every pre-existing package alongside it —
 passes with 0 failures and 0 errors at commit <code class="inline">5101e77e8</code> on
 <code class="inline">feat/sazu</code>, confirmed by two consecutive clean runs (and,

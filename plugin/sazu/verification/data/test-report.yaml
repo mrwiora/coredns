@@ -5,7 +5,7 @@ document:
 execution_summary:
   stats:
   - label: tests run
-    value: 2168
+    value: 2181
   - label: failures
     value: 0
   - label: errors
@@ -99,6 +99,32 @@ execution_summary:
     change what the server serves (cmd/sazuctl/e2e_test.go). +12 tests (11 in <code
     class="inline">plugin/sazu</code>, 1 in <code class="inline">plugin/sazu/cmd/sazuctl</code>),
     0 failures, 0 errors, also re-run clean under <code class="inline">go test -race</code>.
+  - |-
+    An eighth run closed the "a partial push always invalidates the chain" limitation
+    CONTENT-09 previously stated unconditionally (now narrowed to "carrying no valid patch
+    of its own"): <code class="inline">plugin/sazu/chainpatch.go</code>'s <code
+    class="inline">ComputeChainPatch</code> (CONTENT-14) lets <code
+    class="inline">push-update</code> patch an existing NSEC/NSEC3 chain incrementally,
+    using a small local cache <code class="inline">sazuctl</code> keeps per zone (written by
+    every full push, updated by every successful patch) rather than any network round trip
+    to reconstruct chain state. Server side, this reuses RFC 2136 §2.4.2 value-dependent
+    prerequisites (already how the SOA-serial staleness guard works) to reject a patch
+    outright, with the zone's actual current record attached, if the client's cache has
+    drifted (<code class="inline">ERR_STALE_CHAIN</code>) -- covered directly
+    (<code class="inline">TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue</code>)
+    and end to end (<code class="inline">TestServerAcceptsIncrementalChainPatchWithoutPurging</code>,
+    <code class="inline">TestServerRejectsStaleChainPatchAndReturnsCurrentValue</code>), plus
+    the CLI's automatic cache-driven wiring
+    (<code class="inline">TestE2EPushUpdateIncrementalChainMaintenance</code>). This run also
+    found and fixed a genuine, previously invisible bug (CONTENT-15) this feature's own
+    testing was the first thing to notice: a KSK/ZSK rollover or ZSK add/retire carries an
+    apex DNSKEY, same as a full push, so purging "on isFullPush" -- the pre-existing
+    condition -- discarded the chain on every key rotation even though rotation touches no
+    served content and supplies no replacement chain; fixed by keying the purge decision on
+    whether a real SOA (an actual full push) or other real content change is present instead
+    (<code class="inline">TestKSKRolloverDoesNotPurgeExistingChain</code>). +13 tests (12 in
+    <code class="inline">plugin/sazu</code>, 1 in <code class="inline">plugin/sazu/cmd/sazuctl</code>),
+    0 failures, 0 errors, also re-run clean under <code class="inline">go test -race</code>.
 results_by_package:
   rows:
   - package: core/dnsserver
@@ -106,11 +132,11 @@ results_by_package:
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu
-    tests: '229'
+    tests: '241'
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu/cmd/sazuctl
-    tests: '34'
+    tests: '35'
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/pkg/doh
@@ -162,7 +188,7 @@ results_by_area:
     result: |-
       <span class="pill ok">PASS</span>
   - area: CONTENT
-    cases: TC-CONTENT-01 … 17
+    cases: TC-CONTENT-01 … 21
     result: |-
       <span class="pill ok">PASS</span>
   - area: CONTACT
@@ -407,11 +433,11 @@ defects:
 conclusion:
   paragraphs:
   - |-
-    All 85 requirements in the companion Requirements Specification are traced to at least
+    All 87 requirements in the companion Requirements Specification are traced to at least
     one passing automated test case, or to a manually-verified real-binary scenario for the
     small remaining subset (the real self-signed-TLS HTTPS carrier and the real three-binary
     <code class="inline">sazu-watchd</code> chain) that automated coverage reaches only
-    indirectly. The full repository test suite — 2168 tests across 110 packages, including
+    indirectly. The full repository test suite — 2181 tests across 110 packages, including
     every package this work touched directly and every pre-existing package alongside it —
     passes with 0 failures and 0 errors at commit <code class="inline">5101e77e8</code> on
     <code class="inline">feat/sazu</code>, confirmed by two consecutive clean runs (and,

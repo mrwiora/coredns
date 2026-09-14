@@ -1,6 +1,7 @@
 package sazu
 
 import (
+	"crypto/ed25519"
 	"net"
 	"strings"
 	"testing"
@@ -15,8 +16,8 @@ func testNSEC3Param(iterations uint16, salt string) *dns.NSEC3PARAM {
 
 func TestNSEC3HashIsDeterministicAndLowercase(t *testing.T) {
 	param := testNSEC3Param(0, "")
-	h1 := nsec3Hash("www.example.org.", param)
-	h2 := nsec3Hash("WWW.EXAMPLE.ORG.", param) // name hashing is case-insensitive, per RFC 5155 §5
+	h1 := NSEC3Hash("www.example.org.", param)
+	h2 := NSEC3Hash("WWW.EXAMPLE.ORG.", param) // name hashing is case-insensitive, per RFC 5155 §5
 	if h1 != h2 {
 		t.Fatalf("expected case-insensitive hashing, got %q vs %q", h1, h2)
 	}
@@ -29,11 +30,11 @@ func TestNSEC3HashIsDeterministicAndLowercase(t *testing.T) {
 }
 
 func TestNSEC3HashDependsOnSaltAndIterations(t *testing.T) {
-	base := nsec3Hash("www.example.org.", testNSEC3Param(0, ""))
-	if h := nsec3Hash("www.example.org.", testNSEC3Param(1, "")); h == base {
+	base := NSEC3Hash("www.example.org.", testNSEC3Param(0, ""))
+	if h := NSEC3Hash("www.example.org.", testNSEC3Param(1, "")); h == base {
 		t.Fatalf("expected a different hash with a different iteration count")
 	}
-	if h := nsec3Hash("www.example.org.", testNSEC3Param(0, "AABBCCDD")); h == base {
+	if h := NSEC3Hash("www.example.org.", testNSEC3Param(0, "AABBCCDD")); h == base {
 		t.Fatalf("expected a different hash with a different salt")
 	}
 }
@@ -118,9 +119,9 @@ func TestBuildNSEC3ChainTypeBitmapReflectsContent(t *testing.T) {
 			continue
 		}
 		switch n.Hdr.Name {
-		case nsec3Hash("example.org.", param) + ".example.org.":
+		case NSEC3Hash("example.org.", param) + ".example.org.":
 			apex = n
-		case nsec3Hash("www.example.org.", param) + ".example.org.":
+		case NSEC3Hash("www.example.org.", param) + ".example.org.":
 			www = n
 		}
 	}
@@ -168,28 +169,30 @@ func TestNextCloserName(t *testing.T) {
 		{"missing.example.org.", "example.org.", "missing.example.org."},
 	}
 	for _, c := range cases {
-		if got := nextCloserName(c.qname, c.ce); got != c.want {
-			t.Fatalf("nextCloserName(%q, %q) = %q, want %q", c.qname, c.ce, got, c.want)
+		if got := NextCloserName(c.qname, c.ce); got != c.want {
+			t.Fatalf("NextCloserName(%q, %q) = %q, want %q", c.qname, c.ce, got, c.want)
 		}
 	}
 }
 
 func TestCoveringHashFindsPredecessorAndWraps(t *testing.T) {
 	sorted := []string{"1000", "5000", "9000"}
-	if h, ok := coveringHash("6000", sorted); !ok || h != "5000" {
+	if h, ok := CoveringHash("6000", sorted); !ok || h != "5000" {
 		t.Fatalf("got h=%q ok=%v, want 5000", h, ok)
 	}
-	if h, ok := coveringHash("0500", sorted); !ok || h != "9000" {
+	if h, ok := CoveringHash("0500", sorted); !ok || h != "9000" {
 		t.Fatalf("got h=%q ok=%v, want 9000 (wrap-around)", h, ok)
 	}
-	if _, ok := coveringHash("anything", nil); ok {
+	if _, ok := CoveringHash("anything", nil); ok {
 		t.Fatalf("expected ok=false for an empty chain")
 	}
 }
 
 // onboardExampleOrgNSEC3 mirrors onboardExampleOrg (handler_test.go) but
-// pushes with BuildFullZonePushNSEC3 instead of plain NSEC.
-func onboardExampleOrgNSEC3(t *testing.T, addr string, opts NSEC3Options) *dns.DNSKEY {
+// pushes with BuildFullZonePushNSEC3 instead of plain NSEC. Returns the
+// private key too (unlike onboardExampleOrg) since chain-patch tests
+// need to sign a follow-up partial push with it.
+func onboardExampleOrgNSEC3(t *testing.T, addr string, opts NSEC3Options) (*dns.DNSKEY, ed25519.PrivateKey) {
 	t.Helper()
 	key, priv, err := GenerateEd25519Key("example.org.", true)
 	if err != nil {
@@ -209,7 +212,7 @@ func onboardExampleOrgNSEC3(t *testing.T, addr string, opts NSEC3Options) *dns.D
 	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	return key
+	return key, priv
 }
 
 func splitNSEC3AndRRSIGs(rrs []dns.RR) ([]*dns.NSEC3, map[string]*dns.RRSIG) {
@@ -235,7 +238,7 @@ func splitNSEC3AndRRSIGs(rrs []dns.RR) ([]*dns.NSEC3, map[string]*dns.RRSIG) {
 func TestNODATACarriesValidNSEC3Proof(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
-	key := onboardExampleOrgNSEC3(t, addr, NSEC3Options{})
+	key, _ := onboardExampleOrgNSEC3(t, addr, NSEC3Options{})
 
 	resp := queryDO(t, addr, "www.example.org.", dns.TypeTXT)
 	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
@@ -243,7 +246,7 @@ func TestNODATACarriesValidNSEC3Proof(t *testing.T) {
 	}
 	n3s, sigs := splitNSEC3AndRRSIGs(resp.Ns)
 	param := testNSEC3Param(0, "")
-	wantOwner := nsec3Hash("www.example.org.", param) + ".example.org."
+	wantOwner := NSEC3Hash("www.example.org.", param) + ".example.org."
 	if len(n3s) != 1 || n3s[0].Hdr.Name != wantOwner {
 		t.Fatalf("expected exactly one NSEC3, at %s, got %+v", wantOwner, n3s)
 	}
@@ -265,7 +268,7 @@ func TestNODATACarriesValidNSEC3Proof(t *testing.T) {
 func TestNXDOMAINCarriesValidNSEC3Proof(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
-	key := onboardExampleOrgNSEC3(t, addr, NSEC3Options{})
+	key, _ := onboardExampleOrgNSEC3(t, addr, NSEC3Options{})
 
 	resp := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
 	if resp.Rcode != dns.RcodeNameError {
@@ -276,7 +279,7 @@ func TestNXDOMAINCarriesValidNSEC3Proof(t *testing.T) {
 		t.Fatalf("expected at least one NSEC3 in authority, got %+v", resp.Ns)
 	}
 	param := testNSEC3Param(0, "")
-	apexOwner := nsec3Hash("example.org.", param) + ".example.org."
+	apexOwner := NSEC3Hash("example.org.", param) + ".example.org."
 	var sawClosestEncloser bool
 	for _, n := range n3s {
 		sig, ok := sigs[strings.ToLower(n.Hdr.Name)]

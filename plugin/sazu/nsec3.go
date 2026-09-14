@@ -27,7 +27,7 @@ import (
 // from the server that has to serve correct answers. So
 // ZoneData.NegativeProof's NSEC3 path computes the closest encloser and
 // next-closer name directly from the real name set (reusing nsec.go's
-// own closestEncloser), then hashes exactly the specific candidate names
+// own ClosestEncloser), then hashes exactly the specific candidate names
 // it needs a proof for, rather than needing to guess by hash-ring
 // traversal alone the way an external NSEC3 tool would.
 //
@@ -51,10 +51,10 @@ type NSEC3Options struct {
 	OptOut     bool
 }
 
-// nsec3Hash returns name's RFC 5155 §5 hash under param, lowercase
+// NSEC3Hash returns name's RFC 5155 §5 hash under param, lowercase
 // (dns.HashName itself returns uppercase; lowercase matches real-world
 // zone-file convention and this package's own naming elsewhere).
-func nsec3Hash(name string, param *dns.NSEC3PARAM) string {
+func NSEC3Hash(name string, param *dns.NSEC3PARAM) string {
 	return strings.ToLower(dns.HashName(dns.Fqdn(name), param.Hash, param.Iterations, param.Salt))
 }
 
@@ -90,7 +90,7 @@ func BuildNSEC3Chain(soa *dns.SOA, adds []dns.RR, opts NSEC3Options) []dns.RR {
 	type hashedName struct{ hash, name string }
 	hashed := make([]hashedName, 0, len(typesByName))
 	for name := range typesByName {
-		hashed = append(hashed, hashedName{hash: nsec3Hash(name, param), name: name})
+		hashed = append(hashed, hashedName{hash: NSEC3Hash(name, param), name: name})
 	}
 	sort.Slice(hashed, func(i, j int) bool { return hashed[i].hash < hashed[j].hash })
 
@@ -124,14 +124,14 @@ func BuildNSEC3Chain(soa *dns.SOA, adds []dns.RR, opts NSEC3Options) []dns.RR {
 	return append(out, param)
 }
 
-// nextCloserName returns the "next closer name" (RFC 5155 §7.2.1) on the
+// NextCloserName returns the "next closer name" (RFC 5155 §7.2.1) on the
 // path from closestEncloser to qname: closestEncloser itself, plus
 // exactly one more label toward qname. Well-defined whenever
 // closestEncloser is a true suffix of qname with strictly fewer labels,
-// which is always the case for the closestEncloser NegativeProof's NSEC3
-// path computes (nsec.go's closestEncloser never returns qname itself
-// for a name proven not to exist).
-func nextCloserName(qname, closestEncloser string) string {
+// which is always the case for the closest encloser NegativeProof's
+// NSEC3 path computes (ClosestEncloser never returns qname itself for a
+// name proven not to exist).
+func NextCloserName(qname, closestEncloser string) string {
 	qLabels := dns.SplitDomainName(dns.Fqdn(qname))
 	ceLabels := len(dns.SplitDomainName(dns.Fqdn(closestEncloser)))
 	keep := ceLabels + 1
@@ -141,14 +141,14 @@ func nextCloserName(qname, closestEncloser string) string {
 	return dns.Fqdn(strings.Join(qLabels[len(qLabels)-keep:], "."))
 }
 
-// coveringHash returns which member of sortedHashes (already ascending,
+// CoveringHash returns which member of sortedHashes (already ascending,
 // deduplicated) covers hash: the largest entry strictly less than hash,
 // or -- since the NSEC3 chain is circular, same as NSEC's -- the last
-// entry if hash precedes all of them. Mirrors nsec.go's coveringOwner,
+// entry if hash precedes all of them. Mirrors nsec.go's CoveringOwner,
 // operating on plain hash strings (ascending lexical order on these
 // fixed-length base32hex values is the same order HashName's outputs
 // need for the chain itself) instead of RFC 4034 canonical name order.
-func coveringHash(hash string, sortedHashes []string) (string, bool) {
+func CoveringHash(hash string, sortedHashes []string) (string, bool) {
 	if len(sortedHashes) == 0 {
 		return "", false
 	}

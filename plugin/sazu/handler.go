@@ -234,7 +234,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// accepted ones. A logging failure here is deliberately never the
 	// reason an UPDATE itself fails: it's just logged, since the audit
 	// trail is a record of what happened, not a gate on whether it can.
-	reply := func(rcode int, status string) (int, error) {
+	reply := func(rcode int, status string, extra ...dns.RR) (int, error) {
 		// Deliberately skip the audit-trail write for the two rejections
 		// that exist specifically to bound a flood/scan: statusErrRateLimited
 		// and statusErrTransportNotAllowed. IPRateLimiter bounds attempts
@@ -255,7 +255,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 				log.Errorf("update for %s: recording audit entry %s: %v", zone, txID, err)
 			}
 		}
-		return replyWithStatus(w, r, rcode, status)
+		return replyWithStatus(w, r, rcode, status, extra...)
 	}
 
 	log.Debugf("update for %s from %s: transaction %s, %d prerequisite(s), %d op(s)", zone, remoteAddr, txID, len(r.Answer), len(r.Ns))
@@ -408,19 +408,28 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Debugf("update for %s: invalid contact directive: %v", zone, err)
 		return reply(dns.RcodeFormatError, "")
 	}
+	// isFullPush: a full-zone push always carries a DNSKEY at the apex --
+	// true of every first-contact push, and of every full re-push, since
+	// BuildFullZonePush(Split) always re-asserts it -- while an ordinary
+	// differential push-update never does. Used for §12 quota metering,
+	// below. Deliberately NOT used to decide whether to purge the
+	// NSEC/NSEC3 chain (see the PurgeNSEC call site): a KSK/ZSK rollover
+	// or ZSK add/retire also carries an apex DNSKEY, so isFullPush is
+	// true for those too, but none of them ever touch zone content or
+	// carry a replacement chain -- purging on isFullPush alone would
+	// throw the chain away on every key rotation for nothing to replace
+	// it with.
+	isFullPush := !alreadyPinned || containsAPEXDNSKEY(zoneOps, zone)
 
 	if s.RateLimiter != nil {
-		// §12 quota: a full-zone push (one carrying a DNSKEY at the apex --
-		// true of every first-contact push, and of every full re-push,
-		// since BuildFullZonePush always re-asserts it) and an ordinary
-		// differential push-update are metered separately, since they cost
-		// very different amounts of server effort. Checked here, before
-		// the expensive first-contact chain-of-trust walk below, so an
+		// §12 quota: a full-zone push and an ordinary differential
+		// push-update are metered separately, since they cost very
+		// different amounts of server effort. Checked here, before the
+		// expensive first-contact chain-of-trust walk below, so an
 		// already-exhausted quota doesn't also pay for that network round
 		// trip.
-		isFull := !alreadyPinned || containsAPEXDNSKEY(zoneOps, zone)
-		if !s.RateLimiter.Allow(zone, isFull) {
-			log.Debugf("update for %s: rejected, quota exceeded (full=%v)", zone, isFull)
+		if !s.RateLimiter.Allow(zone, isFullPush) {
+			log.Debugf("update for %s: rejected, quota exceeded (full=%v)", zone, isFullPush)
 			return reply(dns.RcodeRefused, statusErrQuotaExceeded)
 		}
 	}
@@ -522,8 +531,21 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 
 	z := s.Store.GetOrCreate(zone)
-	if rcode, status, err := EvaluatePrerequisites(z, r.Answer, dns.ClassINET); err != nil {
+	if rcode, status, current, err := EvaluatePrerequisites(z, r.Answer, dns.ClassINET); err != nil {
 		log.Debugf("update for %s: prerequisite failed: %v", zone, err)
+		if status == statusErrStaleChain {
+			// The client's local chain cache is stale for this specific
+			// record -- attach the zone's actual current value (plus its
+			// RRSIG, so the client can tell it's genuine) so it can
+			// reconcile without a separate query. See
+			// EvaluatePrerequisites and statusErrStaleChain.
+			var extra []dns.RR
+			for _, rr := range current {
+				extra = append(extra, rr)
+				extra = append(extra, z.LookupRRSIG(rr.Header().Name, rr.Header().Rrtype)...)
+			}
+			return reply(rcode, status, extra...)
+		}
 		return reply(rcode, status)
 	}
 
@@ -590,11 +612,38 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Debugf("update for %s: committed to DB", zone)
 	}
 
-	// Invalidate any existing NSEC chain before applying this update's own
-	// ops -- see ZoneData.PurgeNSEC's doc comment for why. A full push's
-	// own freshly signed NSEC records are among the ops ApplyUpdateOps is
-	// about to insert, so they repopulate the chain immediately after.
-	z.PurgeNSEC()
+	// Three cases, not the two isFullPush alone would suggest:
+	//
+	//   - A full push (containsAPEXSOA -- the one thing only push-zone
+	//     ever sends) always carries a complete fresh chain, but never
+	//     emits deletes for names it has dropped since the last one, so
+	//     without a purge first a removed name's stale record would
+	//     linger forever. Purge, then let ApplyUpdateOps's inserts
+	//     repopulate the chain immediately after.
+	//   - A push that changes ordinary zone content (not just DNSKEY --
+	//     i.e. not a mere key rotation or ZSK add/retire, which touch no
+	//     served content at all) with no chain records of its own (no
+	//     local cache, or an unmaintainable case like a bare -del on
+	//     push-update) may now have an existing chain that's wrong about
+	//     that content -- purge rather than risk serving a stale/
+	//     incorrect proof (see ZoneData.PurgeNSEC's doc comment).
+	//   - Anything else needs no purge at all: either this push already
+	//     carries its own already-validated incremental patch (a client's
+	//     local chain cache, applied directly below -- by this point
+	//     EvaluatePrerequisites, above, has already rejected the whole
+	//     update outright if the client's assumed neighbor records had
+	//     drifted from what's actually here), or it doesn't touch zone
+	//     content at all (a KSK/ZSK rollover, a ZSK add/retire), in which
+	//     case the existing chain is still exactly as correct as it was.
+	//     isFullPush alone would misclassify a rollover as "full" (it
+	//     also carries an apex DNSKEY) and purge a chain it never
+	//     supplies a replacement for -- that's why this doesn't use it.
+	switch {
+	case containsAPEXSOA(zoneOps, zone):
+		z.PurgeNSEC()
+	case !containsChainRecords(zoneOps) && changesChainRelevantContent(zoneOps):
+		z.PurgeNSEC()
+	}
 	if err := ApplyUpdateOps(z, zoneOps, dns.ClassINET); err != nil {
 		log.Errorf("update for %s: ApplyUpdateOps failed: %v", zone, err)
 		return reply(dns.RcodeFormatError, "")
@@ -791,6 +840,46 @@ func containsAPEXDNSKEY(updateOps []dns.RR, zone string) bool {
 	return false
 }
 
+// containsChainRecords reports whether updateOps mentions an NSEC,
+// NSEC3, or NSEC3PARAM record at all -- as either an add or a delete,
+// which is why this checks Header().Rrtype directly rather than trying
+// a type assertion the way containsAPEXDNSKEY/containsAPEXSOA do (a
+// merge-on-delete chain patch deletes a record by header alone, per RFC
+// 2136 §2.5.2, never as a concrete *dns.NSEC3). Used to decide whether
+// this update is bringing its own chain maintenance (a full push's
+// complete fresh chain, or a partial push's incremental patch) or
+// carries none at all, in which case any existing chain is purged
+// rather than left to go stale -- see the PurgeNSEC call site.
+func containsChainRecords(updateOps []dns.RR) bool {
+	for _, rr := range updateOps {
+		switch rr.Header().Rrtype {
+		case dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM:
+			return true
+		}
+	}
+	return false
+}
+
+// changesChainRelevantContent reports whether updateOps touches anything
+// a NSEC/NSEC3 chain's bitmaps need to reflect -- i.e. anything other
+// than an apex DNSKEY (a key rotation or ZSK add/retire, which never
+// changes what's actually served) or a chain record itself. Used
+// alongside containsChainRecords to decide whether a chain-record-free
+// update needs its existing chain purged (it changed real content with
+// no patch of its own) or can leave it exactly as it was (it changed
+// nothing the chain describes at all) -- see the PurgeNSEC call site.
+func changesChainRelevantContent(updateOps []dns.RR) bool {
+	for _, rr := range updateOps {
+		switch rr.Header().Rrtype {
+		case dns.TypeDNSKEY, dns.TypeNSEC, dns.TypeNSEC3, dns.TypeNSEC3PARAM:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
+}
+
 func writeMsg(w dns.ResponseWriter, m *dns.Msg) (int, error) {
 	if err := w.WriteMsg(m); err != nil {
 		return dns.RcodeServerFailure, err
@@ -855,6 +944,18 @@ const statusErrTransportNotAllowed = "ERR_TRANSPORT_NOT_ALLOWED"
 // push was built against -- see EvaluatePrerequisites.
 const statusErrStaleSerial = "ERR_STALE_SERIAL"
 
+// statusErrStaleChain is another of §12's status codes, following the
+// same convention as statusErrStaleSerial but for a partial push's own
+// NSEC/NSEC3 chain-patch prerequisite (RFC 2136 §2.4.2, asserting "the
+// record at this neighbor owner name is still exactly what I last saw"
+// -- see sazuctl's local chain cache): rejected because the zone's
+// current record there no longer matches. Unlike a generic prerequisite
+// failure, this one's rejection carries the zone's actual current record
+// for that name in the response's Additional section (see serveUpdate),
+// specifically so the client can reconcile its local cache without a
+// separate round trip.
+const statusErrStaleChain = "ERR_STALE_CHAIN"
+
 // statusErrFirstContactNeedsKSK is not one of §12's original status
 // codes (the design doc predates the optional KSK/ZSK split) but follows
 // its same diagnostic-TXT convention: a first-contact candidate DNSKEY
@@ -876,9 +977,13 @@ const statusErrFirstContactNeedsKSK = "ERR_FIRST_CONTACT_REQUIRES_KSK"
 // content."
 const statusErrExpiredSignature = "ERR_EXPIRED_SIGNATURE"
 
-// replyWithStatus replies to r with rcode and, if status is non-empty,
-// a diagnostic TXT record carrying it in the Additional section.
-func replyWithStatus(w dns.ResponseWriter, r *dns.Msg, rcode int, status string) (int, error) {
+// replyWithStatus replies to r with rcode and, if status is non-empty, a
+// diagnostic TXT record carrying it in the Additional section, plus any
+// extra RRs the caller wants attached there too -- currently just
+// statusErrStaleChain's actual current record, so a client whose local
+// chain-patch prerequisite was stale can reconcile it without a separate
+// round trip (see EvaluatePrerequisites and serveUpdate).
+func replyWithStatus(w dns.ResponseWriter, r *dns.Msg, rcode int, status string, extra ...dns.RR) (int, error) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Rcode = rcode
@@ -888,5 +993,6 @@ func replyWithStatus(w dns.ResponseWriter, r *dns.Msg, rcode int, status string)
 			Txt: []string{status},
 		})
 	}
+	m.Extra = append(m.Extra, extra...)
 	return writeMsg(w, m)
 }

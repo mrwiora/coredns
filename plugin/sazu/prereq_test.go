@@ -39,12 +39,12 @@ func TestEvaluatePrerequisitesNameIsInUse(t *testing.T) {
 	m.NameUsed([]dns.RR{testA("www.example.org.", net.IPv4(1, 2, 3, 4))})
 	m = roundTrip(t, m)
 
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err == nil || rcode != dns.RcodeNameError {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err == nil || rcode != dns.RcodeNameError {
 		t.Fatalf("expected NXDOMAIN for a name that isn't in use, got rcode=%d err=%v", rcode, err)
 	}
 
 	z.Insert(testA("www.example.org.", net.IPv4(1, 2, 3, 4)))
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
 		t.Fatalf("expected success once the name exists, got rcode=%d err=%v", rcode, err)
 	}
 }
@@ -57,12 +57,12 @@ func TestEvaluatePrerequisitesNameNotInUse(t *testing.T) {
 	m.NameNotUsed([]dns.RR{testA("www.example.org.", net.IPv4(1, 2, 3, 4))})
 	m = roundTrip(t, m)
 
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
 		t.Fatalf("expected success for an unused name, got rcode=%d err=%v", rcode, err)
 	}
 
 	z.Insert(testA("www.example.org.", net.IPv4(1, 2, 3, 4)))
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err == nil || rcode != dns.RcodeYXDomain {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err == nil || rcode != dns.RcodeYXDomain {
 		t.Fatalf("expected YXDOMAIN once the name exists, got rcode=%d err=%v", rcode, err)
 	}
 }
@@ -75,12 +75,12 @@ func TestEvaluatePrerequisitesRRsetExistsValueIndependent(t *testing.T) {
 	m.RRsetUsed([]dns.RR{testA("www.example.org.", nil)})
 	m = roundTrip(t, m)
 
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err == nil || rcode != dns.RcodeNXRrset {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err == nil || rcode != dns.RcodeNXRrset {
 		t.Fatalf("expected NXRRSET for a missing rrset, got rcode=%d err=%v", rcode, err)
 	}
 
 	z.Insert(testA("www.example.org.", net.IPv4(1, 2, 3, 4)))
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
 		t.Fatalf("expected success once the rrset exists, got rcode=%d err=%v", rcode, err)
 	}
 }
@@ -93,12 +93,12 @@ func TestEvaluatePrerequisitesRRsetDoesNotExist(t *testing.T) {
 	m.RRsetNotUsed([]dns.RR{testA("www.example.org.", nil)})
 	m = roundTrip(t, m)
 
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
 		t.Fatalf("expected success for a genuinely missing rrset, got rcode=%d err=%v", rcode, err)
 	}
 
 	z.Insert(testA("www.example.org.", net.IPv4(1, 2, 3, 4)))
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err == nil || rcode != dns.RcodeYXRrset {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err == nil || rcode != dns.RcodeYXRrset {
 		t.Fatalf("expected YXRRSET once the rrset exists, got rcode=%d err=%v", rcode, err)
 	}
 }
@@ -110,14 +110,14 @@ func TestEvaluatePrerequisitesRRsetExistsValueDependentSOAStalenessGuard(t *test
 	m := baseUpdateMsg("example.org.")
 	m.Used([]dns.RR{testSOA(5)}) // matches what's actually published
 	m = roundTrip(t, m)
-	if rcode, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
+	if rcode, _, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET); err != nil {
 		t.Fatalf("expected success when the prerequisite SOA matches, got rcode=%d err=%v", rcode, err)
 	}
 
 	stale := baseUpdateMsg("example.org.")
 	stale.Used([]dns.RR{testSOA(3)}) // a push built from an older snapshot
 	stale = roundTrip(t, stale)
-	rcode, status, err := EvaluatePrerequisites(z, stale.Answer, dns.ClassINET)
+	rcode, status, _, err := EvaluatePrerequisites(z, stale.Answer, dns.ClassINET)
 	if err == nil || rcode != dns.RcodeNXRrset {
 		t.Fatalf("expected a stale-serial push to be rejected with NXRRSET, got rcode=%d err=%v", rcode, err)
 	}
@@ -139,12 +139,64 @@ func TestEvaluatePrerequisitesGenericValueDependentPrereqCarriesNoStatus(t *test
 	m.Used([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 99))}) // doesn't match what's published
 	m = roundTrip(t, m)
 
-	rcode, status, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET)
+	rcode, status, _, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET)
 	if err == nil || rcode != dns.RcodeNXRrset {
 		t.Fatalf("expected NXRRSET for a mismatched value-dependent prerequisite, got rcode=%d err=%v", rcode, err)
 	}
 	if status != "" {
 		t.Fatalf("expected no status code for a non-SOA value-dependent prerequisite, got %q", status)
+	}
+}
+
+// TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue is the
+// NSEC/NSEC3 chain-patch counterpart to the SOA staleness test above: a
+// partial push's prerequisite asserting a neighbor owner's current
+// record, if the zone's actual record there has since moved on, fails
+// with statusErrStaleChain and returns that actual record -- what
+// serveUpdate attaches to the rejection so a client can reconcile its
+// local chain cache (see EvaluatePrerequisites' own doc comment).
+func TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue(t *testing.T) {
+	param := &dns.NSEC3PARAM{Hash: dns.SHA1}
+	owner := NSEC3Hash("www.example.org.", param)
+	nextActual := NSEC3Hash("mail.example.org.", param)
+	nextStale := NSEC3Hash("zzz.example.org.", param)
+
+	z := NewZoneData("example.org.")
+	actual := &dns.NSEC3{
+		Hdr:        dns.RR_Header{Name: owner + ".example.org.", Rrtype: dns.TypeNSEC3, Class: dns.ClassINET, Ttl: 3600},
+		Hash:       dns.SHA1,
+		Iterations: 0,
+		NextDomain: nextActual,
+		HashLength: 20,
+		TypeBitMap: []uint16{dns.TypeA, dns.TypeRRSIG},
+	}
+	z.Insert(actual)
+
+	assumed := &dns.NSEC3{
+		Hdr:        dns.RR_Header{Name: owner + ".example.org.", Rrtype: dns.TypeNSEC3, Class: dns.ClassINET, Ttl: 3600},
+		Hash:       dns.SHA1,
+		Iterations: 0,
+		NextDomain: nextStale, // stale: the client's cache thinks this still points elsewhere
+		HashLength: 20,
+		TypeBitMap: []uint16{dns.TypeA, dns.TypeRRSIG},
+	}
+	m := baseUpdateMsg("example.org.")
+	m.Used([]dns.RR{assumed})
+	m = roundTrip(t, m)
+
+	rcode, status, current, err := EvaluatePrerequisites(z, m.Answer, dns.ClassINET)
+	if err == nil || rcode != dns.RcodeNXRrset {
+		t.Fatalf("expected NXRRSET for a stale chain-record prerequisite, got rcode=%d err=%v", rcode, err)
+	}
+	if status != statusErrStaleChain {
+		t.Fatalf("expected the %s diagnostic, got %q", statusErrStaleChain, status)
+	}
+	if len(current) != 1 {
+		t.Fatalf("expected exactly one current record returned, got %+v", current)
+	}
+	got, ok := current[0].(*dns.NSEC3)
+	if !ok || got.NextDomain != nextActual {
+		t.Fatalf("expected the actual current record (NextDomain=%s) to be returned, got %+v", nextActual, current[0])
 	}
 }
 

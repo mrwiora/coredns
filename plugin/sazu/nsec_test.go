@@ -7,12 +7,12 @@ import (
 	"github.com/miekg/dns"
 )
 
-// TestCanonicalCompareMatchesRFC4034Example proves canonicalCompare
+// TestCanonicalCompareMatchesRFC4034Example proves CanonicalCompare
 // against RFC 4034 §6.1's own worked example of names already in
 // canonical order -- minus its two numeric-escape entries (\001.z.example.
 // and \200.z.example.), which need comparison by real decoded byte value
 // to sort correctly (0x01 and 0xC8 respectively) rather than by the
-// escaped textual label canonicalCompare actually operates on. Scoped,
+// escaped textual label CanonicalCompare actually operates on. Scoped,
 // documented behavior (see this function's own doc comment): correct for
 // the plain ASCII hostnames a real SAZU zone contains, not a
 // general-purpose implementation for exotic binary labels.
@@ -27,21 +27,21 @@ func TestCanonicalCompareMatchesRFC4034Example(t *testing.T) {
 		"*.z.example.",
 	}
 	for i := 0; i < len(inOrder)-1; i++ {
-		if canonicalCompare(inOrder[i], inOrder[i+1]) >= 0 {
-			t.Fatalf("expected %q < %q, canonicalCompare returned %d", inOrder[i], inOrder[i+1], canonicalCompare(inOrder[i], inOrder[i+1]))
+		if CanonicalCompare(inOrder[i], inOrder[i+1]) >= 0 {
+			t.Fatalf("expected %q < %q, CanonicalCompare returned %d", inOrder[i], inOrder[i+1], CanonicalCompare(inOrder[i], inOrder[i+1]))
 		}
 	}
 }
 
 func TestCanonicalCompareEqualNamesReturnZero(t *testing.T) {
-	if canonicalCompare("WWW.Example.ORG.", "www.example.org.") != 0 {
+	if CanonicalCompare("WWW.Example.ORG.", "www.example.org.") != 0 {
 		t.Fatalf("expected case-insensitive equality")
 	}
 }
 
 func TestSortNamesCanonically(t *testing.T) {
 	names := []string{"z.example.org.", "example.org.", "a.example.org.", "mx.example.org."}
-	sortNamesCanonically(names)
+	SortNamesCanonically(names)
 	want := []string{"example.org.", "a.example.org.", "mx.example.org.", "z.example.org."}
 	for i := range want {
 		if names[i] != want[i] {
@@ -52,17 +52,17 @@ func TestSortNamesCanonically(t *testing.T) {
 
 func TestClosestEncloserFindsLongestExistingSuffix(t *testing.T) {
 	owners := map[string]bool{"example.org.": true, "www.example.org.": true}
-	if got := closestEncloser("nope.www.example.org.", owners); got != "www.example.org." {
+	if got := ClosestEncloser("nope.www.example.org.", owners); got != "www.example.org." {
 		t.Fatalf("got %q, want www.example.org.", got)
 	}
-	if got := closestEncloser("nope.example.org.", owners); got != "example.org." {
+	if got := ClosestEncloser("nope.example.org.", owners); got != "example.org." {
 		t.Fatalf("got %q, want example.org.", got)
 	}
 }
 
 func TestCoveringOwnerFindsPredecessor(t *testing.T) {
 	sorted := []string{"example.org.", "a.example.org.", "z.example.org."}
-	owner, ok := coveringOwner("m.example.org.", sorted)
+	owner, ok := CoveringOwner("m.example.org.", sorted)
 	if !ok || owner != "a.example.org." {
 		t.Fatalf("got owner=%q ok=%v, want a.example.org.", owner, ok)
 	}
@@ -77,14 +77,14 @@ func TestCoveringOwnerFindsPredecessor(t *testing.T) {
 // one.
 func TestCoveringOwnerWrapsAroundTheChain(t *testing.T) {
 	sorted := []string{"b.example.", "m.example.", "z.example."}
-	owner, ok := coveringOwner("a.example.", sorted)
+	owner, ok := CoveringOwner("a.example.", sorted)
 	if !ok || owner != "z.example." {
 		t.Fatalf("got owner=%q ok=%v, want z.example. (wrap-around)", owner, ok)
 	}
 }
 
 func TestCoveringOwnerEmptyChain(t *testing.T) {
-	if _, ok := coveringOwner("example.org.", nil); ok {
+	if _, ok := CoveringOwner("example.org.", nil); ok {
 		t.Fatalf("expected ok=false for an empty chain")
 	}
 }

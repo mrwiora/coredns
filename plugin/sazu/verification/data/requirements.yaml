@@ -295,8 +295,9 @@ areas:
     source: RFC 2308 §3
   - id: CONTENT-09
     text: |-
-      A partial (differential) push SHALL invalidate any existing NSEC or NSEC3 chain until
-      the next full push recomputes it.
+      A partial (differential) push carrying no valid patch of its own to an existing
+      NSEC/NSEC3 chain SHALL invalidate that chain until the next full push recomputes it,
+      rather than serve a proof that may now be incorrect.
     source: Engineering decision
   - id: CONTENT-10
     text: |-
@@ -323,6 +324,22 @@ areas:
       matching record for NODATA, SHALL be served when the querier sets the DO bit, exactly
       as for plain NSEC.
     source: RFC 5155 &middot; §7.2
+  - id: CONTENT-14
+    text: |-
+      A partial (differential) push carrying a correctly-computed NSEC/NSEC3 chain patch,
+      accompanied by an RFC 2136 §2.4.2 value-dependent prerequisite asserting the prior
+      value of every neighbor record it touches, SHALL have that patch applied directly
+      (without invalidating the rest of the chain) if every asserted prerequisite still
+      holds, and SHALL be rejected outright, with the zone's actual current record attached
+      for the first prerequisite that does not, otherwise.
+    source: RFC 2136 &middot; §2.4.2 (engineering decision)
+  - id: CONTENT-15
+    text: |-
+      A push that carries an apex DNSKEY but changes no other served content (a KSK/ZSK
+      rollover, or a ZSK registration/retirement) SHALL NOT invalidate an existing
+      NSEC/NSEC3 chain -- only a push that actually changes zone content, with no valid
+      chain patch of its own, SHALL.
+    source: Engineering decision
 - id: contact
   code: CONTACT
   title: Registration record

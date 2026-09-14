@@ -333,7 +333,7 @@ func (z *ZoneData) NegativeProof(qname string, nameExists bool) []dns.RR {
 	for _, o := range owners {
 		ownerSet[o] = true
 	}
-	sortNamesCanonically(owners)
+	SortNamesCanonically(owners)
 
 	var out []dns.RR
 	added := make(map[string]bool, 2)
@@ -346,11 +346,11 @@ func (z *ZoneData) NegativeProof(qname string, nameExists bool) []dns.RR {
 		out = append(out, z.LookupRRSIG(owner, dns.TypeNSEC)...)
 	}
 
-	if owner, ok := coveringOwner(qname, owners); ok {
+	if owner, ok := CoveringOwner(qname, owners); ok {
 		add(owner)
 	}
-	ce := closestEncloser(qname, ownerSet)
-	if owner, ok := coveringOwner("*."+ce, owners); ok {
+	ce := ClosestEncloser(qname, ownerSet)
+	if owner, ok := CoveringOwner("*."+ce, owners); ok {
 		add(owner)
 	}
 	return out
@@ -387,7 +387,7 @@ func (z *ZoneData) nsec3NegativeProof(qname string, nameExists bool, param *dns.
 	}
 
 	if nameExists {
-		addByHash(nsec3Hash(qname, param))
+		addByHash(NSEC3Hash(qname, param))
 		return out
 	}
 
@@ -399,17 +399,17 @@ func (z *ZoneData) nsec3NegativeProof(qname string, nameExists bool, param *dns.
 	sortedHashes := make([]string, len(owners))
 	for i, o := range owners {
 		ownerSet[o] = true
-		sortedHashes[i] = nsec3Hash(o, param)
+		sortedHashes[i] = NSEC3Hash(o, param)
 	}
 	sort.Strings(sortedHashes)
 
-	ce := closestEncloser(qname, ownerSet)
-	addByHash(nsec3Hash(ce, param)) // closest-encloser match: ce is a real owner, so this is exact
+	ce := ClosestEncloser(qname, ownerSet)
+	addByHash(NSEC3Hash(ce, param)) // closest-encloser match: ce is a real owner, so this is exact
 
-	if h, ok := coveringHash(nsec3Hash(nextCloserName(qname, ce), param), sortedHashes); ok {
+	if h, ok := CoveringHash(NSEC3Hash(NextCloserName(qname, ce), param), sortedHashes); ok {
 		addByHash(h)
 	}
-	if h, ok := coveringHash(nsec3Hash("*."+ce, param), sortedHashes); ok {
+	if h, ok := CoveringHash(NSEC3Hash("*."+ce, param), sortedHashes); ok {
 		addByHash(h)
 	}
 	return out

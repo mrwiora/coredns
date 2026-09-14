@@ -234,7 +234,10 @@ for a manually verified real-binary walkthrough.
     repopulates it in the same update, immediately after; a partial push
     leaves the zone with no negative-existence proof at all until the
     next full push. A deliberate, documented trade of completeness for
-    correctness, verified end to end (`TestPartialPushInvalidatesNSECUntilNextFullPush`).
+    correctness, verified end to end (`TestPartialPushInvalidatesNSECUntilNextFullPush`) --
+    narrowed considerably later on (see "Incremental NSEC/NSEC3 chain
+    maintenance for `push-update`," below): a partial push with a local
+    chain cache to draw on no longer needs to give this up at all.
     `db.go`'s `CommitUpdate` mirrors the same purge in SQL, so this holds
     across a restart, not just in memory.
   - `store.go`'s `insertLocked` also now treats NSEC as a singleton per
@@ -277,6 +280,69 @@ for a manually verified real-binary walkthrough.
   their own, so `OptOut` applies uniformly rather than per-delegation --
   a zone with its own delegations would need logic this package doesn't
   implement.
+- **Incremental NSEC/NSEC3 chain maintenance for `push-update`,** closing
+  the "partial push always invalidates the chain" limitation the
+  original NSEC work above deliberately left open. The design (discussed
+  with, and refined by, feedback on an initial proposal that would have
+  had the client walk the live chain over the network to reconstruct its
+  topology): `sazuctl` keeps its own persistent local cache of the
+  chain -- one small `<zone>.nsec-cache.json` file per zone, next to the
+  running binary (not the current working directory, and not beside
+  `-key`, so it doesn't depend on which key or directory a particular
+  invocation uses), written by every full push (`push-zone`) and updated
+  by every successful incremental patch. There is deliberately no
+  network round trip to reconstruct chain state in the common case --
+  only a client that already trusts its own bookkeeping needs to exist
+  for this to work, matching how a real incremental DNSSEC signer
+  (`dnssec-signzone -incremental`, Knot's zone-in-journal) keeps its own
+  prior-state record to diff against rather than re-deriving it from the
+  live server each time.
+  - `plugin/sazu/chainpatch.go`'s `ComputeChainPatch` is the actual
+    algorithm, living in `plugin/sazu` (not `cmd/sazuctl`) despite only
+    the client ever calling it -- SAZU's split-signing model means only
+    the client can sign whatever new chain content it produces, but the
+    underlying chain math (hashing, ordering, closest-encloser search)
+    already lives here for the server's own `NegativeProof`, and
+    duplicating it client-side to avoid one more exported name would
+    risk the two copies drifting apart. Deliberately not a hand-rolled
+    split/merge implementation: it reconstructs today's complete
+    (name, type) membership purely from the cache's own bitmaps (neither
+    `BuildNSECChain` nor `BuildNSEC3Chain` ever look at a record's real
+    content, only its owner name and type, so a placeholder RR per pair
+    is all either needs), applies the requested ops, and runs the result
+    back through the *same* chain builder a full push already uses --
+    then diffs the fresh, complete chain against the cache to find the
+    smallest true edit. Two names inserted into the same gap in one
+    push, or an insert and a removal together, are handled correctly by
+    construction, with no separate case to get right for each
+    combination -- verified directly (`TestComputeChainPatchTwoInsertsIntoTheSameGapNSEC`).
+  - Server side, the enabling piece already existed: RFC 2136 §2.4.2
+    "RRset exists (value-dependent)" prerequisites, which
+    `BuildFullZonePush`'s `previousSOA` staleness guard already used for
+    the SOA. `EvaluatePrerequisites` needed only a small generalization
+    (it already worked for any RRset, not just SOA) to also return the
+    zone's actual current value on a mismatch, so a stale chain-patch
+    prerequisite (`ERR_STALE_CHAIN`, following `ERR_STALE_SERIAL`'s own
+    precedent) can hand the client back exactly the real record it
+    disagreed about, in the same response, rather than requiring a
+    separate round trip to find out. Because prerequisite evaluation
+    happens before anything is applied, and rejects the *whole* update
+    on the first mismatch, "which record is actually stale" is always
+    unambiguous -- never a fuzzy zone-wide diff to guess at.
+  - `handler.go`'s `PurgeNSEC` call site needed to stop keying off
+    `isFullPush` (whether the update carries an apex DNSKEY): a KSK/ZSK
+    rollover or ZSK add/retire also carries one, so that alone purged
+    the chain on *every* key rotation even though rotation touches no
+    served content and supplies no replacement chain -- a real,
+    previously invisible bug this feature's own end-to-end testing
+    found (see `TestKSKRolloverDoesNotPurgeExistingChain`), not
+    something it introduced. Fixed by keying the purge decision on
+    `containsAPEXSOA` (true only for an actual full push) for the
+    "replace with a fresh complete chain" case, and a new
+    `changesChainRelevantContent` check (does this update touch anything
+    beyond DNSKEY/chain-record types at all) for the "no chain patch
+    supplied, but nothing needed one anyway" case -- purging now happens
+    only when it's actually necessary.
 - **TCP support for pushes, replacing the earlier `Config.UDPSize`
   workaround.** Found live against a real server: a genuine signed push
   well under `UDPSize`'s 16 KiB ceiling (around 1.5-2 KB) got *no

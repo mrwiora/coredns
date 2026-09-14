@@ -159,7 +159,11 @@ Subcommands:
 * `sazuctl push-update -zone <zone> -key <path> [-zsk-key <path>] [-add "rr"]... [-del "rr"]... [-del-rrset "name TYPE"]... [-target host:port|url] [-json]` —
   build, sign, and (optionally) send a **partial** push: individual
   add/delete operations against an already-onboarded zone. No DNSKEY is
-  included — the server verifies against a key it already trusts.
+  included — the server verifies against a key it already trusts. If
+  `push-zone` has already written a local chain cache for this zone (see
+  "Known limitations" below), this also patches the NSEC/NSEC3 chain
+  incrementally and updates the cache on success — no separate flag
+  needed, it happens automatically whenever it safely can.
 * `sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-target host:port|url] [-json]` —
   the original minimal single-record demo, kept for quick protocol
   smoke-testing. It does **not** include a SOA, so it cannot by itself
@@ -635,12 +639,23 @@ a real-world test isn't mistaken for a production trial run:
   deployment pushing very high concurrent write volume across many zones
   would eventually want WAL mode and/or more connections here too.
 * **A partial push (`push-update`) invalidates the zone's NSEC/NSEC3
-  chain until the next full push.** Only a full push (`push-zone`) ever
-  computes one, since only it sees the entire zone's name set at once;
-  see SAZU-PLAN.md for why a partial push can't safely patch the existing
-  chain instead of just discarding it. Negative answers still work
-  correctly in between, they just carry no DNSSEC denial-of-existence
-  proof until the next full push.
+  chain until the next full push, unless `sazuctl` has a local chain
+  cache for the zone.** `push-zone` writes one automatically (a small
+  `<zone>.nsec-cache.json` file next to the `sazuctl` binary); when
+  present, `push-update` patches the existing chain incrementally
+  instead of the server discarding it (see SAZU-PLAN.md for how, and
+  `plugin/sazu/chainpatch.go` for the actual algorithm). This still
+  falls back to full invalidation in three cases: no cache exists yet
+  for the zone (run `push-zone` once to create one), the push includes a
+  bare `-del` (removing one RR from a possibly multi-value RRset --
+  whether that empties the RRset, which the chain needs to know, isn't
+  determinable from the cache alone; use `-del-rrset` instead where
+  possible), or the cache has drifted from the server's actual state
+  (the push is rejected outright with `ERR_STALE_CHAIN` and the server's
+  real current record, rather than silently applied against stale
+  assumptions -- run `push-zone` once to resynchronize). Negative
+  answers still work correctly whenever the chain is unavailable, they
+  just carry no DNSSEC denial-of-existence proof until it's restored.
 * **No independent per-instance authorized-pusher identities.** The
   optional ZSK split (above) is about DNSSEC key *roles*, not about
   authorizing several independent signer machines to push under their

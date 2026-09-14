@@ -651,7 +651,24 @@ func runPushZone(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false)
+	if err := signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false); err != nil {
+		return err
+	}
+	// A full push always establishes a complete, authoritative chain --
+	// cache it so a later push-update can patch it incrementally instead
+	// of forcing the server to discard it (see nseccache.go). Only after
+	// a successful send: self-verification failing, or the server
+	// explicitly denying the push, means this push's chain was never
+	// actually established, and caching it would just be a stale belief
+	// waiting to be caught by the next push-update's own staleness check
+	// anyway -- better to not create that gap at all when it's this
+	// avoidable.
+	if state := chainStateFromPush(*zone, soa, rrs, m); state != nil {
+		if err := saveChainCache(*zone, state); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not save the local chain cache: %v\n", err)
+		}
+	}
+	return nil
 }
 
 // runPushUpdate builds an ordinary (non-first-contact) SAZU push: no
@@ -711,17 +728,68 @@ func runPushUpdate(args []string) error {
 	m.SetQuestion(dns.Fqdn(*zone), dns.TypeSOA)
 	m.Opcode = dns.OpcodeUpdate
 
-	if len(adds) > 0 {
-		rrs, err := parseRRs("-add", adds)
-		if err != nil {
-			return err
+	addRRs, err := parseRRs("-add", adds)
+	if err != nil {
+		return err
+	}
+	delRRsetRRs, err := parseNameTypePairs(delRRsets)
+	if err != nil {
+		return err
+	}
+
+	// Incremental chain maintenance: only attempted when a local cache
+	// exists (see nseccache.go -- push-zone creates one on every full
+	// push) and every op is one ComputeChainPatch can reason about
+	// unambiguously. A bare -del removes one specific RR from a
+	// potentially multi-value RRset (e.g. one of several round-robin A
+	// records) -- whether that empties the RRset entirely (a name
+	// leaving the zone, which the chain needs to know about) isn't
+	// knowable from the cache alone, which holds only each name's type
+	// membership, not its actual record count. Rather than guess, a push
+	// with any -del falls back to today's default (the server purges the
+	// existing chain until the next full push) -- a safe degradation,
+	// not a wrong answer.
+	var chainState *sazu.ChainState
+	var chainPatch *sazu.ChainPatch
+	if len(dels) == 0 {
+		if state, ok, err := loadChainCache(*zone); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not read the local chain cache, skipping incremental chain maintenance: %v\n", err)
+		} else if ok {
+			var ops []sazu.ChainOp
+			for _, rr := range addRRs {
+				ops = append(ops, sazu.ChainOp{Name: rr.Header().Name, Type: rr.Header().Rrtype, Add: true})
+			}
+			for _, rr := range delRRsetRRs {
+				ops = append(ops, sazu.ChainOp{Name: rr.Header().Name, Type: rr.Header().Rrtype, Add: false})
+			}
+			patch, err := sazu.ComputeChainPatch(state, ops)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Warning: could not compute a chain patch, skipping incremental chain maintenance: %v\n", err)
+			} else if len(patch.Adds) > 0 || len(patch.Deletes) > 0 {
+				chainState, chainPatch = state, patch
+			}
+			// A patch with nothing in it (every type touched was already
+			// reflected in the cached bitmaps) needs no chain maintenance
+			// at all -- chainPatch stays nil, and this push falls back to
+			// the default purge, same as if no cache existed. Narrow,
+			// documented gap: see plugin/sazu/README.md.
 		}
-		now := time.Now()
-		signed, err := sazu.SignZoneContent(rrs, contentKey, contentPriv, now.Add(-sazu.DefaultSignatureInceptionSkew), now.Add(sazu.DefaultSignatureValidity))
+	}
+
+	now := time.Now()
+	content := addRRs
+	if chainPatch != nil {
+		content = append(append([]dns.RR{}, addRRs...), chainPatch.Adds...)
+	}
+	if len(content) > 0 {
+		signed, err := sazu.SignZoneContent(content, contentKey, contentPriv, now.Add(-sazu.DefaultSignatureInceptionSkew), now.Add(sazu.DefaultSignatureValidity))
 		if err != nil {
 			return fmt.Errorf("signing added records: %w", err)
 		}
 		m.Insert(signed)
+	}
+	if chainPatch != nil {
+		m.Used(chainPatch.Prerequisites)
 	}
 	if len(dels) > 0 {
 		rrs, err := parseRRs("-del", dels)
@@ -730,20 +798,33 @@ func runPushUpdate(args []string) error {
 		}
 		m.Remove(rrs)
 	}
-	if len(delRRsets) > 0 {
-		rrs, err := parseNameTypePairs(delRRsets)
-		if err != nil {
-			return err
-		}
-		m.RemoveRRset(rrs)
+	deletes := delRRsetRRs
+	if chainPatch != nil {
+		deletes = append(append([]dns.RR{}, delRRsetRRs...), chainPatch.Deletes...)
+	}
+	if len(deletes) > 0 {
+		m.RemoveRRset(deletes)
 	}
 
-	now := time.Now()
 	wire, err := sazu.SignUpdate(m, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, *udp)
+	if err := signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, *udp); err != nil {
+		return err
+	}
+	if chainPatch != nil {
+		// NewRecords, not a hand-applied Adds/Deletes diff: those two
+		// carry each record's real wire owner name (the hashed one, for
+		// "nsec3"), not the real name ChainState.Records is keyed by --
+		// NewRecords is already the complete post-patch membership keyed
+		// correctly (see ChainPatch's own doc comment).
+		chainState.Records = chainPatch.NewRecords
+		if err := saveChainCache(*zone, chainState); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not save the local chain cache: %v\n", err)
+		}
+	}
+	return nil
 }
 
 // runContact registers or clears a zone's §10.6 registration-contact
@@ -1311,6 +1392,9 @@ func interpretResponse(zone string, key *dns.DNSKEY, resp *dns.Msg) error {
 	case statusErrUnknownSigner:
 		printUnknownSignerGuidance(zone, key)
 		return fmt.Errorf("denied: a DS record for %s is already published, but not for this key", zone)
+	case statusErrStaleChain:
+		printStaleChainGuidance(resp)
+		return fmt.Errorf("denied: local NSEC/NSEC3 chain cache is stale for %s", zone)
 	}
 
 	rcodeName := dns.RcodeToString[resp.Rcode]
@@ -1330,6 +1414,31 @@ const statusErrNoDSPublished = "ERR_NO_DS_PUBLISHED"
 // statusErrUnknownSigner mirrors the constant of the same name in
 // plugin/sazu/handler.go, for the same reason statusErrNoDSPublished does.
 const statusErrUnknownSigner = "ERR_UNKNOWN_SIGNER"
+
+// statusErrStaleChain mirrors the constant of the same name in
+// plugin/sazu/handler.go, for the same reason statusErrNoDSPublished does.
+const statusErrStaleChain = "ERR_STALE_CHAIN"
+
+// printStaleChainGuidance explains ERR_STALE_CHAIN: this push's local
+// NSEC/NSEC3 chain cache (see nseccache.go) assumed a record that no
+// longer matches what the server actually has -- the whole update was
+// rejected outright, nothing partially applied. Prints the server's real
+// current value(s), attached to the response for exactly this reason
+// (see plugin/sazu/handler.go's serveUpdate), and recommends the one
+// supported recovery: sazuctl deliberately does not retry this
+// automatically (see ComputeChainPatch's own doc comment on why chain
+// maintenance is scoped the way it is) -- a full push both fixes the
+// server's chain and re-establishes this cache from scratch.
+func printStaleChainGuidance(resp *dns.Msg) {
+	fmt.Println("Local NSEC/NSEC3 chain cache is out of date -- the server's actual current record differs:")
+	for _, rr := range resp.Extra {
+		switch rr.(type) {
+		case *dns.NSEC, *dns.NSEC3:
+			fmt.Printf("  %s\n", rr.String())
+		}
+	}
+	fmt.Println("Run 'sazuctl push-zone' once to resynchronize the chain and this cache, then retry push-update.")
+}
 
 // diagnosticStatus extracts a §12 SAZU status code from a response's
 // Additional section, if present.

@@ -477,6 +477,44 @@ areas:
       Opt-Out flag set, and no plain NSEC alongside it.
     functions: TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC (cmd/sazuctl/e2e_test.go)
     verifies: CONTENT-13
+  - id: TC-CONTENT-18
+    objective: |-
+      ComputeChainPatch correctly computes an insertion (splitting the predecessor),
+      a full removal (merging the predecessor past the doomed name), a bitmap-only edit
+      (no topology change), and a no-op (a type already present) -- for both NSEC and
+      NSEC3 -- and, specifically, two new names landing in the same canonical/hash-order
+      gap in one push thread correctly rather than needing a separate hand-rolled case.
+    functions: |-
+      8 functions in chainpatch_test.go (TestComputeChainPatch*)
+    verifies: CONTENT-14
+  - id: TC-CONTENT-19
+    objective: |-
+      End-to-end, the server applies a well-formed incremental chain patch directly (the
+      chain keeps serving a valid proof covering old and new names alike, never purged),
+      and rejects a patch whose prerequisite no longer matches the server's actual current
+      record outright -- nothing partially applied -- returning that actual record so the
+      client can reconcile.
+    functions: |-
+      TestServerAcceptsIncrementalChainPatchWithoutPurging,
+      TestServerRejectsStaleChainPatchAndReturnsCurrentValue,
+      TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue (prereq_test.go)
+    verifies: CONTENT-14
+  - id: TC-CONTENT-20
+    objective: |-
+      A KSK rollover -- which carries an apex DNSKEY, same as a full push, but changes no
+      served content and supplies no replacement chain -- leaves an existing NSEC3 chain
+      fully intact and still validly signed, rather than being purged on the mistaken
+      assumption that carrying an apex DNSKEY alone means "full push."
+    functions: TestKSKRolloverDoesNotPurgeExistingChain
+    verifies: CONTENT-15
+  - id: TC-CONTENT-21
+    objective: |-
+      End-to-end through the actual sazuctl CLI: push-zone -nsec3 writes a local chain
+      cache, and a subsequent push-update adding a brand-new name uses it automatically
+      to patch the chain incrementally -- proven by the chain still producing a valid
+      NSEC3 proof covering both the original and the newly added name afterward.
+    functions: TestE2EPushUpdateIncrementalChainMaintenance (cmd/sazuctl/e2e_test.go)
+    verifies: CONTENT-14
 - id: contact
   title: CONTACT
   cases:
@@ -996,7 +1034,7 @@ suite_inventory:
     count: 21
     area: CONTENT (in-memory zone store)
   - file: prereq_test.go
-    count: 10
+    count: 11
     area: CONTENT (RFC 2136 prerequisites/ops)
   - file: nsec_test.go
     count: 10
@@ -1004,6 +1042,9 @@ suite_inventory:
   - file: nsec3_test.go
     count: 11
     area: CONTENT (NSEC3 chain)
+  - file: chainpatch_test.go
+    count: 11
+    area: CONTENT (incremental NSEC/NSEC3 chain patching)
   - file: contact_test.go
     count: 10
     area: CONTACT
@@ -1067,7 +1108,7 @@ suite_inventory:
     area: |-
       CLIENT (guidance templates, transport choice, small helpers)
   - file: cmd/sazuctl/e2e_test.go
-    count: 7
+    count: 8
     area: |-
       CLIENT (CLI-level, end to end: KSK/ZSK use cases, init-zone/zone-convert)
   - file: cmd/sazuctl/https_test.go
