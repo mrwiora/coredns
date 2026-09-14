@@ -105,8 +105,13 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	// SQLite handles one writer at a time; a single connection avoids
-	// SQLITE_BUSY under this plugin's own already-serialized update path
-	// (Sazu.updateMu) without needing WAL-mode tuning for a first cut.
+	// SQLITE_BUSY without needing WAL-mode tuning for a first cut.
+	// database/sql itself safely queues concurrent callers onto that one
+	// connection (it's designed for exactly this), so this remains
+	// correct now that Sazu.updateLocks lets different zones' updates run
+	// concurrently up to this point -- their CommitUpdate calls simply
+	// take their turn here, a short wait against local disk rather than
+	// the real outbound network round trip a chain-of-trust walk can be.
 	sqlDB.SetMaxOpenConns(1)
 	if _, err := sqlDB.Exec(schema); err != nil {
 		sqlDB.Close()

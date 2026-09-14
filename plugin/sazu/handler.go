@@ -3,6 +3,7 @@ package sazu
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 	"time"
@@ -78,12 +79,44 @@ type Sazu struct {
 	// about this flag exercises.
 	RequireValidRRSIGs bool
 
-	// updateMu serializes the whole authenticate-evaluate-apply sequence
-	// for UPDATE requests across all zones this instance serves. Simple
-	// and correct for the request volumes this plugin is built to
-	// exercise (onboarding and manual test pushes); a production version
-	// would want a per-zone lock instead, for throughput, not correctness.
-	updateMu sync.Mutex
+	// updateLocks serializes the whole authenticate-evaluate-apply
+	// sequence for UPDATE requests -- but only against other requests
+	// for the *same* zone, not every zone this instance serves. See
+	// zoneLockStripes' own doc comment for why this is a fixed-size
+	// array of stripes rather than one lock per zone name, or (the
+	// original design) one lock for every zone at once: with a single
+	// global lock, an expensive first-contact/rollover chain-of-trust
+	// walk for one zone -- a real outbound network round trip that can
+	// take a real amount of time -- blocked every *other* zone's
+	// ordinary, already-authenticated pushes for its entire duration,
+	// even though the two share no state that actually needs it.
+	updateLocks [zoneLockStripes]sync.Mutex
+}
+
+// zoneLockStripes is how many lock stripes updateLockFor spreads zone
+// names across. Fixed-size and allocated once as part of the Sazu
+// struct itself (see updateLocks), rather than a map that would grow by
+// one entry per distinct zone name ever presented -- exactly the kind
+// of attacker-controllable unbounded growth the per-source-IP and
+// per-zone rate limiters already have to guard against (see
+// ipratelimit.go's own doc comment on why that matters), avoided here
+// by construction instead of a sweep. 64 stripes make two different
+// zones collide onto the same lock only 1-in-64 of the time at random
+// -- more than enough to eliminate the original design's actual
+// problem (one global lock, 1-in-1 collision, always) for the request
+// volumes this plugin serves, without the complexity of an exact
+// per-zone lock that would need its own lifecycle management.
+const zoneLockStripes = 64
+
+// updateLockFor returns the lock stripe for zone -- the same stripe
+// every time for the same (case- and FQDN-normalized) zone name, so
+// concurrent updates to that zone still serialize correctly against
+// each other, while updates to a different zone very likely land on a
+// different stripe and proceed independently.
+func (s *Sazu) updateLockFor(zone string) *sync.Mutex {
+	h := fnv.New32a()
+	h.Write([]byte(normalizeZone(zone)))
+	return &s.updateLocks[h.Sum32()%zoneLockStripes]
 }
 
 func (s *Sazu) Name() string { return "sazu" }
@@ -264,10 +297,11 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		return reply(dns.RcodeServerFailure, "")
 	}
 
-	log.Debugf("update for %s: waiting for updateMu (serializes all zones on this instance)", zone)
-	s.updateMu.Lock()
-	defer s.updateMu.Unlock()
-	log.Debugf("update for %s: acquired updateMu", zone)
+	lock := s.updateLockFor(zone)
+	log.Debugf("update for %s: waiting for its zone's update lock stripe", zone)
+	lock.Lock()
+	defer lock.Unlock()
+	log.Debugf("update for %s: acquired its zone's update lock stripe", zone)
 
 	zk, alreadyPinned := s.Keys.Get(zone)
 	var candidate *dns.DNSKEY

@@ -614,12 +614,19 @@ subcommand list further up for both forms.
 Worth being explicit about what this proof of concept does *not* cover, so
 a real-world test isn't mistaken for a production trial run:
 
-* **A single mutex serializes every UPDATE** this plugin instance handles,
-  across all zones. Fine for testing; a production version would want
-  per-zone locking for throughput.
 * **In-memory only if `db` is omitted.** Persistence via `db PATH` (SQLite)
   is available and tested; without it, restarting the server loses every
   onboarded zone and pinned key.
+* **`db PATH` persistence still has one shared bottleneck**, even though
+  updates to different zones now run concurrently up to that point
+  (per-zone lock stripes, not one global lock): `DB` uses a single SQLite
+  connection (`SetMaxOpenConns(1)`, since SQLite is one-writer-at-a-time
+  regardless), so concurrent zones' `CommitUpdate` calls still take their
+  turn there. In practice this is a short wait against local disk, not
+  the real outbound network round trip a chain-of-trust walk can be — the
+  bottleneck the per-zone locking above actually targets — but a
+  deployment pushing very high concurrent write volume across many zones
+  would eventually want WAL mode and/or more connections here too.
 * **NSEC, not NSEC3** for authenticated denial of existence. NSEC3 exists
   to additionally hide a zone's name set from enumeration ("zone
   walking"); that's a real but separate, opt-in privacy property, not

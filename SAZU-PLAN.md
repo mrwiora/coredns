@@ -885,6 +885,63 @@ for a manually verified real-binary walkthrough.
   graph at a compatible version, so promoting it to a direct import
   needed no `go.mod`/`go.sum` changes at all.
 
+- **Per-zone update locking, replacing the single global mutex.** The
+  known limitation this project's own README carried since early on --
+  "a single mutex serializes every UPDATE... across all zones... a
+  production version would want per-zone locking for throughput" --
+  addressed directly, on request. The actual problem it names: a
+  first-contact or KSK-rollover chain-of-trust walk is a real outbound
+  network round trip that can take a genuinely noticeable amount of
+  time, and under the original single `Sazu.updateMu`, that one zone's
+  walk blocked *every other zone's* ordinary, already-authenticated push
+  for its entire duration, even though the two share no state that
+  actually needs serializing against each other.
+
+  Considered and rejected: an exact `map[string]*sync.Mutex` keyed by
+  zone name, which would need its own lifecycle management (refcounting
+  and cleanup) to avoid reintroducing exactly the attacker-controllable
+  unbounded-growth class the per-source-IP and per-zone rate limiters
+  already had to be fixed for earlier in this effort -- a zone name in
+  an UPDATE's own question section is exactly as attacker-controlled as
+  the zone names those limiters key on. Implemented instead as a
+  fixed-size array of 64 lock stripes (`Sazu.updateLocks`,
+  `updateLockFor` hashes the normalized zone name with `hash/fnv` to
+  pick one): memory-bounded by construction, no cleanup logic needed at
+  all, and two different zone names collide onto the same stripe only
+  ~1-in-64 of the time at random -- more than enough to eliminate the
+  original all-zones-share-one-lock problem for the request volumes this
+  plugin serves. Updates to the *same* zone still serialize correctly
+  (same zone name always hashes to the same stripe); `KeyRegistry`'s own
+  internal map lock, `Store`'s, and the rest of this plugin's shared
+  state were already safe for concurrent cross-zone access on their own
+  terms -- `updateLocks` only ever needed to protect the
+  authenticate-evaluate-apply *sequence* for one zone against itself, not
+  guard those structures' own internals.
+
+  One deliberately un-addressed residual bottleneck, noted honestly
+  rather than silently left implied-fixed: `DB`'s single SQLite
+  connection (`SetMaxOpenConns(1)`) still serializes the `CommitUpdate`
+  step specifically across all zones, `database/sql` itself queuing
+  concurrent callers safely onto that one connection. This remains
+  correct and is a much smaller cost than the network round trip the
+  per-zone locking above actually targets (a short wait against local
+  disk, not a multi-second DNS walk), but a deployment pushing very high
+  concurrent write volume across many zones would eventually want
+  SQLite's WAL mode and/or more connections there too -- see the
+  README's own **Known limitations** section.
+
+  Verified with two new dedicated tests
+  (`plugin/sazu/concurrency_test.go`): one proving a slow, in-flight
+  chain-of-trust walk for one zone does *not* delay an unrelated zone's
+  ordinary push (a fake, delay-injecting `ChainValidator` stands in for
+  the real network round trip), and one firing 20 concurrent
+  differential pushes at the *same* already-onboarded zone and
+  confirming every one of them actually applied -- proving the switch to
+  striped locking didn't quietly trade throughput for a lost-update race
+  the original single mutex prevented by brute force. The full
+  `plugin/sazu` suite passes cleanly under `go test -race` across
+  repeated runs.
+
 ## Outstanding
 
 Every item the architectural review that led to this document identified
