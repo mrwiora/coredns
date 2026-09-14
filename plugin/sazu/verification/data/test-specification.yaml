@@ -484,8 +484,13 @@ areas:
       (no topology change), and a no-op (a type already present) -- for both NSEC and
       NSEC3 -- and, specifically, two new names landing in the same canonical/hash-order
       gap in one push thread correctly rather than needing a separate hand-rolled case.
+      Also specifically covers a domain in the middle of a longer (five-name) chain, with
+      two ordinary domains as neighbors rather than the apex on one side the way a smaller
+      zone's other cases unavoidably have: both an update (bitmap-only) and a full removal
+      leave both neighbors completely untouched and thread the ring correctly around the
+      gap either way.
     functions: |-
-      8 functions in chainpatch_test.go (TestComputeChainPatch*)
+      10 functions in chainpatch_test.go (TestComputeChainPatch*)
     verifies: CONTENT-14
   - id: TC-CONTENT-19
     objective: |-
@@ -493,10 +498,14 @@ areas:
       chain keeps serving a valid proof covering old and new names alike, never purged),
       and rejects a patch whose prerequisite no longer matches the server's actual current
       record outright -- nothing partially applied -- returning that actual record so the
-      client can reconcile.
+      client can reconcile. Also specifically covers removing one domain out of several via
+      an incremental patch: the removed domain stops resolving, both of its former
+      neighbors keep resolving exactly as before (never touched by the patch), and the
+      chain still produces a valid, fully-linked proof over what remains.
     functions: |-
       TestServerAcceptsIncrementalChainPatchWithoutPurging,
       TestServerRejectsStaleChainPatchAndReturnsCurrentValue,
+      TestServerRemovesInteriorDomainViaIncrementalPatch,
       TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue (prereq_test.go)
     verifies: CONTENT-14
   - id: TC-CONTENT-20
@@ -1043,7 +1052,7 @@ suite_inventory:
     count: 11
     area: CONTENT (NSEC3 chain)
   - file: chainpatch_test.go
-    count: 11
+    count: 14
     area: CONTENT (incremental NSEC/NSEC3 chain patching)
   - file: contact_test.go
     count: 10

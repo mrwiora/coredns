@@ -5,7 +5,7 @@ document:
 execution_summary:
   stats:
   - label: tests run
-    value: 2181
+    value: 2184
   - label: failures
     value: 0
   - label: errors
@@ -125,6 +125,26 @@ execution_summary:
     (<code class="inline">TestKSKRolloverDoesNotPurgeExistingChain</code>). +13 tests (12 in
     <code class="inline">plugin/sazu</code>, 1 in <code class="inline">plugin/sazu/cmd/sazuctl</code>),
     0 failures, 0 errors, also re-run clean under <code class="inline">go test -race</code>.
+  - |-
+    A ninth run answered a direct question about the eighth run's coverage -- whether a
+    domain in the *middle* of a longer chain (both neighbors ordinary domains, not the
+    apex) being updated or removed was actually tested. Checking the existing cases showed
+    every one of them touched a domain adjacent to the apex on at least one side, never a
+    genuinely interior one -- a real coverage gap, not a bug: two new unit cases
+    (<code class="inline">TestComputeChainPatchUpdatesInteriorNameNSEC</code>, <code
+    class="inline">TestComputeChainPatchRemovesInteriorNameNSEC</code>) against a five-name
+    zone confirmed <code class="inline">ComputeChainPatch</code> already handles this
+    correctly -- both of the touched domain's real neighbors are left completely untouched
+    either way. Writing the equivalent real end-to-end case
+    (<code class="inline">TestServerRemovesInteriorDomainViaIncrementalPatch</code>) caught
+    a genuine mistake in the *test's own* hand-built removal message, not the feature: it
+    deleted only the removed domain's A record via <code class="inline">RemoveRRset</code>,
+    leaving that record's own RRSIG behind as an orphan and making the domain still
+    "exist" (NODATA instead of NXDOMAIN) -- fixed by using RFC 2136 §2.5.3's
+    <code class="inline">RemoveName</code> (delete every RRset at a name at once) instead,
+    the correct form for removing a domain's content entirely. +3 tests, all in
+    <code class="inline">plugin/sazu</code>, 0 failures, 0 errors, also re-run clean under
+    <code class="inline">go test -race</code>.
 results_by_package:
   rows:
   - package: core/dnsserver
@@ -132,7 +152,7 @@ results_by_package:
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu
-    tests: '241'
+    tests: '244'
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu/cmd/sazuctl
@@ -437,7 +457,7 @@ conclusion:
     one passing automated test case, or to a manually-verified real-binary scenario for the
     small remaining subset (the real self-signed-TLS HTTPS carrier and the real three-binary
     <code class="inline">sazu-watchd</code> chain) that automated coverage reaches only
-    indirectly. The full repository test suite — 2181 tests across 110 packages, including
+    indirectly. The full repository test suite — 2184 tests across 110 packages, including
     every package this work touched directly and every pre-existing package alongside it —
     passes with 0 failures and 0 errors at commit <code class="inline">5101e77e8</code> on
     <code class="inline">feat/sazu</code>, confirmed by two consecutive clean runs (and,

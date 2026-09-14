@@ -184,6 +184,112 @@ func TestComputeChainPatchBitmapOnlyEditDoesNotChangeTopologyNSEC(t *testing.T) 
 	assertSortedTypesEqual(t, patched.TypeBitMap, []uint16{dns.TypeA, dns.TypeTXT, dns.TypeNSEC, dns.TypeRRSIG})
 }
 
+// fiveNameZoneState builds a zone with five ordinary names (plus the
+// apex) whose canonical order is unambiguous -- a.example.org. through
+// e.example.org. -- so a test touching "c" is genuinely touching an
+// interior node with two other ordinary domains as neighbors, not the
+// apex on one side the way a smaller zone's tests unavoidably do.
+func fiveNameZoneState(soa *dns.SOA) *ChainState {
+	return nsecStateFor(soa, []dns.RR{
+		soa,
+		testA("a.example.org.", net.IPv4(203, 0, 113, 1)),
+		testA("b.example.org.", net.IPv4(203, 0, 113, 2)),
+		testA("c.example.org.", net.IPv4(203, 0, 113, 3)),
+		testA("d.example.org.", net.IPv4(203, 0, 113, 4)),
+		testA("e.example.org.", net.IPv4(203, 0, 113, 5)),
+	})
+}
+
+// TestComputeChainPatchUpdatesInteriorNameNSEC proves an update to a
+// domain in the middle of a longer chain -- both its predecessor ("b")
+// and successor ("d") are ordinary domains, not the apex, unlike every
+// other edit test in this file -- patches only that one record and
+// leaves both neighbors completely untouched.
+func TestComputeChainPatchUpdatesInteriorNameNSEC(t *testing.T) {
+	soa := testSOA(1)
+	state := fiveNameZoneState(soa)
+	beforeC := state.Records["c.example.org."].(*dns.NSEC)
+	beforeB := state.Records["b.example.org."]
+	beforeD := state.Records["d.example.org."]
+	if beforeC.NextDomain != "d.example.org." {
+		t.Fatalf("test setup: expected c's successor to be d, got %s", beforeC.NextDomain)
+	}
+
+	patch, err := ComputeChainPatch(state, []ChainOp{{Name: "c.example.org.", Type: dns.TypeTXT, Add: true}})
+	if err != nil {
+		t.Fatalf("ComputeChainPatch: %v", err)
+	}
+	if len(patch.Adds) != 1 || len(patch.Deletes) != 0 || len(patch.Prerequisites) != 1 {
+		t.Fatalf("expected exactly 1 add, 0 deletes, 1 prerequisite, got adds=%+v deletes=%+v prereqs=%+v",
+			patch.Adds, patch.Deletes, patch.Prerequisites)
+	}
+	patched := patch.Adds[0].(*dns.NSEC)
+	if !strings.EqualFold(patched.Hdr.Name, "c.example.org.") {
+		t.Fatalf("expected the patched record to still be at c.example.org., got %s", patched.Hdr.Name)
+	}
+	if patched.NextDomain != "d.example.org." {
+		t.Fatalf("expected NextDomain to stay d.example.org. (no topology change), got %s", patched.NextDomain)
+	}
+	assertSortedTypesEqual(t, patched.TypeBitMap, []uint16{dns.TypeA, dns.TypeTXT, dns.TypeNSEC, dns.TypeRRSIG})
+
+	after := applyPatch(state.Records, patch)
+	if !rrEqualContent(after["b.example.org."], beforeB) {
+		t.Fatalf("expected b (c's predecessor) to be untouched, got %+v (was %+v)", after["b.example.org."], beforeB)
+	}
+	if !rrEqualContent(after["d.example.org."], beforeD) {
+		t.Fatalf("expected d (c's successor) to be untouched, got %+v (was %+v)", after["d.example.org."], beforeD)
+	}
+	walkNSECRing(t, after, "example.org.", []string{
+		"example.org.", "a.example.org.", "b.example.org.", "c.example.org.", "d.example.org.", "e.example.org.",
+	})
+}
+
+// TestComputeChainPatchRemovesInteriorNameNSEC is the same setup for a
+// full removal: "c" is removed entirely, its predecessor "b" is patched
+// to skip straight to "d" (c's old successor), and "d" itself -- despite
+// being the node c's removal logically "points past" -- is never touched
+// at all, since removing c only changes who points AT d, not d's own
+// record.
+func TestComputeChainPatchRemovesInteriorNameNSEC(t *testing.T) {
+	soa := testSOA(1)
+	state := fiveNameZoneState(soa)
+	beforeD := state.Records["d.example.org."]
+
+	patch, err := ComputeChainPatch(state, []ChainOp{{Name: "c.example.org.", Type: dns.TypeA, Add: false}})
+	if err != nil {
+		t.Fatalf("ComputeChainPatch: %v", err)
+	}
+	if len(patch.Adds) != 1 {
+		t.Fatalf("expected exactly 1 add (patched predecessor b), got %d: %+v", len(patch.Adds), patch.Adds)
+	}
+	patchedB := patch.Adds[0].(*dns.NSEC)
+	if !strings.EqualFold(patchedB.Hdr.Name, "b.example.org.") {
+		t.Fatalf("expected the patched record to be b.example.org. (c's predecessor), got %s", patchedB.Hdr.Name)
+	}
+	if patchedB.NextDomain != "d.example.org." {
+		t.Fatalf("expected b's NextDomain to skip straight to d.example.org., got %s", patchedB.NextDomain)
+	}
+	if len(patch.Deletes) != 1 || !strings.EqualFold(patch.Deletes[0].Header().Name, "c.example.org.") {
+		t.Fatalf("expected exactly 1 delete, for c.example.org., got %+v", patch.Deletes)
+	}
+	if len(patch.Prerequisites) != 2 {
+		t.Fatalf("expected 2 prerequisites (b + the removed c itself), got %d: %+v", len(patch.Prerequisites), patch.Prerequisites)
+	}
+	for _, rr := range patch.Adds {
+		if strings.EqualFold(rr.Header().Name, "d.example.org.") {
+			t.Fatalf("expected d (c's successor) to never be touched by removing c, got %+v", rr)
+		}
+	}
+
+	after := applyPatch(state.Records, patch)
+	if !rrEqualContent(after["d.example.org."], beforeD) {
+		t.Fatalf("expected d to be completely unchanged, got %+v (was %+v)", after["d.example.org."], beforeD)
+	}
+	walkNSECRing(t, after, "example.org.", []string{
+		"example.org.", "a.example.org.", "b.example.org.", "d.example.org.", "e.example.org.",
+	})
+}
+
 func TestComputeChainPatchNoOpWhenTypeAlreadyPresent(t *testing.T) {
 	soa := testSOA(1)
 	state := nsecStateFor(soa, []dns.RR{soa, testA("www.example.org.", net.IPv4(203, 0, 113, 10))})
@@ -490,6 +596,106 @@ func TestKSKRolloverDoesNotPurgeExistingChain(t *testing.T) {
 		}
 		if err := sig.Verify(oldKey, []dns.RR{n}); err != nil {
 			t.Fatalf("NSEC3 at %s's original RRSIG no longer verifies after rollover: %v", n.Hdr.Name, err)
+		}
+	}
+}
+
+// TestServerRemovesInteriorDomainViaIncrementalPatch is the real,
+// end-to-end version of TestComputeChainPatchRemovesInteriorNameNSEC:
+// a five-domain zone, pushed and served for real, has one interior
+// domain ("c", with two ordinary domains as neighbors, not the apex)
+// removed via an actual partial push carrying an incremental chain
+// patch -- proving the removed name stops resolving, both of its former
+// neighbors keep resolving exactly as before, and the chain still
+// produces a valid, fully-linked NSEC3 proof over the four domains that
+// remain.
+func TestServerRemovesInteriorDomainViaIncrementalPatch(t *testing.T) {
+	s := newTestSazu("example.org.")
+	addr := serveThroughRealServer(t, s)
+
+	key, priv, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatalf("generating key: %v", err)
+	}
+	soa := testSOA(1)
+	rrs := []dns.RR{
+		testA("a.example.org.", net.IPv4(203, 0, 113, 1)),
+		testA("b.example.org.", net.IPv4(203, 0, 113, 2)),
+		testA("c.example.org.", net.IPv4(203, 0, 113, 3)),
+		testA("d.example.org.", net.IPv4(203, 0, 113, 4)),
+		testA("e.example.org.", net.IPv4(203, 0, 113, 5)),
+	}
+	onboard, err := BuildFullZonePushNSEC3("example.org.", soa, rrs, key, priv, nil, NSEC3Options{})
+	if err != nil {
+		t.Fatalf("building onboarding push: %v", err)
+	}
+	now := time.Now()
+	wire, err := SignUpdate(onboard, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("signing onboarding push: %v", err)
+	}
+	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	state := nsec3StateFor(soa, append([]dns.RR{soa, key}, rrs...), NSEC3Options{})
+	patch, err := ComputeChainPatch(state, []ChainOp{{Name: "c.example.org.", Type: dns.TypeA, Add: false}})
+	if err != nil {
+		t.Fatalf("ComputeChainPatch: %v", err)
+	}
+	if len(patch.Adds) != 1 || len(patch.Deletes) != 1 {
+		t.Fatalf("expected exactly 1 patched neighbor and 1 delete, got adds=%+v deletes=%+v", patch.Adds, patch.Deletes)
+	}
+	signed, err := SignZoneContent(patch.Adds, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("signing chain patch: %v", err)
+	}
+
+	m := new(dns.Msg)
+	m.SetUpdate("example.org.")
+	m.Used(patch.Prerequisites)
+	m.Insert(signed)
+	// RFC 2136 §2.5.3 "delete all RRsets from a name" -- not
+	// RemoveRRset(A), which would leave c's now-orphaned RRSIG(A)
+	// behind and make c.example.org. still "exist" (NODATA rather than
+	// NXDOMAIN): removing a name's real content needs to take every
+	// RRset there with it, chain record aside (that one lives under a
+	// completely different owner key -- the hash -- and is removed
+	// separately, just below).
+	m.RemoveName([]dns.RR{testA("c.example.org.", nil)})
+	m.RemoveRRset(patch.Deletes) // remove c's own chain record
+	wire, err = SignUpdate(m, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("signing transaction: %v", err)
+	}
+	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("removal push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	if resp := queryDO(t, addr, "c.example.org.", dns.TypeA); resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("c.example.org. rcode = %s, want NXDOMAIN (removed)", dns.RcodeToString[resp.Rcode])
+	}
+	for _, name := range []string{"a.example.org.", "b.example.org.", "d.example.org.", "e.example.org."} {
+		if answer := queryDO(t, addr, name, dns.TypeA); len(answer.Answer) != 2 { // A + RRSIG
+			t.Fatalf("expected %s to still resolve untouched, got %+v", name, answer.Answer)
+		}
+	}
+
+	resp := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	n3s, sigs := splitNSEC3AndRRSIGs(resp.Ns)
+	if len(n3s) == 0 {
+		t.Fatalf("expected the chain to still produce an NSEC3 proof after removing an interior domain, got %+v", resp.Ns)
+	}
+	for _, n := range n3s {
+		sig, ok := sigs[strings.ToLower(n.Hdr.Name)]
+		if !ok {
+			t.Fatalf("NSEC3 at %s has no covering RRSIG", n.Hdr.Name)
+		}
+		if err := sig.Verify(key, []dns.RR{n}); err != nil {
+			t.Fatalf("NSEC3 at %s's RRSIG does not verify: %v", n.Hdr.Name, err)
 		}
 	}
 }
