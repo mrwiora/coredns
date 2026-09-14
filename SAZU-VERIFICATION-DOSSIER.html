@@ -248,10 +248,10 @@
 
 <div class="coversheet">
   <table>
-    <tr><td class="k">Document set</td><td class="v">SAZU-REQ-1.1 &middot; SAZU-TS-1.1 &middot; SAZU-TR-1.1</td></tr>
+    <tr><td class="k">Document set</td><td class="v">SAZU-REQ-1.2 &middot; SAZU-TS-1.2 &middot; SAZU-TR-1.2</td></tr>
     <tr><td class="k">Subject system</td><td class="v">SAZU on CoreDNS — <code class="inline">plugin/sazu</code>, <code class="inline">plugin/sazu/cmd/*</code>, <code class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code></td></tr>
-    <tr><td class="k">Branch / commit</td><td class="v">feat/sazu @ <code class="inline">e0583f38c</code></td></tr>
-    <tr><td class="k">Status</td><td class="v"><span class="pill ok">all requirements implemented</span> &nbsp;<span class="pill ok">2125/2125 tests passing</span></td></tr>
+    <tr><td class="k">Branch / commit</td><td class="v">feat/sazu @ <code class="inline">5101e77e8</code></td></tr>
+    <tr><td class="k">Status</td><td class="v"><span class="pill ok">all requirements implemented</span> &nbsp;<span class="pill ok">2151/2151 tests passing</span></td></tr>
     <tr><td class="k">Derivation</td><td class="v">Requirements traced to the SAZU protocol design (§4–§12) and 14 governing RFCs; test cases traced to the actual Go test suite; results from a full <code class="inline">go test ./...</code> run.</td></tr>
   </table>
 </div>
@@ -468,6 +468,8 @@
     <tr><td class="reqid">CLIENT-03</td><td>The client SHALL print actionable, registrar-aware guidance when a push is denied with <code class="inline">ERR_NO_DS_PUBLISHED</code> or <code class="inline">ERR_UNKNOWN_SIGNER</code>.</td><td class="src">§12 (operator experience)</td></tr>
     <tr><td class="reqid">CLIENT-04</td><td>The client SHALL provide a decision-support command for key rotation that, given no explicit role, explains the KSK-vs-ZSK tradeoff and takes no action until the operator chooses explicitly; given a role, it SHALL perform that rotation (registering a new ZSK and retiring the old one, or an ordinary KSK rollover).</td><td class="src">Engineering decision (operator experience)</td></tr>
     <tr><td class="reqid">CLIENT-05</td><td>The client SHALL choose a connection-oriented transport (TCP) for any first-contact- or KSK-rollover-shaped push regardless of message size, since a compliant server refuses either over plain UDP (SEC-01) irrespective of how small the message is.</td><td class="src">SEC-01 (engineering decision)</td></tr>
+    <tr><td class="reqid">CLIENT-06</td><td>The client SHALL default to TCP, unconditionally, for every push to a <code class="inline">host:port</code> target — not chosen by message size — since TCP always works regardless of size or path MTU; a push kind the server can actually accept over UDP MAY opt back in via an explicit flag, which SHALL still fall back to TCP with a clear warning if the resulting message would not fit in one safe UDP datagram.</td><td class="src">Engineering decision (reconsidered default)</td></tr>
+    <tr><td class="reqid">CLIENT-07</td><td>The client SHALL provide a way to create a starter zone definition for a new domain, including an optional, friendlier format for the two SOA fields most commonly written incorrectly by hand (the serial number and the responsible-party mailbox encoding), convertible to and usable interchangeably with an ordinary BIND-format zone file.</td><td class="src">Engineering decision (operator experience)</td></tr>
   </table></div>
 </section>
 
@@ -476,7 +478,7 @@
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Category</th></tr>
     <tr><td class="reqid">NFR-01</td><td>The server SHALL require no cgo dependency (pure-Go SQLite driver), preserving CoreDNS's static-build/cross-compilation properties.</td><td class="src">Portability</td></tr>
-    <tr><td class="reqid">NFR-02</td><td>UPDATE handling for one plugin instance SHALL be serialized (a single mutex) sufficient for onboarding/manual-push volumes; documented as a throughput, not correctness, limitation.</td><td class="src">Concurrency</td></tr>
+    <tr><td class="reqid">NFR-02</td><td>UPDATE handling for a given zone SHALL be serialized against itself; UPDATEs for different zones SHALL be able to proceed concurrently, via a fixed-size set of lock stripes rather than one lock per zone name, so memory stays bounded regardless of how many distinct zone names are presented.</td><td class="src">Concurrency</td></tr>
     <tr><td class="reqid">NFR-03</td><td>A persistence failure SHALL never leave in-memory and on-disk state disagreeing about whether an update applied.</td><td class="src">Consistency</td></tr>
     <tr><td class="reqid">NFR-04</td><td>Adding HTTPS/HTTP3 opcode support SHALL NOT change behaviour for a Config that never opts an extra opcode in.</td><td class="src">Backward compatibility</td></tr>
     <tr><td class="reqid">NFR-05</td><td>All defaults SHALL be safe-by-default; insecure modes SHALL require explicit, clearly-named opt-in (<code class="inline">insecure_skip_chain_validation</code>).</td><td class="src">Security posture</td></tr>
@@ -487,7 +489,7 @@
   <h2><span class="secno">5</span> Traceability summary</h2>
   <p>Every requirement above is verified by at least one automated test case; the mapping is maintained in the companion <a href="#" onclick="document.querySelector('[data-doc=test]').click();return false;">Test Specification</a> (§3, per-area tables) and its execution recorded in the <a href="#" onclick="document.querySelector('[data-doc=report]').click();return false;">Test Report</a> (§3). No requirement in this document is currently unverified or outstanding.</p>
   <div class="stats">
-    <div class="stat"><div class="v ok">82</div><div class="l">requirements specified</div></div>
+    <div class="stat"><div class="v ok">84</div><div class="l">requirements specified</div></div>
     <div class="stat"><div class="v ok">13</div><div class="l">functional areas</div></div>
     <div class="stat"><div class="v ok">5</div><div class="l">non-functional</div></div>
     <div class="stat"><div class="v ok">0</div><div class="l">unimplemented</div></div>
@@ -517,6 +519,7 @@
       <a class="l2" href="#ts-watch">3.11 WATCH</a>
       <a class="l2" href="#ts-persist">3.12 PERSIST</a>
       <a class="l2" href="#ts-client">3.13 CLIENT</a>
+      <a class="l2" href="#ts-nfr">3.14 NFR</a>
       <a href="#ts-4">4 Automated suite inventory</a>
       <a href="#ts-5">5 Manual / real-binary verification</a>
     </nav>
@@ -714,6 +717,20 @@
     <tr><td class="tcid">TC-CLIENT-03</td><td>The rotate-key decision text actually branches on whether a ZSK already exists — naming its key tag when one does, pointing at <code class="inline">add-zsk</code> first when none does — rather than printing the same generic advice regardless of zone state.</td><td class="mono">TestRotateKeyChoiceGuidanceReflectsWhetherAZSKExists</td><td>CLIENT-04</td></tr>
     <tr><td class="tcid">TC-CLIENT-04</td><td>The small display/parsing helpers the CLI and its guidance depend on — DNSKEY flags to a KSK/ZSK label, algorithm number to name, and the <code class="inline">-role</code> flag's three cases — are correct.</td><td class="mono">TestKeyTypeLabelAndAlgorithmLabel, TestParseRoleFlag</td><td>CLIENT-01</td></tr>
     <tr><td class="tcid">TC-CLIENT-05</td><td>End-to-end through the real CLI entry points: the KSK use case (see TC-KEY-18) and the ZSK use case (see TC-KEY-19), each driving the actual <code class="inline">run*</code> subcommand functions <code class="inline">main</code> itself dispatches to against a real server — not a direct call into the plugin package.</td><td class="mono">TestE2EKSKFullLifecycle, TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>CLIENT-01, CLIENT-02, CLIENT-04, CLIENT-05</td></tr>
+    <tr><td class="tcid">TC-CLIENT-06</td><td>The transport decision is TCP regardless of message size by default, opts into UDP only when explicitly allowed and the message actually fits, and falls back to TCP with a specific, informative warning otherwise.</td><td class="mono">TestChooseNetworkDefaultsToTCPRegardlessOfSize, TestChooseNetworkAllowUDPUsesUDPWhenItFits, TestChooseNetworkAllowUDPFallsBackToTCPWithWarningWhenTooLarge</td><td>CLIENT-06</td></tr>
+    <tr><td class="tcid">TC-CLIENT-07</td><td>An ordinary email address converts to the correct RFC&nbsp;1035 §8.13 SOA mailbox encoding, including escaping a literal dot in the local part; a malformed address is rejected.</td><td class="mono">TestEmailToMboxConvertsOrdinaryAddress, TestEmailToMboxEscapesLiteralDotsInLocalPart, TestEmailToMboxRejectsAddressWithoutAt</td><td>CLIENT-07</td></tr>
+    <tr><td class="tcid">TC-CLIENT-08</td><td>An SOA serial of <code class="inline">"auto"</code> or empty resolves to today's date as YYYYMMDD00; an explicit numeric serial is used as given; a non-numeric, non-"auto" value is rejected.</td><td class="mono">TestResolveSerialAutoIsTodayAsYYYYMMDD00, TestResolveSerialEmptyIsAlsoAuto, TestResolveSerialAcceptsExplicitNumber, TestResolveSerialRejectsGarbage, TestDateSerialFormat</td><td>CLIENT-07</td></tr>
+    <tr><td class="tcid">TC-CLIENT-09</td><td>A YAML zone definition converts to the same (SOA, records) shape a real zone file produces — apex/relative/absolute record names resolve correctly, a record's own TTL overrides the zone default, and required fields (SOA nameserver, mailbox source, record type/value) are enforced — round-tripping correctly through an actual file on disk, and <code class="inline">push-zone</code>'s own loader dispatches to it purely by file extension.</td><td class="mono">TestRecordOwnerNameResolvesApexRelativeAndAbsolute, TestYamlZoneToRRsBuildsSOAAndRecords, TestYamlZoneToRRsRejectsMissingAdminEmailOrMbox, TestYamlZoneToRRsRejectsMissingNS, TestYamlZoneToRRsFallsBackToGivenZoneWhenFileOmitsIt, TestYamlZoneToRRsRejectsRecordWithoutTypeOrValue, TestLoadYAMLZoneRoundTripsThroughAFile, TestLoadZoneSourceDispatchesOnExtension</td><td>CLIENT-07</td></tr>
+    <tr><td class="tcid">TC-CLIENT-10</td><td>End-to-end: <code class="inline">init-zone</code> writes a starter YAML definition <code class="inline">push-zone</code> accepts directly (no conversion step) and which onboards correctly; it refuses to overwrite an existing file; <code class="inline">zone-convert</code>'s generated BIND-format output is itself directly pushable.</td><td class="mono">TestE2EInitZoneThenPushZoneWithYAML, TestE2EInitZoneRefusesToOverwriteExistingFile, TestE2EZoneConvertProducesAPushableZoneFile</td><td>CLIENT-07</td></tr>
+  </table></div>
+
+  <h3 class="subhead" id="ts-nfr"><span class="secno">3.14</span> NFR</h3>
+  <p class="sec-abstract">Non-functional requirements (§4 of the Requirements Specification) are mostly verified by the rest of the suite passing at all rather than a dedicated test file of their own: NFR-01 (no cgo) by every package here building and testing successfully with CGO_ENABLED implicitly unset; NFR-03 (persistence consistency) by the PERSIST area's transactional-rollback cases (TC-PERSIST is in §3.12); NFR-04 (HTTPS/HTTP3 backward compatibility) by CARRIER's regression-baseline cases (§3.8); NFR-05 (safe defaults) by every chain-of-trust/algorithm-floor/rate-limiting case throughout this catalogue passing with its respective safeguard left at its default. NFR-02 (per-zone, not global, update serialization) is the one specific enough to warrant its own dedicated tests.</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>
+    <tr><td class="tcid">TC-NFR-01</td><td>The per-zone lock stripe is a pure, stable function of the (case/FQDN-normalized) zone name, and a realistic number of distinct zone names spreads across most of the available stripes rather than colliding onto a handful.</td><td class="mono">TestUpdateLockForIsStableForTheSameZone, TestUpdateLockForSpreadsAcrossStripes</td><td>NFR-02</td></tr>
+    <tr><td class="tcid">TC-NFR-02</td><td>End-to-end: a slow, in-flight first-contact chain-of-trust walk for one zone (a fake, delay-injecting validator standing in for the real network round trip) does not delay an unrelated, already-authenticated push to a different zone.</td><td class="mono">TestConcurrentUpdatesToDifferentZonesDoNotSerialize</td><td>NFR-02</td></tr>
+    <tr><td class="tcid">TC-NFR-03</td><td>Switching from one global lock to per-zone stripes does not weaken correctness for the *same* zone: 20 concurrent differential pushes to one already-onboarded zone all still apply, with none silently lost to a race.</td><td class="mono">TestConcurrentUpdatesToSameZoneStillSerializeCorrectly</td><td>NFR-02</td></tr>
   </table></div>
 </section>
 
@@ -744,8 +761,10 @@
     <tr><td class="mono">https_test.go</td><td class="num">3</td><td>CARRIER</td></tr>
     <tr><td class="mono">zsk_test.go</td><td class="num">8</td><td>KEY (ZSK lifecycle, end to end)</td></tr>
     <tr><td class="mono">keys_test.go</td><td class="num">9</td><td>KEY (registry, KSK + optional ZSKs)</td></tr>
-    <tr><td class="mono">cmd/sazuctl/main_test.go</td><td class="num">5</td><td>CLIENT (guidance templates, small helpers)</td></tr>
-    <tr><td class="mono">cmd/sazuctl/e2e_test.go</td><td class="num">3</td><td>CLIENT (CLI-level, end to end: KSK and ZSK use cases)</td></tr>
+    <tr><td class="mono">cmd/sazuctl/zoneyaml_test.go</td><td class="num">16</td><td>CLIENT (YAML zone format conversion)</td></tr>
+    <tr><td class="mono">cmd/sazuctl/main_test.go</td><td class="num">8</td><td>CLIENT (guidance templates, transport choice, small helpers)</td></tr>
+    <tr><td class="mono">cmd/sazuctl/e2e_test.go</td><td class="num">6</td><td>CLIENT (CLI-level, end to end: KSK/ZSK use cases, init-zone/zone-convert)</td></tr>
+    <tr><td class="mono">concurrency_test.go</td><td class="num">4</td><td>NFR (per-zone update locking)</td></tr>
     <tr><td class="mono">algorithm_test.go</td><td class="num">2</td><td>ALGO</td></tr>
     <tr><td class="mono">cmd/sazu_watchd/alert_test.go</td><td class="num">7</td><td>WATCH (notifier)</td></tr>
     <tr><td class="mono">cmd/sazu_watchd/watch_test.go</td><td class="num">6</td><td>WATCH (check loop)</td></tr>
@@ -787,7 +806,7 @@
 <section id="tr-1">
   <h2><span class="secno">1</span> Execution summary</h2>
   <div class="stats">
-    <div class="stat"><span class="stat-n">2125</span><span class="stat-l">tests run</span></div>
+    <div class="stat"><span class="stat-n">2151</span><span class="stat-l">tests run</span></div>
     <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">failures</span></div>
     <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">errors</span></div>
     <div class="stat"><span class="stat-n">2</span><span class="stat-l">skipped</span></div>
@@ -797,11 +816,11 @@
     <tr><th>Item</th><th>Value</th></tr>
     <tr><td>Command</td><td class="mono">go test -json ./...</td></tr>
     <tr><td>Result</td><td><span class="pill ok">PASS</span> (exit code 0)</td></tr>
-    <tr><td>Commit</td><td class="mono">e0583f38c</td></tr>
+    <tr><td>Commit</td><td class="mono">5101e77e8</td></tr>
     <tr><td>Branch</td><td class="mono">feat/sazu</td></tr>
     <tr><td>Report format</td><td>JUnit XML, generated from the JSON stream via <code class="inline">go-junit-report v2</code></td></tr>
   </table></div>
-  <p>This is the third full run performed during this engineering effort. The first, at commit <code class="inline">c9abc9c34</code>, recorded 2078 tests; the second, at <code class="inline">1c6eacb0e</code>, recorded 2099. The further 26-test increase reflects the optional KSK/ZSK split (§9.1's model extended, keys.go/handler.go/sign.go/push.go/db.go) and its dedicated test suites — unit-level (<code class="inline">keys_test.go</code>, <code class="inline">db_test.go</code>), integration-level (<code class="inline">zsk_test.go</code>, a real server driven through the plugin package's own API), and CLI-level end-to-end (<code class="inline">cmd/sazuctl/e2e_test.go</code> and <code class="inline">main_test.go</code>, the real <code class="inline">sazuctl</code> subcommand entry points against a real server). All three runs are 0 failures, 0 errors; this run was additionally repeated once immediately afterward, also 0 failures, to confirm a transport-level test flake found and fixed in the same pass (see §6) was not a recurring source of instability.</p>
+  <p>This is the fourth full run performed during this engineering effort. The first, at commit <code class="inline">c9abc9c34</code>, recorded 2078 tests; the second, at <code class="inline">1c6eacb0e</code>, recorded 2099; the third, at <code class="inline">e0583f38c</code>, recorded 2125. The further 26-test increase reflects the optional YAML zone format and friendlier transport defaults added to <code class="inline">sazuctl</code> (<code class="inline">zoneyaml_test.go</code>, additional <code class="inline">main_test.go</code>/<code class="inline">e2e_test.go</code> cases), plus the four new tests directly verifying the per-zone update-locking change (<code class="inline">concurrency_test.go</code>) documented in §6. All four runs are 0 failures, 0 errors; this run was additionally repeated once immediately afterward under <code class="inline">go test -race</code>, also 0 failures, specifically to confirm the locking change introduced no data race.</p>
 </section>
 
 <section id="tr-2">
@@ -809,14 +828,14 @@
   <div class="wrap"><table class="spec">
     <tr><th>Package</th><th class="num">Tests</th><th>Result</th></tr>
     <tr><td class="mono">core/dnsserver</td><td class="num">221</td><td><span class="pill ok">PASS</span></td></tr>
-    <tr><td class="mono">plugin/sazu</td><td class="num">212</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td class="mono">plugin/sazu</td><td class="num">216</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td class="mono">plugin/sazu/cmd/sazuctl</td><td class="num">30</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td class="mono">plugin/pkg/doh</td><td class="num">15</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td class="mono">plugin/sazu/cmd/sazu_watchd</td><td class="num">13</td><td><span class="pill ok">PASS</span></td></tr>
-    <tr><td class="mono">plugin/sazu/cmd/sazuctl</td><td class="num">8</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td class="mono">plugin/pkg/dnsutil</td><td class="num">10</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td class="mono">(remaining 104 pre-existing CoreDNS packages, unmodified by this work)</td><td class="num">1646</td><td><span class="pill ok">PASS</span> (2 skipped)</td></tr>
   </table></div>
-  <p>The counts for the three packages this work modified directly at the core-integration layer (<code class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code>) include their full pre-existing test suites plus the additions listed in the companion Test Specification §3.8 — every pre-existing CoreDNS behavior in these packages was re-verified alongside the new HTTPS/JSON carrier logic, not just the new code paths. <code class="inline">plugin/sazu/cmd/sazuctl</code> previously had no test files at all (see the earlier revision of this report) — it is a genuinely new row, not a growth of an existing one, added alongside the KSK/ZSK CLI work (§3.13 CLIENT in the Test Specification).</p>
+  <p>The counts for the three packages this work modified directly at the core-integration layer (<code class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code>) include their full pre-existing test suites plus the additions listed in the companion Test Specification §3.8 — every pre-existing CoreDNS behavior in these packages was re-verified alongside the new HTTPS/JSON carrier logic, not just the new code paths. <code class="inline">plugin/sazu/cmd/sazuctl</code>'s count nearly quadrupled this round (8 → 30) purely from the YAML zone format and transport-default test suites — no change to how it's exercised, just how much of it now has direct coverage.</p>
 </section>
 
 <section id="tr-3">
@@ -836,9 +855,10 @@
     <tr><td>OPS</td><td>TC-OPS-01 … 03</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td>WATCH</td><td>TC-WATCH-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td>PERSIST</td><td>TC-PERSIST-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>
-    <tr><td>CLIENT</td><td>TC-CLIENT-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>CLIENT</td><td>TC-CLIENT-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>NFR</td><td>TC-NFR-01 … 03</td><td><span class="pill ok">PASS</span></td></tr>
   </table></div>
-  <p>CLIENT requirements are now directly and automatically tested, not just exercised indirectly: <code class="inline">cmd/sazuctl/e2e_test.go</code> drives the actual <code class="inline">run*</code> subcommand entry points (the same code <code class="inline">main</code> dispatches to for a real command-line invocation) against a real <code class="inline">dnsserver.Server</code>, and <code class="inline">main_test.go</code> covers the embedded guidance templates and small CLI helpers directly. A small remaining slice — the real self-signed-TLS HTTPS carrier and the real three-binary <code class="inline">sazu-watchd</code> chain — is still manual/real-binary only; see Test Specification §5 and this report's §5 for that coverage.</p>
+  <p>CLIENT requirements are directly and automatically tested, not just exercised indirectly: <code class="inline">cmd/sazuctl/e2e_test.go</code> drives the actual <code class="inline">run*</code> subcommand entry points (the same code <code class="inline">main</code> dispatches to for a real command-line invocation) against a real <code class="inline">dnsserver.Server</code>, and <code class="inline">main_test.go</code>/<code class="inline">zoneyaml_test.go</code> cover the embedded guidance templates, transport-choice logic, and YAML zone conversion directly. A small remaining slice — the real self-signed-TLS HTTPS carrier and the real three-binary <code class="inline">sazu-watchd</code> chain — is still manual/real-binary only; see Test Specification §5 and this report's §5 for that coverage. NFR is a new area this revision, verifying NFR-02 (per-zone, not global, update serialization) specifically — see Test Specification §3.14 for why the other four non-functional requirements don't have their own dedicated test files.</p>
 </section>
 
 <section id="tr-4">
@@ -875,14 +895,16 @@
     <tr><td>4</td><td>Both sliding-window rate limiters accumulated one map entry per distinct key (zone name or source address) forever, with no eviction.</td><td>Medium — unbounded memory growth under sustained scanning or churn, a slow denial-of-service against the server process itself.</td><td><code class="inline">sweepIfDue</code> (§SEC-04) added: both limiters garbage-collect entries older than one window, at most once per window, bounding memory to recently active keys.</td></tr>
     <tr><td>5</td><td>Every rejected update attempt, including the two rejection reasons above, was written to the audit-trail database — an attacker who could trigger cheap rejections (a malformed transport or exhausted quota) could grow the audit table without bound.</td><td>Medium — unbounded disk growth, independent of the memory fix in item 4.</td><td>Transport-gate and rate-limit rejections (§SEC-05) are explicitly excluded from audit-trail recording; genuine authentication/chain-of-trust failures remain fully audited, since those require real per-attempt cryptographic work by the attacker and are inherently self-limiting.</td></tr>
     <tr><td>6</td><td>The first hand-written test for the UDP-transport gate used <code class="inline">BuildFullZonePush</code> (SOA + NSEC + RRSIGs), producing a message over 512 bytes and tripping RFC&nbsp;1035's UDP truncation before ever reaching the new gate — a false pass for the wrong reason.</td><td>None (test-authoring issue, caught before merge).</td><td>Discovered that <code class="inline">containsAPEXSOA</code> is checked <em>after</em> the chain-of-trust walk, meaning the smallest real attack packet needs only a DNSKEY-add + SIG(0). Rewrote using a new <code class="inline">minimalFirstContactWire</code> helper matching that minimal, realistic shape — a more accurate test of the actual threat.</td></tr>
-    <tr><td>7</td><td><code class="inline">sazuctl</code>'s UDP-vs-TCP transport choice was purely message-size-based; a small <code class="inline">rotate-key -role ksk</code> push — a real KSK rollover, which SEC-01 requires a connection-oriented transport for regardless of size — went out over plain UDP and was correctly, but unhelpfully, refused (<code class="inline">ERR_TRANSPORT_NOT_ALLOWED</code>) by a fully compliant server.</td><td>Low (usability/correctness for a real operator workflow, not a security gap — the server-side gate this ran into is exactly what SEC-01 requires).</td><td>Found by the new CLI-level end-to-end tests (<code class="inline">cmd/sazuctl/e2e_test.go</code>), which exercise the real subcommand entry points end to end rather than sending directly over TCP the way earlier in-process tests did. Fixed with a <code class="inline">forceTCP</code> parameter on <code class="inline">signSelfVerifyAndSend</code>, set for every first-contact- or KSK-rollover-shaped push (<code class="inline">push</code>, <code class="inline">push-zone</code>, <code class="inline">rotate-key -role ksk</code>) regardless of message size; every other push kind keeps the original, size-based choice.</td></tr>
-    <tr><td>8</td><td>A new CLI-level end-to-end test's own server-startup helper bound a UDP port, then bound TCP to that exact same port number — a narrow TOCTOU race that, under load from the rest of the suite running concurrently, occasionally lost that port to something else in the gap between the two calls, failing the test with a bind error unrelated to anything it was actually testing.</td><td>None (test-infrastructure flakiness, not a product defect — confirmed by two consecutive clean full-suite runs after the fix).</td><td>Added a small bounded retry (fresh UDP port, retry the TCP bind) to the affected helper.</td></tr>
+    <tr><td>7</td><td><code class="inline">sazuctl</code>'s UDP-vs-TCP transport choice was purely message-size-based; a small <code class="inline">rotate-key -role ksk</code> push — a real KSK rollover, which SEC-01 requires a connection-oriented transport for regardless of size — went out over plain UDP and was correctly, but unhelpfully, refused (<code class="inline">ERR_TRANSPORT_NOT_ALLOWED</code>) by a fully compliant server.</td><td>Low (usability/correctness for a real operator workflow, not a security gap — the server-side gate this ran into is exactly what SEC-01 requires).</td><td>Found by the new CLI-level end-to-end tests (<code class="inline">cmd/sazuctl/e2e_test.go</code>), which exercise the real subcommand entry points end to end rather than sending directly over TCP the way earlier in-process tests did. Fixed first with a size-conditional <code class="inline">forceTCP</code> override for first-contact/rollover pushes specifically, then generalized: reconsidered on request, TCP became the unconditional default for every push (<code class="inline">chooseNetwork</code>, CLIENT-06), with UDP an explicit, per-command opt-in that itself still falls back to TCP with a warning if the message wouldn't fit.</td></tr>
+    <tr><td>8</td><td>A new CLI-level end-to-end test's own server-startup helper bound a UDP port, then bound TCP to that exact same port number — a narrow TOCTOU race that, under load from the rest of the suite running concurrently, occasionally lost that port to something else in the gap between the two calls, failing the test with a bind error unrelated to anything it was actually testing.</td><td>None (test-infrastructure flakiness, not a product defect — confirmed by two consecutive clean full-suite runs after the fix).</td><td>Added a small bounded retry (fresh UDP port, retry the TCP bind) to the affected helper (<code class="inline">cmd/sazuctl/e2e_test.go</code>).</td></tr>
+    <tr><td>9</td><td>The identical UDP/TCP port-binding race (item 8) recurred in a second, older test helper -- <code class="inline">plugin/sazu/handler_test.go</code>'s <code class="inline">serveThroughRealServer</code>, used throughout this package's own test suite -- surfaced by a real failure under <code class="inline">go test -race</code> while verifying the per-zone update-locking change (NFR-02), which runs noticeably more concurrent server instances than the suite did before.</td><td>None (test-infrastructure flakiness, not a product defect -- confirmed by two consecutive clean <code class="inline">-race</code> runs after the fix).</td><td>Applied the identical bounded-retry fix from item 8 to this second helper.</td></tr>
+    <tr><td>10</td><td>A first draft of the concurrency test proving one zone's slow chain-of-trust walk doesn't block another zone's push sent the slow zone's request from a background goroutine and called <code class="inline">t.Fatalf</code> there on failure -- which, called from any goroutine other than the one running the test function, exits only that goroutine (via <code class="inline">runtime.Goexit</code>) without ever reaching the line that would have sent a result on the channel the main goroutine was unconditionally waiting on, hanging the whole test run rather than failing it.</td><td>None (test-authoring issue, caught before merge -- the whole `go test` invocation hung until manually killed).</td><td>Rewrote the background call to report failure through a plain error return instead of <code class="inline">t.Fatalf</code>, and wrapped the final channel receive in a <code class="inline">select</code> with its own timeout, so a similar mistake fails the test cleanly instead of hanging it.</td></tr>
   </table></div>
 </section>
 
 <section id="tr-7">
   <h2><span class="secno">7</span> Conclusion and sign-off</h2>
-  <p>All 82 requirements in the companion Requirements Specification are traced to at least one passing automated test case, or to a manually-verified real-binary scenario for the small remaining subset (the real self-signed-TLS HTTPS carrier and the real three-binary <code class="inline">sazu-watchd</code> chain) that automated coverage reaches only indirectly. The full repository test suite — 2125 tests across 110 packages, including every package this work touched directly and every pre-existing package alongside it — passes with 0 failures and 0 errors at commit <code class="inline">e0583f38c</code> on <code class="inline">feat/sazu</code>, confirmed by two consecutive clean runs. Eight real defects were found and resolved during development through the assistant's own iterative testing discipline, each documented in §6 with its impact and resolution.</p>
+  <p>All 84 requirements in the companion Requirements Specification are traced to at least one passing automated test case, or to a manually-verified real-binary scenario for the small remaining subset (the real self-signed-TLS HTTPS carrier and the real three-binary <code class="inline">sazu-watchd</code> chain) that automated coverage reaches only indirectly. The full repository test suite — 2151 tests across 110 packages, including every package this work touched directly and every pre-existing package alongside it — passes with 0 failures and 0 errors at commit <code class="inline">5101e77e8</code> on <code class="inline">feat/sazu</code>, confirmed by two consecutive clean runs (and, specifically for the per-zone locking change, two further clean runs under <code class="inline">go test -race</code>). Ten real defects were found and resolved during development through the assistant's own iterative testing discipline, each documented in §6 with its impact and resolution.</p>
   <p>On this evidence, the SAZU implementation in this branch is assessed as meeting its Requirements Specification and ready for external review.</p>
   <div class="wrap"><table class="spec">
     <tr><th>Field</th><th>Value</th></tr>
@@ -895,7 +917,7 @@
   </main>
 </div>
 
-<footer class="docfoot">SAZU Verification Dossier &middot; generated from <code class="inline">feat/sazu @ e0583f38c</code> &middot; a private working document, not an RFC submission.</footer>
+<footer class="docfoot">SAZU Verification Dossier &middot; generated from <code class="inline">feat/sazu @ 5101e77e8</code> &middot; a private working document, not an RFC submission.</footer>
 
 <script>
 (function () {
