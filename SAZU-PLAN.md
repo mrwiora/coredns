@@ -974,13 +974,20 @@ for a manually verified real-binary walkthrough.
   during the migration surfaced the `TC-KEY-07` duplicate immediately,
   plus two real, previously invisible test-coverage gaps recorded
   honestly as `coverage_exceptions` rather than papered over:
-  `AUTH-04`'s fail-closed SERVFAIL path (no test mocks a capture
+  `AUTH-04`'s fail-closed SERVFAIL path (no test mocked a capture
   failure to exercise it) and `CARRIER-06`'s HTTP(S) push path
-  (`cmd/sazuctl`'s own `sendOverHTTP` has no automated test at all --
-  only the server side of HTTPS is tested, via a hand-built HTTP client
-  in `https_test.go`, not sazuctl's real client code). Neither gap is
-  fixed yet; both are exactly the kind of thing this rewrite exists to
-  make impossible to lose track of again.
+  (`cmd/sazuctl`'s own `sendOverHTTP` had no automated test at all --
+  only the server side of HTTPS was tested, via a hand-built HTTP client
+  in `https_test.go`, not sazuctl's real client code). Both gaps are now
+  closed: `TestServeUpdateFailsClosedWhenNoRawBytesCaptured`
+  (`plugin/sazu/handler_test.go`) drives `serveUpdate` directly with a
+  response writer nothing was ever captured for, and
+  `TestSendOverHTTPRoundTrips` (`plugin/sazu/cmd/sazuctl/https_test.go`)
+  runs `sendOverHTTP` against a real `httptest.Server`. Both
+  `coverage_exceptions` entries were removed once the real citations
+  were in place -- exactly the kind of thing this rewrite exists to make
+  impossible to lose track of again, and, having been found, not left
+  unfixed.
 
 ## Outstanding
 
@@ -1006,13 +1013,9 @@ noted there with its own reasoning:
 
 Two further, smaller gaps were found (not by design review this time,
 but by the Verification Dossier's own new cross-validation -- see
-**Done**, above) and are tracked as `coverage_exceptions` in
-`plugin/sazu/verification/data/requirements.yaml` rather than fixed
-here yet:
-
-- `AUTH-04` (fail-closed SERVFAIL when no wire bytes are captured) has
-  no automated test -- it would need a way to mock a capture failure,
-  which nothing in the suite currently provides.
-- `CARRIER-06` (the client pushing over an `http(s)://` target) is only
-  manually verified; `cmd/sazuctl`'s own `sendOverHTTP` has no
-  automated test exercising it directly.
+**Done**, above): `AUTH-04` (fail-closed SERVFAIL when no wire bytes are
+captured) and `CARRIER-06` (`cmd/sazuctl`'s own `sendOverHTTP`, pushing
+over an `http(s)://` target) each had no automated test. Both are now
+fixed -- see **Done**, above -- and no longer listed in
+`plugin/sazu/verification/data/requirements.yaml`'s
+`coverage_exceptions`.

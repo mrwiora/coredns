@@ -5,7 +5,7 @@ document:
 execution_summary:
   stats:
   - label: tests run
-    value: 2151
+    value: 2155
   - label: failures
     value: 0
   - label: errors
@@ -42,6 +42,22 @@ execution_summary:
     failures, 0 errors; this run was additionally repeated once immediately afterward under
     <code class="inline">go test -race</code>, also 0 failures, specifically to confirm the
     locking change introduced no data race.
+  - |-
+    A fifth, smaller run closed the two genuine test-coverage gaps this dossier's YAML
+    migration found and had recorded as honest <code class="inline">coverage_exceptions</code>
+    (AUTH-04, CARRIER-06) rather than silently passing validation: <code
+    class="inline">TestServeUpdateFailsClosedWhenNoRawBytesCaptured</code> (<code
+    class="inline">handler_test.go</code>) drives <code class="inline">serveUpdate</code>
+    directly with a response writer for which nothing was ever captured, proving the SERVFAIL
+    fail-closed path fires; <code class="inline">TestSendOverHTTPRoundTrips</code> (<code
+    class="inline">cmd/sazuctl/https_test.go</code>) runs <code
+    class="inline">sazuctl</code>'s own client-side <code class="inline">sendOverHTTP</code>
+    against a real <code class="inline">httptest.Server</code>, table-driven over an accepted
+    and a denied response. Both requirements now carry a real citation in the Test
+    Specification instead of an exception entry. +4 tests (1 in <code
+    class="inline">plugin/sazu</code>, 3 in <code class="inline">plugin/sazu/cmd/sazuctl</code>
+    once its table-driven subtests are counted individually), 0 failures, 0 errors, no other
+    package affected.
 results_by_package:
   rows:
   - package: core/dnsserver
@@ -49,11 +65,11 @@ results_by_package:
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu
-    tests: '216'
+    tests: '217'
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu/cmd/sazuctl
-    tests: '30'
+    tests: '33'
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/pkg/doh
@@ -89,7 +105,7 @@ results_by_area:
     test-case set passed.
   rows:
   - area: AUTH
-    cases: TC-AUTH-01 … 09
+    cases: TC-AUTH-01 … 10
     result: |-
       <span class="pill ok">PASS</span>
   - area: CHAIN
@@ -117,7 +133,7 @@ results_by_area:
     result: |-
       <span class="pill ok">PASS</span>
   - area: CARRIER
-    cases: TC-CARRIER-01 … 07
+    cases: TC-CARRIER-01 … 08
     result: |-
       <span class="pill ok">PASS</span>
   - area: SEC

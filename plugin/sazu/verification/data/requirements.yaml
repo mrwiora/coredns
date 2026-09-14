@@ -616,17 +616,3 @@ coverage_exceptions:
   reason: |-
     Verified implicitly: every chain-of-trust/algorithm-floor/rate-limiting test case in this
     catalogue passes with its respective safeguard left at its default (opt-in, not opt-out).
-- id: AUTH-04
-  reason: |-
-    Known gap, found by this schema's own cross-validation during the YAML migration: no
-    automated test exercises the "no raw wire bytes captured" fail-closed SERVFAIL path --
-    it requires mocking a capture failure directly, which nothing in this suite currently
-    does. Not yet fixed; tracked here rather than silently passing validation.
-- id: CARRIER-06
-  reason: |-
-    Verified manually only (Test Specification §5, "a real coredns HTTPS listener ...
-    accepting a real sazuctl push"), also found by this migration's cross-validation:
-    cmd/sazuctl's own sendOverHTTP function has no automated test exercising it directly --
-    https_test.go covers the server side of HTTPS via a hand-built HTTP client, not
-    sazuctl's own client code. Not yet fixed; tracked here rather than silently passing
-    validation.

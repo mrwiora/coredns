@@ -1622,3 +1622,52 @@ func (f *fallthroughHandler) ServeDNS(_ context.Context, w dns.ResponseWriter, r
 	}
 	return dns.RcodeSuccess, nil
 }
+
+// recordingResponseWriter is just enough of dns.ResponseWriter to drive
+// serveUpdate's fail-closed path directly and inspect the actual reply
+// message, not just the rcode ServeDNS itself returns (which is always
+// dns.RcodeSuccess once writing the reply succeeds -- see writeMsg --
+// regardless of what rcode that reply carries).
+type recordingResponseWriter struct {
+	dns.ResponseWriter
+	addr  net.Addr
+	reply *dns.Msg
+}
+
+func (w *recordingResponseWriter) RemoteAddr() net.Addr { return w.addr }
+
+func (w *recordingResponseWriter) WriteMsg(m *dns.Msg) error {
+	w.reply = m
+	return nil
+}
+
+// TestServeUpdateFailsClosedWhenNoRawBytesCaptured is AUTH-04: SIG(0)/RFC
+// 2931 verification must check a signature against the literal wire
+// bytes a request arrived as, never a re-encoding of the parsed
+// dns.Msg -- so if no exact wire bytes were ever captured for this
+// request's (address, ID) pair (nothing reached this handler through a
+// real dns.Server's DecorateReaderFunc wiring, and the context carries
+// no HTTPS/HTTP3 dnsserver.RawRequestKey{} either), serveUpdate has
+// nothing to verify against and must refuse rather than trust the parsed
+// message anyway.
+func TestServeUpdateFailsClosedWhenNoRawBytesCaptured(t *testing.T) {
+	s := newTestSazu("example.org.")
+
+	m := new(dns.Msg)
+	m.SetUpdate("example.org.")
+
+	w := &recordingResponseWriter{addr: fakeAddr{network: "udp"}}
+	rcode, err := s.ServeDNS(context.Background(), w, m)
+	if err != nil {
+		t.Fatalf("ServeDNS: %v", err)
+	}
+	if rcode != dns.RcodeSuccess {
+		t.Fatalf("ServeDNS returned %s, want dns.RcodeSuccess (writing the SERVFAIL reply itself succeeded)", dns.RcodeToString[rcode])
+	}
+	if w.reply == nil {
+		t.Fatalf("expected a reply message to have been written")
+	}
+	if w.reply.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("reply rcode = %s, want SERVFAIL", dns.RcodeToString[w.reply.Rcode])
+	}
+}

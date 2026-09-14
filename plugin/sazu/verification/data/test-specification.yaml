@@ -108,6 +108,14 @@ areas:
     functions: |-
       https_test.go (§3.8 TC-CARRIER-08); core/dnsserver TC-CARRIER-07
     verifies: AUTH-03
+  - id: TC-AUTH-10
+    objective: |-
+      With no wire bytes captured for a request (reached some way other than through a real
+      dns.Server's DecorateReaderFunc wiring, and no HTTPS/HTTP3 request-context propagation
+      either), the server fails closed with SERVFAIL rather than authenticate against the
+      parsed message.
+    functions: TestServeUpdateFailsClosedWhenNoRawBytesCaptured
+    verifies: AUTH-04
 - id: chain
   title: CHAIN
   cases:
@@ -599,6 +607,14 @@ areas:
       TestOnboardOverHTTPSRawWireBytes, TestOnboardOverHTTPSJSONWireEnvelope,
       TestPartialPushOverHTTPSAfterOnboarding (https_test.go)
     verifies: CARRIER-02, CARRIER-04, CARRIER-05
+  - id: TC-CARRIER-08
+    objective: |-
+      cmd/sazuctl's own client-side sendOverHTTP function -- not the server side an
+      <code class="inline">http(s)://</code> target already has coverage for elsewhere in
+      this area -- POSTs raw wire bytes to the right path/content-type and correctly
+      interprets both an accepted (NOERROR) and a denied (non-NOERROR) response.
+    functions: TestSendOverHTTPRoundTrips (cmd/sazuctl)
+    verifies: CARRIER-06
 - id: sec
   title: SEC
   cases:
@@ -916,7 +932,7 @@ suite_inventory:
     -json</code>).
   files:
   - file: handler_test.go
-    count: 28
+    count: 29
     area: |-
       End-to-end: onboarding, rollover, quotas, audit, DO/NSEC
   - file: store_test.go
@@ -994,6 +1010,9 @@ suite_inventory:
     count: 6
     area: |-
       CLIENT (CLI-level, end to end: KSK/ZSK use cases, init-zone/zone-convert)
+  - file: cmd/sazuctl/https_test.go
+    count: 1
+    area: CARRIER (sendOverHTTP client-side round trip)
   - file: concurrency_test.go
     count: 4
     area: NFR (per-zone update locking)
