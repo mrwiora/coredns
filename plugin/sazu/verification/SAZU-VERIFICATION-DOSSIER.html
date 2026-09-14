@@ -1012,29 +1012,17 @@ Requirements Specification and ready for external review.</p>  <div class="wrap"
 (function () {
   var tabs = document.querySelectorAll('.doc-tabs button');
   var wraps = { req: document.querySelector('.shell.layout'), test: document.getElementById('wrap-test'), report: document.getElementById('wrap-report') };
-  // Clicking one of these three top-level tabs jumps to the newly-shown
-  // document's own first section -- the same "jump to a headline"
-  // behavior a left-rail TOC link (e.g. "1 Introduction") already has,
-  // via that section's existing scroll-margin-top (so it lands below
-  // the sticky tab bar, not hidden behind it). Deliberately *not*
-  // window.scrollTo({top:0}): that jumps past the tab bar all the way
-  // back up to the masthead/coversheet on every switch, which is
-  // disorienting rather than useful.
-  var firstSection = { req: 'req-1', test: 'ts-1', report: 'tr-1' };
+  // Scroll to just above the sticky tab bar itself, not to a section
+  // inside the document that's just been un-hidden. .doc-tabs's
+  // offsetTop is a fixed layout position -- it doesn't move when the
+  // content below it is hidden/shown -- so this needs no deferral and
+  // no per-document target list, and it's what the original
+  // hand-maintained dossier did before this generator existed.
   tabs.forEach(function (btn) {
     btn.addEventListener('click', function () {
       tabs.forEach(function (b) { b.setAttribute('aria-selected', b === btn ? 'true' : 'false'); });
       Object.keys(wraps).forEach(function (k) { wraps[k].hidden = (k !== btn.dataset.doc); });
-      var target = document.getElementById(firstSection[btn.dataset.doc]);
-      if (target) {
-        // Deferred to the next frame: the wrap we just un-hid hasn't
-        // been laid out yet in this same tick (it was display:none a
-        // moment ago), so calling scrollIntoView synchronously here
-        // measures stale (zero-height) geometry and lands somewhere
-        // wrong -- typically the very top of the page. Waiting one
-        // frame lets the browser finish that layout first.
-        requestAnimationFrame(function () { target.scrollIntoView({ block: 'start' }); });
-      }
+      window.scrollTo({ top: document.querySelector('.doc-tabs').offsetTop - 8, behavior: 'instant' in window ? 'instant' : 'auto' });
     });
   });
 })();
