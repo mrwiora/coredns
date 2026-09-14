@@ -241,17 +241,17 @@
 </style>
 
 <div class="masthead">
-  <span class="kicker">🔏 SAZU &middot; feat/sazu-test</span>
+  <span class="kicker">🔏 SAZU &middot; feat/sazu</span>
   <h1>SAZU Verification Dossier</h1>
   <p class="lede">Requirements, test specification, and test execution report for Self-Authenticated Zone Update — the split-signing DNSSEC push mechanism implemented as a CoreDNS plugin, derived directly from the codebase and its governing RFCs.</p>
 </div>
 
 <div class="coversheet">
   <table>
-    <tr><td class="k">Document set</td><td class="v">SAZU-REQ-1.0 &middot; SAZU-TS-1.0 &middot; SAZU-TR-1.0</td></tr>
+    <tr><td class="k">Document set</td><td class="v">SAZU-REQ-1.1 &middot; SAZU-TS-1.1 &middot; SAZU-TR-1.1</td></tr>
     <tr><td class="k">Subject system</td><td class="v">SAZU on CoreDNS — <code class="inline">plugin/sazu</code>, <code class="inline">plugin/sazu/cmd/*</code>, <code class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code></td></tr>
-    <tr><td class="k">Branch / commit</td><td class="v">feat/sazu-test @ <code class="inline">1c6eacb0e</code></td></tr>
-    <tr><td class="k">Status</td><td class="v"><span class="pill ok">all requirements implemented</span> &nbsp;<span class="pill ok">2099/2099 tests passing</span></td></tr>
+    <tr><td class="k">Branch / commit</td><td class="v">feat/sazu @ <code class="inline">e0583f38c</code></td></tr>
+    <tr><td class="k">Status</td><td class="v"><span class="pill ok">all requirements implemented</span> &nbsp;<span class="pill ok">2125/2125 tests passing</span></td></tr>
     <tr><td class="k">Derivation</td><td class="v">Requirements traced to the SAZU protocol design (§4–§12) and 14 governing RFCs; test cases traced to the actual Go test suite; results from a full <code class="inline">go test ./...</code> run.</td></tr>
   </table>
 </div>
@@ -352,12 +352,17 @@
   <h3 class="subhead" id="req-key"><span class="secno">3.3</span> KEY — Key pinning &amp; rollover</h3>
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>
-    <tr><td class="reqid">KEY-01</td><td>Once pinned, the server SHALL accept only UPDATEs whose SIG(0) verifies against the pinned key, or against a new candidate undergoing a valid rollover (KEY-03).</td><td class="src">§10.2</td></tr>
+    <tr><td class="reqid">KEY-01</td><td>Once pinned, the server SHALL accept only UPDATEs whose SIG(0) verifies against the zone's KSK, against a registered ZSK authorized to authenticate transactions, or against a new candidate undergoing a valid KSK rollover (KEY-03).</td><td class="src">§10.2</td></tr>
     <tr><td class="reqid">KEY-02</td><td>A push signed by any other key SHALL be rejected with RCODE NOTAUTH.</td><td class="src">§10.2</td></tr>
-    <tr><td class="reqid">KEY-03</td><td>If the pinned key's SIG(0) fails but the UPDATE also carries a different candidate DNSKEY whose own SIG(0) verifies, the server SHALL attempt rollover by subjecting that candidate to the identical chain-of-trust check first contact requires (CHAIN-03..05).</td><td class="src">§10.4</td></tr>
-    <tr><td class="reqid">KEY-04</td><td>A rollover UPDATE SHALL NOT be required to carry an apex SOA.</td><td class="src">§10.4</td></tr>
-    <tr><td class="reqid">KEY-05</td><td>On successful rollover, the server SHALL replace the pinned key; the superseded key SHALL cease to authenticate further UPDATEs.</td><td class="src">§10.4</td></tr>
-    <tr><td class="reqid">KEY-06</td><td>The system SHALL use a single Ed25519 key as both SIG(0) transaction key and DNSSEC KSK; no KSK/ZSK split is required.</td><td class="src">§9.1 (design decision)</td></tr>
+    <tr><td class="reqid">KEY-03</td><td>If none of a zone's currently authorized keys verify a transaction, but the UPDATE also carries a different, SEP-flagged (KSK) candidate DNSKEY whose own SIG(0) verifies, the server SHALL attempt a KSK rollover by subjecting that candidate to the identical chain-of-trust check first contact requires (CHAIN-03..05).</td><td class="src">§10.4</td></tr>
+    <tr><td class="reqid">KEY-04</td><td>A KSK rollover UPDATE SHALL NOT be required to carry an apex SOA.</td><td class="src">§10.4</td></tr>
+    <tr><td class="reqid">KEY-05</td><td>On successful KSK rollover, the server SHALL replace the pinned KSK; the superseded KSK SHALL cease to authenticate further UPDATEs; any already-registered ZSK SHALL remain valid, unaffected by the rollover.</td><td class="src">§10.4</td></tr>
+    <tr><td class="reqid">KEY-06</td><td>Every onboarded zone SHALL have exactly one KSK, established at first contact and anchored to a parent DS record (CHAIN-03); a zone MAY additionally register zero or more optional ZSKs on top of it. The single-key model (one Ed25519 key doing both SIG(0) authentication and DNSSEC signing) remains fully supported as the default for a zone that never registers a ZSK.</td><td class="src">§9.1 (design decision, extended)</td></tr>
+    <tr><td class="reqid">KEY-07</td><td>A first-contact candidate key SHALL carry the SEP (KSK) flag; a candidate presented without it SHALL be refused (REFUSED, status <code class="inline">ERR_FIRST_CONTACT_REQUIRES_KSK</code>) without pinning anything.</td><td class="src">Engineering decision</td></tr>
+    <tr><td class="reqid">KEY-08</td><td>A ZSK SHALL be registered via an ordinary, already-authenticated push that adds a non-SEP-flagged DNSKEY at the zone apex, checked against the same algorithm floor (ALGO) as any other candidate key, with no chain-of-trust network walk.</td><td class="src">Engineering decision</td></tr>
+    <tr><td class="reqid">KEY-09</td><td>A ZSK SHALL be retirable via an RFC 2136 §2.5.4 "delete one RR" DNSKEY op naming its key tag; an RFC 2136 §2.5.2 "delete RRset" op SHALL NOT be treated as ZSK retirement (it would remove the KSK too).</td><td class="src">RFC 2136 §2.5.2/§2.5.4 &middot; Engineering decision</td></tr>
+    <tr><td class="reqid">KEY-10</td><td>Content signed by any key currently valid for the zone — the KSK or any registered ZSK — SHALL verify under §4's Level-2 content-signature check.</td><td class="src">CONTENT-04/05 &middot; Engineering decision</td></tr>
+    <tr><td class="reqid">KEY-11</td><td>A ZSK MAY be granted the ability to authenticate transactions on its own, independent of the KSK; every ZSK registered via an ordinary push SHALL default to this, since the DNSKEY wire format (RFC 4034 §2.1.1) has no reserved bit to request otherwise.</td><td class="src">RFC 4034 §2.1.1 &middot; Engineering decision</td></tr>
   </table></div>
 
   <h3 class="subhead" id="req-algo"><span class="secno">3.4</span> ALGO — Minimum algorithm floor</h3>
@@ -452,6 +457,7 @@
     <tr><td class="reqid">PERSIST-02</td><td>Every accepted UPDATE SHALL commit to the persistent store transactionally, before in-memory state is mutated.</td><td class="src">Engineering decision</td></tr>
     <tr><td class="reqid">PERSIST-03</td><td>On startup with persistence configured, all persisted state SHALL be replayed into memory before any request is served.</td><td class="src">Engineering decision</td></tr>
     <tr><td class="reqid">PERSIST-04</td><td>Omitting persistence configuration SHALL yield purely in-memory operation, behaviourally equivalent to no persistence layer existing.</td><td class="src">Engineering decision</td></tr>
+    <tr><td class="reqid">PERSIST-05</td><td>A database schema written before a later capability requires a shape change (e.g. the optional-ZSK key-storage model) SHALL be transparently migrated in place the next time it is opened, with no operator action and no forced re-onboarding.</td><td class="src">Engineering decision</td></tr>
   </table></div>
 
   <h3 class="subhead" id="req-client"><span class="secno">3.13</span> CLIENT — sazuctl</h3>
@@ -460,6 +466,8 @@
     <tr><td class="reqid">CLIENT-01</td><td>The client SHALL provide subcommands to generate a key, print a registrar-ready DS record, push a full zone, push a differential update, and register/clear a zone's contact address.</td><td class="src">§10 (client tooling)</td></tr>
     <tr><td class="reqid">CLIENT-02</td><td>The client SHALL self-verify a signed push's SIG(0) before transmitting it.</td><td class="src">Engineering decision</td></tr>
     <tr><td class="reqid">CLIENT-03</td><td>The client SHALL print actionable, registrar-aware guidance when a push is denied with <code class="inline">ERR_NO_DS_PUBLISHED</code> or <code class="inline">ERR_UNKNOWN_SIGNER</code>.</td><td class="src">§12 (operator experience)</td></tr>
+    <tr><td class="reqid">CLIENT-04</td><td>The client SHALL provide a decision-support command for key rotation that, given no explicit role, explains the KSK-vs-ZSK tradeoff and takes no action until the operator chooses explicitly; given a role, it SHALL perform that rotation (registering a new ZSK and retiring the old one, or an ordinary KSK rollover).</td><td class="src">Engineering decision (operator experience)</td></tr>
+    <tr><td class="reqid">CLIENT-05</td><td>The client SHALL choose a connection-oriented transport (TCP) for any first-contact- or KSK-rollover-shaped push regardless of message size, since a compliant server refuses either over plain UDP (SEC-01) irrespective of how small the message is.</td><td class="src">SEC-01 (engineering decision)</td></tr>
   </table></div>
 </section>
 
@@ -479,7 +487,7 @@
   <h2><span class="secno">5</span> Traceability summary</h2>
   <p>Every requirement above is verified by at least one automated test case; the mapping is maintained in the companion <a href="#" onclick="document.querySelector('[data-doc=test]').click();return false;">Test Specification</a> (§3, per-area tables) and its execution recorded in the <a href="#" onclick="document.querySelector('[data-doc=report]').click();return false;">Test Report</a> (§3). No requirement in this document is currently unverified or outstanding.</p>
   <div class="stats">
-    <div class="stat"><div class="v ok">74</div><div class="l">requirements specified</div></div>
+    <div class="stat"><div class="v ok">82</div><div class="l">requirements specified</div></div>
     <div class="stat"><div class="v ok">13</div><div class="l">functional areas</div></div>
     <div class="stat"><div class="v ok">5</div><div class="l">non-functional</div></div>
     <div class="stat"><div class="v ok">0</div><div class="l">unimplemented</div></div>
@@ -508,6 +516,7 @@
       <a class="l2" href="#ts-ops">3.10 OPS</a>
       <a class="l2" href="#ts-watch">3.11 WATCH</a>
       <a class="l2" href="#ts-persist">3.12 PERSIST</a>
+      <a class="l2" href="#ts-client">3.13 CLIENT</a>
       <a href="#ts-4">4 Automated suite inventory</a>
       <a href="#ts-5">5 Manual / real-binary verification</a>
     </nav>
@@ -531,7 +540,7 @@
     <tr><th>Item</th><th>Value</th></tr>
     <tr><td>Command</td><td class="mono">go test ./...</td></tr>
     <tr><td>Go toolchain</td><td class="mono">go1.27.0</td></tr>
-    <tr><td>Repository / branch</td><td class="mono">coredns @ feat/sazu-test</td></tr>
+    <tr><td>Repository / branch</td><td class="mono">coredns @ feat/sazu</td></tr>
     <tr><td>Packages under test</td><td class="mono">plugin/sazu, plugin/sazu/cmd/sazu_watchd, core/dnsserver, plugin/pkg/doh, plugin/pkg/dnsutil (+ 105 unrelated pre-existing CoreDNS packages exercised incidentally by the full-repo run)</td></tr>
     <tr><td>External services</td><td>None required. Chain-of-trust unit tests use a fake validator; the real network-querying validator has its own separate tests, not part of the default run's network dependency.</td></tr>
   </table></div>
@@ -573,12 +582,25 @@
   <h3 class="subhead" id="ts-key"><span class="secno">3.3</span> KEY</h3>
   <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>
-    <tr><td class="tcid">TC-KEY-01</td><td>KeyRegistry pin/get round-trips; zone names are compared case-insensitively.</td><td class="mono">TestKeyRegistryPinAndGet, TestKeyRegistryNormalizesZoneNames</td><td>KEY-01</td></tr>
+    <tr><td class="tcid">TC-KEY-01</td><td>KeyRegistry KSK pin/get round-trips; zone names are compared case-insensitively.</td><td class="mono">TestKeyRegistryPinKSKAndGet, TestKeyRegistryNormalizesZoneNames</td><td>KEY-01</td></tr>
     <tr><td class="tcid">TC-KEY-02</td><td>A push signed by an unpinned/wrong key is rejected.</td><td class="mono">TestPartialPushFromWrongKeyRejected</td><td>KEY-02</td></tr>
     <tr><td class="tcid">TC-KEY-03</td><td>An ordinary differential push after onboarding succeeds against the pinned key.</td><td class="mono">TestOrdinaryPartialPushAfterOnboarding</td><td>KEY-01</td></tr>
-    <tr><td class="tcid">TC-KEY-04</td><td>A valid rollover (new candidate independently chains to a DS) succeeds; the superseded key stops working.</td><td class="mono">TestKeyRolloverSwitchesToNewKey</td><td>KEY-03, KEY-05</td></tr>
+    <tr><td class="tcid">TC-KEY-04</td><td>A valid KSK rollover (new candidate independently chains to a DS) succeeds; the superseded key stops working.</td><td class="mono">TestKeyRolloverSwitchesToNewKey</td><td>KEY-03, KEY-05</td></tr>
     <tr><td class="tcid">TC-KEY-05</td><td>Rollover fails, and the old key remains pinned, when the new candidate has no DS.</td><td class="mono">TestKeyRolloverFailsWithoutADSForTheNewKey</td><td>KEY-03</td></tr>
     <tr><td class="tcid">TC-KEY-06</td><td>A rollover candidate below the algorithm floor is rejected before any chain-of-trust effort.</td><td class="mono">TestKeyRolloverRejectedForWeakAlgorithm</td><td>KEY-03, ALGO-03</td></tr>
+    <tr><td class="tcid">TC-KEY-07</td><td>A ZSK cannot be registered before a KSK exists; once one does, registering and reading it back round-trips, and a duplicate key tag is rejected.</td><td class="mono">TestKeyRegistryAddZSKRequiresExistingKSK, TestKeyRegistryAddZSKThenGet, TestKeyRegistryAddZSKRejectsDuplicateKeyTag</td><td>KEY-08</td></tr>
+    <tr><td class="tcid">TC-KEY-08</td><td>Retiring a registered ZSK removes it; retiring an unknown key tag is a no-op, not an error.</td><td class="mono">TestKeyRegistryRetireZSK, TestKeyRegistryRetireZSKOfUnknownKeytagIsANoop</td><td>KEY-09</td></tr>
+    <tr><td class="tcid">TC-KEY-09</td><td>A KSK rollover, at the registry level, preserves an already-registered ZSK untouched.</td><td class="mono">TestKeyRegistryPinKSKPreservesExistingZSKs</td><td>KEY-05</td></tr>
+    <tr><td class="tcid">TC-KEY-10</td><td>The authenticator set is the KSK plus only ZSKs flagged to authenticate transactions; the content-signer set is the KSK plus every registered ZSK.</td><td class="mono">TestZoneKeysAuthenticatorsIncludesOnlyCanAuthenticateTxZSKs</td><td>KEY-10, KEY-11</td></tr>
+    <tr><td class="tcid">TC-KEY-11</td><td>End-to-end: a ZSK registers over an ordinary, already-KSK-authenticated push with no chain-of-trust network walk; a zone that never registers one behaves exactly as before the ZSK split existed.</td><td class="mono">TestZSKCanBeRegisteredOverAnOrdinaryPush, TestRegisteringAZSKIsOptionalZoneBehaviorIsUnchangedWithoutOne</td><td>KEY-06, KEY-08</td></tr>
+    <tr><td class="tcid">TC-KEY-12</td><td>Once registered, a ZSK authenticates further transactions entirely on its own, with the content it carries servable afterward.</td><td class="mono">TestZSKAuthenticatesFurtherTransactionsOnceRegistered</td><td>KEY-01, KEY-11</td></tr>
+    <tr><td class="tcid">TC-KEY-13</td><td>Content signed by a ZSK (rather than the KSK) still verifies under §4's Level-2 content-signature check.</td><td class="mono">TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs</td><td>KEY-10</td></tr>
+    <tr><td class="tcid">TC-KEY-14</td><td>A retired ZSK no longer authenticates anything, end to end.</td><td class="mono">TestZSKCanBeRetired</td><td>KEY-09</td></tr>
+    <tr><td class="tcid">TC-KEY-15</td><td>A KSK rollover, end to end, preserves and keeps trusting an already-registered ZSK afterward.</td><td class="mono">TestKSKRolloverPreservesExistingZSK</td><td>KEY-05</td></tr>
+    <tr><td class="tcid">TC-KEY-16</td><td>A first-contact candidate without the SEP (KSK) flag is refused with a dedicated diagnostic and pins nothing.</td><td class="mono">TestFirstContactRejectsNonKSKCandidate</td><td>KEY-07</td></tr>
+    <tr><td class="tcid">TC-KEY-17</td><td>A ZSK registration below the algorithm floor is refused before being registered.</td><td class="mono">TestAddZSKRejectsWeakAlgorithm</td><td>KEY-08, ALGO-01</td></tr>
+    <tr><td class="tcid">TC-KEY-18</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points against a real server: the full KSK use case — onboarding, a differential push, and a full KSK rollover, with the superseded key rejected and the new one accepted afterward.</td><td class="mono">TestE2EKSKFullLifecycle</td><td>KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, CLIENT-04, CLIENT-05</td></tr>
+    <tr><td class="tcid">TC-KEY-19</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points against a real server: the full ZSK use case — registration, ZSK-only authentication, KSK-authenticated-but-ZSK-signed content, retirement, the retired key rejected afterward, and the <code class="inline">rotate-key -role zsk</code> register-then-retire convenience path.</td><td class="mono">TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, CLIENT-04</td></tr>
     <tr><td class="tcid">TC-KEY-07</td><td>A rollover attempt over plain UDP is refused; see TC-SEC-01.</td><td class="mono">TestKeyRolloverOverUDPIsRefused (transport_test.go)</td><td>SEC-01</td></tr>
   </table></div>
 
@@ -679,6 +701,19 @@
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>
     <tr><td class="tcid">TC-PERSIST-01</td><td>A committed update reproduces identically after a full reload (key, SOA, RRset).</td><td class="mono">TestDBCommitUpdateThenLoadAllReproducesOnboarding</td><td>PERSIST-02, PERSIST-03</td></tr>
     <tr><td class="tcid">TC-PERSIST-02</td><td>State survives a real close-and-reopen of the database file.</td><td class="mono">TestDBPersistsAcrossReopen</td><td>PERSIST-01, PERSIST-03</td></tr>
+    <tr><td class="tcid">TC-PERSIST-03</td><td>Registering and retiring a ZSK persist and reload correctly via <code class="inline">LoadZoneKeys</code>, independently of the KSK; the lighter-weight <code class="inline">LoadKey</code> accessor keeps returning only the KSK.</td><td class="mono">TestDBCommitUpdateAddsAndRetiresZSK</td><td>KEY-08, KEY-09, PERSIST-02</td></tr>
+    <tr><td class="tcid">TC-PERSIST-04</td><td>A KSK rollover replaces that zone's sole KSK database row rather than leaving the superseded key tag behind as a stale second row.</td><td class="mono">TestDBCommitUpdateKSKRolloverReplacesRowNotAdds</td><td>KEY-05, PERSIST-02</td></tr>
+    <tr><td class="tcid">TC-PERSIST-05</td><td>A database written before the optional-ZSK key-storage schema existed is transparently migrated in place on open — every pre-existing key becomes that zone's KSK, and a second <code class="inline">Open</code> on an already-migrated database is a safe no-op.</td><td class="mono">TestDBOpenMigratesPreZSKKeysTable</td><td>PERSIST-05</td></tr>
+  </table></div>
+
+  <h3 class="subhead" id="ts-client"><span class="secno">3.13</span> CLIENT</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>
+    <tr><td class="tcid">TC-CLIENT-01</td><td>Every embedded guidance template (onboarding-denied diagnostics, the rotate-key tradeoff) executes without error against the data its caller passes it, and renders non-empty output.</td><td class="mono">TestGuidanceTemplatesRenderWithoutError</td><td>CLIENT-03, CLIENT-04</td></tr>
+    <tr><td class="tcid">TC-CLIENT-02</td><td>The no-DS guidance text actually contains the concrete, actionable values a customer needs (the DS record's fields, the zone name, a ready-to-run <code class="inline">dig</code> command) — not just that it renders.</td><td class="mono">TestNoDSGuidanceIncludesTheDSRecordAndZone</td><td>CLIENT-03</td></tr>
+    <tr><td class="tcid">TC-CLIENT-03</td><td>The rotate-key decision text actually branches on whether a ZSK already exists — naming its key tag when one does, pointing at <code class="inline">add-zsk</code> first when none does — rather than printing the same generic advice regardless of zone state.</td><td class="mono">TestRotateKeyChoiceGuidanceReflectsWhetherAZSKExists</td><td>CLIENT-04</td></tr>
+    <tr><td class="tcid">TC-CLIENT-04</td><td>The small display/parsing helpers the CLI and its guidance depend on — DNSKEY flags to a KSK/ZSK label, algorithm number to name, and the <code class="inline">-role</code> flag's three cases — are correct.</td><td class="mono">TestKeyTypeLabelAndAlgorithmLabel, TestParseRoleFlag</td><td>CLIENT-01</td></tr>
+    <tr><td class="tcid">TC-CLIENT-05</td><td>End-to-end through the real CLI entry points: the KSK use case (see TC-KEY-18) and the ZSK use case (see TC-KEY-19), each driving the actual <code class="inline">run*</code> subcommand functions <code class="inline">main</code> itself dispatches to against a real server — not a direct call into the plugin package.</td><td class="mono">TestE2EKSKFullLifecycle, TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>CLIENT-01, CLIENT-02, CLIENT-04, CLIENT-05</td></tr>
   </table></div>
 </section>
 
@@ -695,7 +730,7 @@
     <tr><td class="mono">transport_test.go</td><td class="num">9</td><td>SEC (transport gate)</td></tr>
     <tr><td class="mono">sign_test.go</td><td class="num">9</td><td>CONTENT (signing/verification)</td></tr>
     <tr><td class="mono">rawcapture_test.go</td><td class="num">8</td><td>AUTH (wire-byte capture)</td></tr>
-    <tr><td class="mono">db_test.go</td><td class="num">8</td><td>PERSIST / CONTACT / OPS</td></tr>
+    <tr><td class="mono">db_test.go</td><td class="num">11</td><td>PERSIST / CONTACT / OPS / KEY (ZSK persistence, schema migration)</td></tr>
     <tr><td class="mono">chain_test.go</td><td class="num">8</td><td>CHAIN (crypto primitives)</td></tr>
     <tr><td class="mono">sig0_test.go</td><td class="num">6</td><td>AUTH</td></tr>
     <tr><td class="mono">push_test.go</td><td class="num">6</td><td>CONTENT (zone-file / full push)</td></tr>
@@ -707,7 +742,10 @@
     <tr><td class="mono">rrtypes_test.go</td><td class="num">3</td><td>CONTENT (RR-type coverage)</td></tr>
     <tr><td class="mono">ratelimit_sweep_test.go</td><td class="num">3</td><td>SEC (memory bound)</td></tr>
     <tr><td class="mono">https_test.go</td><td class="num">3</td><td>CARRIER</td></tr>
-    <tr><td class="mono">keys_test.go</td><td class="num">2</td><td>KEY (registry)</td></tr>
+    <tr><td class="mono">zsk_test.go</td><td class="num">8</td><td>KEY (ZSK lifecycle, end to end)</td></tr>
+    <tr><td class="mono">keys_test.go</td><td class="num">9</td><td>KEY (registry, KSK + optional ZSKs)</td></tr>
+    <tr><td class="mono">cmd/sazuctl/main_test.go</td><td class="num">5</td><td>CLIENT (guidance templates, small helpers)</td></tr>
+    <tr><td class="mono">cmd/sazuctl/e2e_test.go</td><td class="num">3</td><td>CLIENT (CLI-level, end to end: KSK and ZSK use cases)</td></tr>
     <tr><td class="mono">algorithm_test.go</td><td class="num">2</td><td>ALGO</td></tr>
     <tr><td class="mono">cmd/sazu_watchd/alert_test.go</td><td class="num">7</td><td>WATCH (notifier)</td></tr>
     <tr><td class="mono">cmd/sazu_watchd/watch_test.go</td><td class="num">6</td><td>WATCH (check loop)</td></tr>
@@ -749,7 +787,7 @@
 <section id="tr-1">
   <h2><span class="secno">1</span> Execution summary</h2>
   <div class="stats">
-    <div class="stat"><span class="stat-n">2099</span><span class="stat-l">tests run</span></div>
+    <div class="stat"><span class="stat-n">2125</span><span class="stat-l">tests run</span></div>
     <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">failures</span></div>
     <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">errors</span></div>
     <div class="stat"><span class="stat-n">2</span><span class="stat-l">skipped</span></div>
@@ -759,11 +797,11 @@
     <tr><th>Item</th><th>Value</th></tr>
     <tr><td>Command</td><td class="mono">go test -json ./...</td></tr>
     <tr><td>Result</td><td><span class="pill ok">PASS</span> (exit code 0)</td></tr>
-    <tr><td>Commit</td><td class="mono">1c6eacb0e</td></tr>
-    <tr><td>Branch</td><td class="mono">feat/sazu-test</td></tr>
+    <tr><td>Commit</td><td class="mono">e0583f38c</td></tr>
+    <tr><td>Branch</td><td class="mono">feat/sazu</td></tr>
     <tr><td>Report format</td><td>JUnit XML, generated from the JSON stream via <code class="inline">go-junit-report v2</code></td></tr>
   </table></div>
-  <p>This is the second full run performed during this engineering effort. The first, taken at an earlier commit (<code class="inline">c9abc9c34</code>), recorded 2078 tests, 0 failures. The 21-test increase reflects the test suites written alongside the per-source-IP rate limiter, the connection-oriented transport gate, and the two leak fixes documented in §6. Both runs are 0 failures, 0 errors.</p>
+  <p>This is the third full run performed during this engineering effort. The first, at commit <code class="inline">c9abc9c34</code>, recorded 2078 tests; the second, at <code class="inline">1c6eacb0e</code>, recorded 2099. The further 26-test increase reflects the optional KSK/ZSK split (§9.1's model extended, keys.go/handler.go/sign.go/push.go/db.go) and its dedicated test suites — unit-level (<code class="inline">keys_test.go</code>, <code class="inline">db_test.go</code>), integration-level (<code class="inline">zsk_test.go</code>, a real server driven through the plugin package's own API), and CLI-level end-to-end (<code class="inline">cmd/sazuctl/e2e_test.go</code> and <code class="inline">main_test.go</code>, the real <code class="inline">sazuctl</code> subcommand entry points against a real server). All three runs are 0 failures, 0 errors; this run was additionally repeated once immediately afterward, also 0 failures, to confirm a transport-level test flake found and fixed in the same pass (see §6) was not a recurring source of instability.</p>
 </section>
 
 <section id="tr-2">
@@ -771,13 +809,14 @@
   <div class="wrap"><table class="spec">
     <tr><th>Package</th><th class="num">Tests</th><th>Result</th></tr>
     <tr><td class="mono">core/dnsserver</td><td class="num">221</td><td><span class="pill ok">PASS</span></td></tr>
-    <tr><td class="mono">plugin/sazu</td><td class="num">194</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td class="mono">plugin/sazu</td><td class="num">212</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td class="mono">plugin/pkg/doh</td><td class="num">15</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td class="mono">plugin/sazu/cmd/sazu_watchd</td><td class="num">13</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td class="mono">plugin/sazu/cmd/sazuctl</td><td class="num">8</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td class="mono">plugin/pkg/dnsutil</td><td class="num">10</td><td><span class="pill ok">PASS</span></td></tr>
-    <tr><td class="mono">(remaining 105 pre-existing CoreDNS packages, unmodified by this work)</td><td class="num">1646</td><td><span class="pill ok">PASS</span> (2 skipped)</td></tr>
+    <tr><td class="mono">(remaining 104 pre-existing CoreDNS packages, unmodified by this work)</td><td class="num">1646</td><td><span class="pill ok">PASS</span> (2 skipped)</td></tr>
   </table></div>
-  <p>The counts for the three packages this work modified directly at the core-integration layer (<code class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code>) include their full pre-existing test suites plus the additions listed in the companion Test Specification §3.8 — every pre-existing CoreDNS behavior in these packages was re-verified alongside the new HTTPS/JSON carrier logic, not just the new code paths.</p>
+  <p>The counts for the three packages this work modified directly at the core-integration layer (<code class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code>) include their full pre-existing test suites plus the additions listed in the companion Test Specification §3.8 — every pre-existing CoreDNS behavior in these packages was re-verified alongside the new HTTPS/JSON carrier logic, not just the new code paths. <code class="inline">plugin/sazu/cmd/sazuctl</code> previously had no test files at all (see the earlier revision of this report) — it is a genuinely new row, not a growth of an existing one, added alongside the KSK/ZSK CLI work (§3.13 CLIENT in the Test Specification).</p>
 </section>
 
 <section id="tr-3">
@@ -787,7 +826,7 @@
     <tr><th>Area</th><th>Test cases</th><th>Result</th></tr>
     <tr><td>AUTH</td><td>TC-AUTH-01 … 09</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td>CHAIN</td><td>TC-CHAIN-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>
-    <tr><td>KEY</td><td>TC-KEY-01 … 07</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>KEY</td><td>TC-KEY-01 … 19</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td>ALGO</td><td>TC-ALGO-01 … 02</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td>CONTENT</td><td>TC-CONTENT-01 … 14</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td>CONTACT</td><td>TC-CONTACT-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>
@@ -796,9 +835,10 @@
     <tr><td>SEC</td><td>TC-SEC-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td>OPS</td><td>TC-OPS-01 … 03</td><td><span class="pill ok">PASS</span></td></tr>
     <tr><td>WATCH</td><td>TC-WATCH-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>
-    <tr><td>PERSIST</td><td>TC-PERSIST-01 … 02</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>PERSIST</td><td>TC-PERSIST-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>
+    <tr><td>CLIENT</td><td>TC-CLIENT-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>
   </table></div>
-  <p>CLIENT requirements (sazuctl/sazu-watchd CLI ergonomics) are exercised indirectly — every automated HTTPS/manual verification path invokes the real <code class="inline">sazuctl</code> binary's code, and WATCH's automated suite exercises <code class="inline">sazu-watchd</code>'s check loop directly — rather than through dedicated CLI-flag unit tests; see Test Specification §5 for the manual coverage that closes this out end to end.</p>
+  <p>CLIENT requirements are now directly and automatically tested, not just exercised indirectly: <code class="inline">cmd/sazuctl/e2e_test.go</code> drives the actual <code class="inline">run*</code> subcommand entry points (the same code <code class="inline">main</code> dispatches to for a real command-line invocation) against a real <code class="inline">dnsserver.Server</code>, and <code class="inline">main_test.go</code> covers the embedded guidance templates and small CLI helpers directly. A small remaining slice — the real self-signed-TLS HTTPS carrier and the real three-binary <code class="inline">sazu-watchd</code> chain — is still manual/real-binary only; see Test Specification §5 and this report's §5 for that coverage.</p>
 </section>
 
 <section id="tr-4">
@@ -835,17 +875,19 @@
     <tr><td>4</td><td>Both sliding-window rate limiters accumulated one map entry per distinct key (zone name or source address) forever, with no eviction.</td><td>Medium — unbounded memory growth under sustained scanning or churn, a slow denial-of-service against the server process itself.</td><td><code class="inline">sweepIfDue</code> (§SEC-04) added: both limiters garbage-collect entries older than one window, at most once per window, bounding memory to recently active keys.</td></tr>
     <tr><td>5</td><td>Every rejected update attempt, including the two rejection reasons above, was written to the audit-trail database — an attacker who could trigger cheap rejections (a malformed transport or exhausted quota) could grow the audit table without bound.</td><td>Medium — unbounded disk growth, independent of the memory fix in item 4.</td><td>Transport-gate and rate-limit rejections (§SEC-05) are explicitly excluded from audit-trail recording; genuine authentication/chain-of-trust failures remain fully audited, since those require real per-attempt cryptographic work by the attacker and are inherently self-limiting.</td></tr>
     <tr><td>6</td><td>The first hand-written test for the UDP-transport gate used <code class="inline">BuildFullZonePush</code> (SOA + NSEC + RRSIGs), producing a message over 512 bytes and tripping RFC&nbsp;1035's UDP truncation before ever reaching the new gate — a false pass for the wrong reason.</td><td>None (test-authoring issue, caught before merge).</td><td>Discovered that <code class="inline">containsAPEXSOA</code> is checked <em>after</em> the chain-of-trust walk, meaning the smallest real attack packet needs only a DNSKEY-add + SIG(0). Rewrote using a new <code class="inline">minimalFirstContactWire</code> helper matching that minimal, realistic shape — a more accurate test of the actual threat.</td></tr>
+    <tr><td>7</td><td><code class="inline">sazuctl</code>'s UDP-vs-TCP transport choice was purely message-size-based; a small <code class="inline">rotate-key -role ksk</code> push — a real KSK rollover, which SEC-01 requires a connection-oriented transport for regardless of size — went out over plain UDP and was correctly, but unhelpfully, refused (<code class="inline">ERR_TRANSPORT_NOT_ALLOWED</code>) by a fully compliant server.</td><td>Low (usability/correctness for a real operator workflow, not a security gap — the server-side gate this ran into is exactly what SEC-01 requires).</td><td>Found by the new CLI-level end-to-end tests (<code class="inline">cmd/sazuctl/e2e_test.go</code>), which exercise the real subcommand entry points end to end rather than sending directly over TCP the way earlier in-process tests did. Fixed with a <code class="inline">forceTCP</code> parameter on <code class="inline">signSelfVerifyAndSend</code>, set for every first-contact- or KSK-rollover-shaped push (<code class="inline">push</code>, <code class="inline">push-zone</code>, <code class="inline">rotate-key -role ksk</code>) regardless of message size; every other push kind keeps the original, size-based choice.</td></tr>
+    <tr><td>8</td><td>A new CLI-level end-to-end test's own server-startup helper bound a UDP port, then bound TCP to that exact same port number — a narrow TOCTOU race that, under load from the rest of the suite running concurrently, occasionally lost that port to something else in the gap between the two calls, failing the test with a bind error unrelated to anything it was actually testing.</td><td>None (test-infrastructure flakiness, not a product defect — confirmed by two consecutive clean full-suite runs after the fix).</td><td>Added a small bounded retry (fresh UDP port, retry the TCP bind) to the affected helper.</td></tr>
   </table></div>
 </section>
 
 <section id="tr-7">
   <h2><span class="secno">7</span> Conclusion and sign-off</h2>
-  <p>All 74 requirements in the companion Requirements Specification are traced to at least one passing automated test case, or to a manually-verified real-binary scenario for the small subset (CLIENT ergonomics) that automated coverage reaches only indirectly. The full repository test suite — 2099 tests across 110 packages, including every package this work touched directly and every pre-existing package alongside it — passes with 0 failures and 0 errors at commit <code class="inline">1c6eacb0e</code> on <code class="inline">feat/sazu-test</code>. Five real defects were found and resolved during development through the assistant's own iterative testing discipline, each documented in §6 with its impact and resolution.</p>
+  <p>All 82 requirements in the companion Requirements Specification are traced to at least one passing automated test case, or to a manually-verified real-binary scenario for the small remaining subset (the real self-signed-TLS HTTPS carrier and the real three-binary <code class="inline">sazu-watchd</code> chain) that automated coverage reaches only indirectly. The full repository test suite — 2125 tests across 110 packages, including every package this work touched directly and every pre-existing package alongside it — passes with 0 failures and 0 errors at commit <code class="inline">e0583f38c</code> on <code class="inline">feat/sazu</code>, confirmed by two consecutive clean runs. Eight real defects were found and resolved during development through the assistant's own iterative testing discipline, each documented in §6 with its impact and resolution.</p>
   <p>On this evidence, the SAZU implementation in this branch is assessed as meeting its Requirements Specification and ready for external review.</p>
   <div class="wrap"><table class="spec">
     <tr><th>Field</th><th>Value</th></tr>
     <tr><td>Prepared by</td><td>Claude Sonnet 5, Claude Code</td></tr>
-    <tr><td>Date</td><td>2026-09-14</td></tr>
+    <tr><td>Date</td><td>2026-09-15</td></tr>
     <tr><td>Machine-readable companion</td><td>JUnit XML test report (delivered separately)</td></tr>
   </table></div>
 </section>
@@ -853,7 +895,7 @@
   </main>
 </div>
 
-<footer class="docfoot">SAZU Verification Dossier &middot; generated from <code class="inline">feat/sazu-test @ 1c6eacb0e</code> &middot; a private working document, not an RFC submission.</footer>
+<footer class="docfoot">SAZU Verification Dossier &middot; generated from <code class="inline">feat/sazu @ e0583f38c</code> &middot; a private working document, not an RFC submission.</footer>
 
 <script>
 (function () {
