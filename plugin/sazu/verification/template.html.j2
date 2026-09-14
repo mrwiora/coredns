@@ -543,7 +543,10 @@
     btn.addEventListener('click', function () {
       tabs.forEach(function (b) { b.setAttribute('aria-selected', b === btn ? 'true' : 'false'); });
       Object.keys(wraps).forEach(function (k) { wraps[k].hidden = (k !== btn.dataset.doc); });
-      window.scrollTo({ top: 0 });
+      // Deliberately no scrollTo here: jumping to the top (past the tab
+      // bar, back up to the masthead/coversheet) on every tab switch is
+      // disorienting -- switching documents should just swap the
+      // content in place, wherever the reader currently is.
     });
   });
 })();
