@@ -1,11 +1,13 @@
 // Command sazuctl is the customer-side SAZU push client -- the Go/CoreDNS
 // counterpart to the earlier Rust/rDNS port's sazu-client. Every
 // subcommand builds and signs an RFC 2136 UPDATE with SIG(0) (RFC 2931)
-// and either sends it to a -target (UDP or TCP -- TCP is chosen
-// automatically for anything too large for a single UDP datagram, and
-// unconditionally for a first-contact- or KSK-rollover-shaped push,
-// which a compliant server refuses over plain UDP regardless of size;
-// see signSelfVerifyAndSend's forceTCP) or just prints/self-verifies it.
+// and either sends it to a -target -- TCP by default, always (a
+// first-contact or KSK-rollover push always requires it, and every
+// other push kind still benefits: no single-datagram size ceiling and
+// no silent IP-layer fragmentation of the DNSSEC-signed content this
+// tool exists to push), with -udp available to opt back into UDP where
+// a compliant server actually allows it; see signSelfVerifyAndSend's own
+// doc comment -- or just prints/self-verifies it.
 package main
 
 import (
@@ -90,8 +92,8 @@ func dsGuidanceDataFor(zone string, key *dns.DNSKEY) dsGuidanceData {
 	}
 }
 
-// safeUDPPushSize is the threshold above which sazuctl sends a push over
-// TCP instead of UDP: RFC 1035's own original plain-DNS-over-UDP ceiling
+// safeUDPPushSize is the threshold above which a -udp push falls back to
+// TCP instead: RFC 1035's own original plain-DNS-over-UDP ceiling
 // (miekg/dns's MinMsgSize), and -- deliberately -- the real, actual
 // receive capacity of a CoreDNS UDP listener today, since core/dnsserver
 // does not raise it (an earlier Config.UDPSize override was tried and
@@ -157,14 +159,15 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sazuctl ds -zone <zone> -key <path> [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-ttl 300] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl push-zone -zone <zone> -key <path> -zonefile <path> [-zsk-key <path>] [-previous-serial N] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl push-update -zone <zone> -key <path> [-zsk-key <path>] [-add \"rr\"]... [-del \"rr\"]... [-del-rrset \"name TYPE\"]... [-target host:port|url] [-json] [-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl contact -zone <zone> -key <path> [-address mailto:you@example.org]... [-clear] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl rotate-key -zone <zone> [-role ksk|zsk] ... (run with no -role for an explanation of the choice)")
+	fmt.Fprintln(os.Stderr, "  sazuctl push-update -zone <zone> -key <path> [-zsk-key <path>] [-udp] [-add \"rr\"]... [-del \"rr\"]... [-del-rrset \"name TYPE\"]... [-target host:port|url] [-json] [-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl contact -zone <zone> -key <path> [-address mailto:you@example.org]... [-clear] [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl rotate-key -zone <zone> [-role ksk|zsk] [-udp (role zsk only)] ... (run with no -role for an explanation of the choice)")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "-key-passphrase-file encrypts/decrypts the key file at rest (§10.8); omit it for a plain BIND-format key file (the default).")
-	fmt.Fprintln(os.Stderr, "-target accepts an http(s):// URL to push over §7.3's HTTPS carrier instead of UDP/TCP; -json then sends a JSON wire envelope instead of raw bytes.")
+	fmt.Fprintln(os.Stderr, "-target accepts an http(s):// URL to push over §7.3's HTTPS carrier instead of TCP; -json then sends a JSON wire envelope instead of raw bytes.")
+	fmt.Fprintln(os.Stderr, "TCP is the default and always used for push/push-zone/rotate-key -role ksk (a compliant server refuses those over UDP regardless of size); -udp, where offered, opts other pushes back into UDP, falling back to TCP with a warning if the push is too large for one safe datagram.")
 	fmt.Fprintln(os.Stderr, "-zsk-key, where accepted, signs zone content with that optional ZSK instead of -key (the KSK); -key still authenticates the transaction. See 'sazuctl rotate-key' for the KSK-vs-ZSK tradeoff.")
 }
 
@@ -191,6 +194,27 @@ func addJSONCarrierFlag(fs *flag.FlagSet) *bool {
 	return fs.Bool("json", false,
 		"when -target is an http(s):// URL, send the push as a JSON wire envelope "+
 			`({"wire":"<base64>"}) instead of a raw application/dns-message body`)
+}
+
+// addUDPFlag registers the -udp flag every push-capable subcommand that
+// CAN safely use UDP shares (never on push, push-zone, or rotate-key
+// -role ksk -- those always build a first-contact- or KSK-rollover-
+// shaped push, which a compliant server refuses over UDP outright
+// regardless of size; see SEC-01, and signSelfVerifyAndSend's own doc
+// comment for the full reasoning). Off by default: TCP is the right
+// default for a one-shot administrative push like any of these -- it
+// always works regardless of message size or path MTU, at the cost of
+// one extra round trip a real operator never notices. Give -udp only
+// for a specific reason to prefer it (testing a server's UDP-specific
+// behavior, or a network path where only UDP/53 is reachable); a push
+// too large for one safe UDP datagram still goes out over TCP
+// regardless, with a warning explaining why.
+func addUDPFlag(fs *flag.FlagSet) *bool {
+	return fs.Bool("udp", false,
+		"attempt UDP instead of the default TCP for a host:port target. Falls back to TCP with a "+
+			"warning if the push is too large for one safe UDP datagram; never honored for a first-contact "+
+			"or KSK-rollover push (push, push-zone, rotate-key -role ksk), which a compliant server always "+
+			"refuses over UDP regardless -- those three don't offer this flag at all.")
 }
 
 // readPassphraseFile reads the passphrase addPassphraseFlag's flag points
@@ -387,7 +411,7 @@ func runPush(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, true)
+	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false)
 }
 
 // addZSKKeyFlag registers the -zsk-key (and matching -zsk-key-
@@ -485,7 +509,7 @@ func runPushZone(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, true)
+	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false)
 }
 
 // runPushUpdate builds an ordinary (non-first-contact) SAZU push: no
@@ -500,6 +524,7 @@ func runPushUpdate(args []string) error {
 	zskKeyPath, zskPassphraseFile := addZSKKeyFlag(fs)
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
+	udp := addUDPFlag(fs)
 	var adds, dels, delRRsets stringSliceFlag
 	fs.Var(&adds, "add", `record to add, zone-file format, e.g. -add "www.example.org. 300 IN A 203.0.113.20" (repeatable)`)
 	fs.Var(&dels, "del", "exact record to delete, same format as -add (repeatable)")
@@ -576,7 +601,7 @@ func runPushUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false)
+	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, *udp)
 }
 
 // runContact registers or clears a zone's §10.6 registration-contact
@@ -592,6 +617,7 @@ func runContact(args []string) error {
 	keyPath := fs.String("key", "", "path to the Ed25519 key already pinned at the server for this zone")
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
+	udp := addUDPFlag(fs)
 	clear := fs.Bool("clear", false, "clear the zone's registered contact instead of setting one")
 	var addresses stringSliceFlag
 	fs.Var(&addresses, "address", "contact address: mailto:you@example.org, or https://... for a webhook (repeatable)")
@@ -639,7 +665,7 @@ func runContact(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false)
+	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, *udp)
 }
 
 // runAddZSK registers a new, optional ZSK for a zone that already has a
@@ -655,6 +681,7 @@ func runAddZSK(args []string) error {
 	zskPath := fs.String("zsk-key", "", "path to the ZSK to register (created if missing)")
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
+	udp := addUDPFlag(fs)
 	kskPassphraseFile := addPassphraseFlag(fs)
 	zskPassphraseFile := fs.String("zsk-key-passphrase-file", "", "like -key-passphrase-file, but for -zsk-key")
 	if err := fs.Parse(args); err != nil {
@@ -700,7 +727,7 @@ func runAddZSK(args []string) error {
 		return err
 	}
 	fmt.Printf("Registering ZSK key tag %d for %s, authenticated by key tag %d\n", zsk.KeyTag(), *zone, ksk.KeyTag())
-	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier, false)
+	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier, *udp)
 }
 
 // runRetireZSK removes a previously registered ZSK from a zone -- the
@@ -715,6 +742,7 @@ func runRetireZSK(args []string) error {
 	zskPath := fs.String("zsk-key", "", "path to the ZSK being retired (must already exist)")
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
+	udp := addUDPFlag(fs)
 	kskPassphraseFile := addPassphraseFlag(fs)
 	zskPassphraseFile := fs.String("zsk-key-passphrase-file", "", "like -key-passphrase-file, but for -zsk-key")
 	if err := fs.Parse(args); err != nil {
@@ -753,7 +781,7 @@ func runRetireZSK(args []string) error {
 		return err
 	}
 	fmt.Printf("Retiring ZSK key tag %d for %s, authenticated by key tag %d\n", zsk.KeyTag(), *zone, ksk.KeyTag())
-	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier, false)
+	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier, *udp)
 }
 
 // rotateKeyChoiceData is rotate-key-choice.txt's template data.
@@ -779,6 +807,9 @@ func runRotateKey(args []string) error {
 	newZSKPath := fs.String("new-zsk-key", "", "(-role zsk) path to the new ZSK (created if missing)")
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
+	udp := fs.Bool("udp", false,
+		"(-role zsk only -- never honored for -role ksk, a KSK rollover, which a compliant server always refuses "+
+			"over UDP) attempt UDP instead of the default TCP; see add-zsk/retire-zsk's own -udp for the full reasoning")
 	passphraseFile := addPassphraseFlag(fs)
 	newPassphraseFile := fs.String("new-key-passphrase-file", "", "like -key-passphrase-file, but for the new key/ZSK")
 	if err := fs.Parse(args); err != nil {
@@ -808,7 +839,7 @@ func runRotateKey(args []string) error {
 		if err := runAddZSK([]string{
 			"-zone", *zone, "-ksk-key", *keyPath, "-key-passphrase-file", *passphraseFile,
 			"-zsk-key", *newZSKPath, "-zsk-key-passphrase-file", *newPassphraseFile,
-			"-target", *target, jsonFlagArg(*jsonCarrier),
+			"-target", *target, jsonFlagArg(*jsonCarrier), udpFlagArg(*udp),
 		}); err != nil {
 			return fmt.Errorf("registering the new ZSK: %w", err)
 		}
@@ -823,7 +854,7 @@ func runRotateKey(args []string) error {
 		if err := runRetireZSK([]string{
 			"-zone", *zone, "-ksk-key", *keyPath, "-key-passphrase-file", *passphraseFile,
 			"-zsk-key", *currentZSKPath,
-			"-target", *target, jsonFlagArg(*jsonCarrier),
+			"-target", *target, jsonFlagArg(*jsonCarrier), udpFlagArg(*udp),
 		}); err != nil {
 			return fmt.Errorf("retiring the old ZSK (the new one is already registered and usable): %w", err)
 		}
@@ -861,7 +892,7 @@ func runRotateKey(args []string) error {
 		if err != nil {
 			return err
 		}
-		return signSelfVerifyAndSend(*zone, wire, newKSK, *target, *jsonCarrier, true)
+		return signSelfVerifyAndSend(*zone, wire, newKSK, *target, *jsonCarrier, false)
 	default:
 		return fmt.Errorf(`-role must be "ksk" or "zsk", got %q`, *role)
 	}
@@ -877,6 +908,16 @@ func jsonFlagArg(asJSON bool) string {
 		return "-json"
 	}
 	return "-json=false"
+}
+
+// udpFlagArg mirrors jsonFlagArg for -udp, so rotate-key -role zsk can
+// forward its own -udp choice into the add-zsk/retire-zsk calls it
+// makes internally.
+func udpFlagArg(udp bool) string {
+	if udp {
+		return "-udp"
+	}
+	return "-udp=false"
 }
 
 // parseRRs parses each s in values as a zone-file-format resource record.
@@ -917,27 +958,54 @@ func parseNameTypePairs(values []string) ([]dns.RR, error) {
 	return rrs, nil
 }
 
+// chooseNetwork is signSelfVerifyAndSend's transport decision, pulled
+// out as a pure function so it's directly unit-testable without a real
+// socket: "tcp" unconditionally unless allowUDP is true and wireLen
+// still fits in one safe UDP datagram, in which case "udp". When
+// allowUDP is true but wireLen doesn't fit, it falls back to "tcp" and
+// returns a non-empty warning explaining why, rather than sending a
+// datagram guaranteed to be truncated or dropped.
+func chooseNetwork(wireLen int, allowUDP bool) (network, warning string) {
+	if allowUDP && wireLen <= safeUDPPushSize {
+		return "udp", ""
+	}
+	if allowUDP {
+		return "tcp", fmt.Sprintf("Warning: this push is %d bytes, exceeding the %d-byte safe single-UDP-datagram size -- "+
+			"sending over TCP instead of the requested -udp (a truncated UDP response or a bare FORMERR would "+
+			"otherwise be the only outcome; there is no safe way to split one UPDATE across several datagrams).",
+			wireLen, safeUDPPushSize)
+	}
+	return "tcp", ""
+}
+
 // signSelfVerifyAndSend proves a signed push actually verifies against
 // its own key before sending anything, then sends it to target -- over
-// UDP/TCP for a "host:port" target, or via §7.3's HTTPS/JSON carrier for
-// an "http://"/"https://" URL target (asJSON selects the JSON wire
-// envelope over that carrier instead of raw wire bytes) -- and reports
-// what the server did with it, or just prints the wire bytes if no
-// target was given.
+// TCP (or, opted into, UDP) for a "host:port" target, or via §7.3's
+// HTTPS/JSON carrier for an "http://"/"https://" URL target (asJSON
+// selects the JSON wire envelope over that carrier instead of raw wire
+// bytes) -- and reports what the server did with it, or just prints the
+// wire bytes if no target was given.
 //
-// forceTCP skips the ordinary size-based UDP/TCP choice and always uses
-// TCP for a "host:port" target (an http(s):// target is unaffected --
-// TLS/QUIC are connection-oriented regardless). Pass true from any
-// caller building a first-contact- or KSK-rollover-shaped push: a
-// compliant server refuses either over plain UDP outright (SEC-01 --
-// the source address can't be validated without a completed handshake),
-// so picking UDP there purely because the message happens to be small
-// would get a real push refused for a reason that has nothing to do
-// with its content. Every other push kind (an ordinary differential
-// update, a ZSK registration/retirement, a contact registration) is
-// never first-contact/rollover-shaped and keeps the original,
-// size-based choice.
-func signSelfVerifyAndSend(zone string, wire []byte, key *dns.DNSKEY, target string, asJSON bool, forceTCP bool) error {
+// TCP is the default, unconditionally, for every "host:port" target --
+// not chosen by message size the way earlier versions of this tool did.
+// It always works: no single-datagram size ceiling, no silent IP-layer
+// fragmentation of exactly the DNSSEC-signed content this tool exists to
+// push, and no risk of running into SEC-01's connection-oriented-
+// transport requirement for a first-contact or KSK-rollover push. A
+// real operator running this tool by hand never notices the one extra
+// round trip TCP's handshake costs; UDP's failure modes here are all
+// silent or confusing (a truncated response, a bare FORMERR, or a
+// REFUSED that has nothing to do with the push's actual content).
+//
+// allowUDP opts back into the old behavior for a "host:port" target
+// where that's actually possible (never for a first-contact- or
+// KSK-rollover-shaped push -- callers building one of those don't pass
+// this at all, since a compliant server refuses either over UDP
+// outright regardless of size): if wire still fits in one safe UDP
+// datagram, it's sent over UDP; otherwise this prints a clear warning
+// and falls back to TCP rather than sending a datagram guaranteed to be
+// truncated or dropped.
+func signSelfVerifyAndSend(zone string, wire []byte, key *dns.DNSKEY, target string, asJSON bool, allowUDP bool) error {
 	if err := sazu.VerifySIG0(wire, key); err != nil {
 		return fmt.Errorf("self-verification failed (this would be a bug): %w", err)
 	}
@@ -952,9 +1020,9 @@ func signSelfVerifyAndSend(zone string, wire []byte, key *dns.DNSKEY, target str
 		return sendOverHTTP(zone, wire, key, target, asJSON)
 	}
 
-	network := "udp"
-	if forceTCP || len(wire) > safeUDPPushSize {
-		network = "tcp"
+	network, warning := chooseNetwork(len(wire), allowUDP)
+	if warning != "" {
+		fmt.Println(warning)
 	}
 
 	conn, err := net.Dial(network, target)
@@ -968,13 +1036,10 @@ func signSelfVerifyAndSend(zone string, wire []byte, key *dns.DNSKEY, target str
 	if err := writeRequest(conn, network, wire); err != nil {
 		return err
 	}
-	switch {
-	case network == "tcp" && forceTCP:
-		fmt.Printf("Sent %d bytes to %s over TCP (required for a first-contact/rollover-shaped push, regardless of size)\n", len(wire), target)
-	case network == "tcp":
-		fmt.Printf("Sent %d bytes to %s over TCP (exceeds the %d-byte safe UDP size)\n", len(wire), target, safeUDPPushSize)
-	default:
-		fmt.Printf("Sent %d bytes to %s\n", len(wire), target)
+	if network == "udp" {
+		fmt.Printf("Sent %d bytes to %s over UDP (-udp given)\n", len(wire), target)
+	} else {
+		fmt.Printf("Sent %d bytes to %s over TCP\n", len(wire), target)
 	}
 
 	buf, err := readResponse(conn, network)

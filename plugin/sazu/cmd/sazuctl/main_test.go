@@ -120,3 +120,44 @@ func TestParseRoleFlag(t *testing.T) {
 		t.Fatalf(`parseRoleFlag("neither") = nil error, want an error`)
 	}
 }
+
+// TestChooseNetworkDefaultsToTCPRegardlessOfSize proves the central
+// transport-selection change: without -udp (allowUDP=false), the
+// answer is always "tcp" -- for a tiny message and for one far larger
+// than any UDP datagram could carry -- never chosen by size the way an
+// earlier version of this tool did.
+func TestChooseNetworkDefaultsToTCPRegardlessOfSize(t *testing.T) {
+	if network, warn := chooseNetwork(50, false); network != "tcp" || warn != "" {
+		t.Fatalf("chooseNetwork(50, false) = %q, %q; want tcp, no warning", network, warn)
+	}
+	if network, warn := chooseNetwork(50000, false); network != "tcp" || warn != "" {
+		t.Fatalf("chooseNetwork(50000, false) = %q, %q; want tcp, no warning", network, warn)
+	}
+}
+
+// TestChooseNetworkAllowUDPUsesUDPWhenItFits proves -udp actually
+// opts into UDP when the message is small enough to be safe.
+func TestChooseNetworkAllowUDPUsesUDPWhenItFits(t *testing.T) {
+	if network, warn := chooseNetwork(safeUDPPushSize, true); network != "udp" || warn != "" {
+		t.Fatalf("chooseNetwork(safeUDPPushSize, true) = %q, %q; want udp, no warning", network, warn)
+	}
+	if network, warn := chooseNetwork(1, true); network != "udp" || warn != "" {
+		t.Fatalf("chooseNetwork(1, true) = %q, %q; want udp, no warning", network, warn)
+	}
+}
+
+// TestChooseNetworkAllowUDPFallsBackToTCPWithWarningWhenTooLarge proves
+// -udp doesn't send a datagram doomed to be truncated or dropped: past
+// the safe UDP size, it falls back to TCP and says why.
+func TestChooseNetworkAllowUDPFallsBackToTCPWithWarningWhenTooLarge(t *testing.T) {
+	network, warn := chooseNetwork(safeUDPPushSize+1, true)
+	if network != "tcp" {
+		t.Fatalf("chooseNetwork(safeUDPPushSize+1, true) network = %q, want tcp", network)
+	}
+	if warn == "" {
+		t.Fatalf("expected a non-empty warning explaining the fallback")
+	}
+	if !strings.Contains(warn, "TCP") || !strings.Contains(warn, "513") {
+		t.Fatalf("expected the warning to mention TCP and the actual size, got %q", warn)
+	}
+}
