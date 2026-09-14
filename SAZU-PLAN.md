@@ -942,6 +942,46 @@ for a manually verified real-binary walkthrough.
   `plugin/sazu` suite passes cleanly under `go test -race` across
   repeated runs.
 
+- **SAZU Verification Dossier: generated from YAML, not hand-edited HTML.**
+  Rethought on request, after the dossier's own maintenance history made
+  the problem concrete: every count in the document (how many
+  requirements, how many test cases, which test verifies which
+  requirement) had been hand-tallied across several revisions, and it
+  had already gone wrong more than once -- a stat-tile miscount caught
+  by grep, and (found only once this rewrite started actually
+  cross-checking it) a genuine leftover duplicate test-case ID
+  (`TC-KEY-07`) sitting undetected in the document since the KSK/ZSK
+  rewrite two revisions earlier.
+
+  Moved to `plugin/sazu/verification/`, restructured as three YAML data
+  files (`data/requirements.yaml`, `data/test-specification.yaml`,
+  `data/test-report.yaml`) rendered through a Jinja2 template
+  (`template.html.j2`) by a small Python script (`build.py`) into the
+  same single self-contained HTML page as before. Chosen over a Go tool
+  specifically because this is documentation tooling, not something
+  that ships inside the `coredns` binary -- Python with PyYAML and
+  Jinja2 (an isolated `.venv/`, not a system-wide dependency) is a
+  substantially shorter, clearer program for "structured data in,
+  cross-referenced HTML out" than the Go standard library's
+  `html/template` would be for the same job.
+
+  The real payoff is `build.py`'s validation pass, run on every build:
+  every requirement ID must be cited by at least one test case's
+  `verifies` field (or have a documented reason in
+  `requirements.yaml`'s `coverage_exceptions` for why not), every test
+  case's `verifies` field must cite a requirement ID that actually
+  exists, and no ID may be duplicated. Running this for the first time
+  during the migration surfaced the `TC-KEY-07` duplicate immediately,
+  plus two real, previously invisible test-coverage gaps recorded
+  honestly as `coverage_exceptions` rather than papered over:
+  `AUTH-04`'s fail-closed SERVFAIL path (no test mocks a capture
+  failure to exercise it) and `CARRIER-06`'s HTTP(S) push path
+  (`cmd/sazuctl`'s own `sendOverHTTP` has no automated test at all --
+  only the server side of HTTPS is tested, via a hand-built HTTP client
+  in `https_test.go`, not sazuctl's real client code). Neither gap is
+  fixed yet; both are exactly the kind of thing this rewrite exists to
+  make impossible to lose track of again.
+
 ## Outstanding
 
 Every item the architectural review that led to this document identified
@@ -963,3 +1003,16 @@ noted there with its own reasoning:
   doesn't have today, for a failure mode (a customer's own full-zone
   re-push accidentally dropping a ZSK) that is far lower-stakes than
   what the KSK check already guards.
+
+Two further, smaller gaps were found (not by design review this time,
+but by the Verification Dossier's own new cross-validation -- see
+**Done**, above) and are tracked as `coverage_exceptions` in
+`plugin/sazu/verification/data/requirements.yaml` rather than fixed
+here yet:
+
+- `AUTH-04` (fail-closed SERVFAIL when no wire bytes are captured) has
+  no automated test -- it would need a way to mock a capture failure,
+  which nothing in the suite currently provides.
+- `CARRIER-06` (the client pushing over an `http(s)://` target) is only
+  manually verified; `cmd/sazuctl`'s own `sendOverHTTP` has no
+  automated test exercising it directly.
