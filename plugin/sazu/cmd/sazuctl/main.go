@@ -55,6 +55,26 @@ var guidanceFS embed.FS
 // blank or truncated message to a real customer.
 var guidanceTemplates = template.Must(template.ParseFS(guidanceFS, "guidance/*.txt"))
 
+// zoneFS embeds the starter zone-definition templates init-zone writes
+// out (one YAML, one plain BIND zone file), for the same reason
+// guidanceFS does: real, occasionally-edited prose kept in its own file
+// rather than a long chain of fmt.Fprintf calls, still fully compiled
+// into the binary via go:embed.
+//
+//go:embed templates/*.tmpl
+var zoneFS embed.FS
+
+var zoneTemplates = template.Must(template.ParseFS(zoneFS, "templates/*.tmpl"))
+
+// zoneTemplateData is the template data for both templates/*.tmpl
+// files.
+type zoneTemplateData struct {
+	Zone      string // fully qualified, trailing dot (e.g. "example.org.")
+	ZoneNoDot string // same, without the trailing dot
+	FileName  string // the path init-zone is about to write, for the "push it like this" hint
+	Serial    uint32 // today's date as YYYYMMDD00 (zone.bind.tmpl only -- a raw zone file has no "auto")
+}
+
 // printGuidance renders the named embedded template to stdout. A
 // rendering error here is a bug in a guidance file, not a runtime
 // condition this tool's own users can hit or need to react to, so it's
@@ -143,6 +163,10 @@ func main() {
 		err = runRetireZSK(os.Args[2:])
 	case "rotate-key":
 		err = runRotateKey(os.Args[2:])
+	case "init-zone":
+		err = runInitZone(os.Args[2:])
+	case "zone-convert":
+		err = runZoneConvert(os.Args[2:])
 	default:
 		usage()
 		os.Exit(1)
@@ -154,7 +178,9 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sazuctl <keygen|ds|push|push-zone|push-update|contact|add-zsk|retire-zsk|rotate-key> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: sazuctl <keygen|ds|init-zone|zone-convert|push|push-zone|push-update|contact|add-zsk|retire-zsk|rotate-key> [flags]")
+	fmt.Fprintln(os.Stderr, "  sazuctl init-zone -zone <zone> [-out <path>] [-format yaml|bind]")
+	fmt.Fprintln(os.Stderr, "  sazuctl zone-convert -in <path.yaml> -out <path.zone> [-zone <zone>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl keygen -out <path> [-zone <owner>] [-role ksk|zsk] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl ds -zone <zone> -key <path> [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-ttl 300] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
@@ -169,6 +195,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "-target accepts an http(s):// URL to push over §7.3's HTTPS carrier instead of TCP; -json then sends a JSON wire envelope instead of raw bytes.")
 	fmt.Fprintln(os.Stderr, "TCP is the default and always used for push/push-zone/rotate-key -role ksk (a compliant server refuses those over UDP regardless of size); -udp, where offered, opts other pushes back into UDP, falling back to TCP with a warning if the push is too large for one safe datagram.")
 	fmt.Fprintln(os.Stderr, "-zsk-key, where accepted, signs zone content with that optional ZSK instead of -key (the KSK); -key still authenticates the transaction. See 'sazuctl rotate-key' for the KSK-vs-ZSK tradeoff.")
+	fmt.Fprintln(os.Stderr, "-zonefile (push-zone) accepts a YAML zone definition (.yaml/.yml) as a drop-in alternative to a raw zone file -- see 'sazuctl init-zone' to create a starter one.")
 }
 
 // addPassphraseFlag registers the -key-passphrase-file flag every
@@ -345,6 +372,106 @@ func runDS(args []string) error {
 	return nil
 }
 
+// runInitZone writes a starter zone definition for -zone to disk --
+// answering "how do I even get a zone file to push" for a domain with
+// no existing one, without inventing anything: the YAML form (the
+// default) is a friendlier front end for exactly the same content a
+// real zone file carries (see zoneyaml.go's own doc comment), and the
+// bind form is a real, directly hand-editable zone file with the same
+// starter content. Refuses to overwrite an existing file at -out,
+// rather than silently discarding whatever a customer may have already
+// started writing there.
+func runInitZone(args []string) error {
+	fs := flag.NewFlagSet("init-zone", flag.ExitOnError)
+	zone := fs.String("zone", "", "zone to create a starter file for")
+	out := fs.String("out", "", "path to write the new zone definition to (default: <zone>.yaml, or <zone>.zone with -format bind)")
+	format := fs.String("format", "yaml",
+		`starter file format: "yaml" (recommended -- friendlier SOA serial/email handling, see zone-convert) or `+
+			`"bind" (a raw zone file, if you'd rather hand-edit that directly)`)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *zone == "" {
+		return fmt.Errorf("-zone is required")
+	}
+	zoneFqdn := dns.Fqdn(*zone)
+	zoneNoDot := strings.TrimSuffix(zoneFqdn, ".")
+
+	var ext, templateName string
+	switch *format {
+	case "yaml":
+		ext, templateName = ".yaml", "zone.yaml.tmpl"
+	case "bind":
+		ext, templateName = ".zone", "zone.bind.tmpl"
+	default:
+		return fmt.Errorf(`-format must be "yaml" or "bind", got %q`, *format)
+	}
+	path := *out
+	if path == "" {
+		path = zoneNoDot + ext
+	}
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("%s already exists -- refusing to overwrite it; remove it first or pass a different -out", path)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	data := zoneTemplateData{Zone: zoneFqdn, ZoneNoDot: zoneNoDot, FileName: path, Serial: dateSerial(time.Now().UTC())}
+	if err := zoneTemplates.ExecuteTemplate(f, templateName, data); err != nil {
+		f.Close()
+		return fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	fmt.Printf("Created a starter %s zone definition for %s at %s\n", *format, zoneFqdn, path)
+	fmt.Println("Edit it to add your own records, then push it:")
+	fmt.Printf("  sazuctl push-zone -zone %s -key <your-key> -zonefile %s -target <host:port>\n", zoneFqdn, path)
+	return nil
+}
+
+// runZoneConvert materializes a YAML zone definition as a real
+// BIND-format zone file -- for a customer who wants to keep both under
+// version control (the YAML as the source of truth, the generated zone
+// file as what actually gets reviewed/diffed the way a real DNS change
+// normally is), or who just wants to inspect exactly what push-zone
+// would build from a given YAML file without pushing anything. push-zone
+// itself never needs this step -- it accepts a .yaml/.yml -zonefile
+// directly (see loadZoneSource).
+func runZoneConvert(args []string) error {
+	fs := flag.NewFlagSet("zone-convert", flag.ExitOnError)
+	in := fs.String("in", "", "path to a YAML zone definition")
+	out := fs.String("out", "", "path to write the generated BIND-format zone file to")
+	zone := fs.String("zone", "", `zone name, if not already set in the YAML file's own "zone" field`)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *in == "" || *out == "" {
+		return fmt.Errorf("-in and -out are required")
+	}
+
+	soa, rrs, err := loadYAMLZone(*in, *zone)
+	if err != nil {
+		return err
+	}
+
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "%s\n", soa.String())
+	for _, rr := range rrs {
+		fmt.Fprintf(&buf, "%s\n", rr.String())
+	}
+	if err := os.WriteFile(*out, []byte(buf.String()), 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("Wrote %d record(s) (SOA included) from %s to %s\n", len(rrs)+1, *in, *out)
+	return nil
+}
+
 func runPush(args []string) error {
 	fs := flag.NewFlagSet("push", flag.ExitOnError)
 	zone := fs.String("zone", "", "zone being bootstrapped")
@@ -451,7 +578,7 @@ func runPushZone(args []string) error {
 	fs := flag.NewFlagSet("push-zone", flag.ExitOnError)
 	zone := fs.String("zone", "", "zone being pushed")
 	keyPath := fs.String("key", "", "path to the Ed25519 KSK (created if missing)")
-	zoneFile := fs.String("zonefile", "", "path to a BIND-format zone file for -zone")
+	zoneFile := fs.String("zonefile", "", "path to a BIND-format zone file for -zone, or a YAML zone definition (.yaml/.yml -- see 'sazuctl init-zone')")
 	zskKeyPath, zskPassphraseFile := addZSKKeyFlag(fs)
 	previousSerial := fs.Uint64("previous-serial", 0,
 		"SOA serial you last saw published for this zone, to guard against a stale push (RFC 2136 §2.4.2). "+
@@ -488,7 +615,7 @@ func runPushZone(args []string) error {
 		fmt.Println("(signing zone content with this ZSK; the KSK above only authenticates the transaction and signs the DNSKEY set)")
 	}
 
-	soa, rrs, err := sazu.LoadZoneFile(*zoneFile, *zone)
+	soa, rrs, err := loadZoneSource(*zoneFile, *zone)
 	if err != nil {
 		return err
 	}

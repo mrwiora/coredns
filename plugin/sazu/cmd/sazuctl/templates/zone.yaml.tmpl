@@ -1,0 +1,43 @@
+{{define "zone.yaml.tmpl"}}# SAZU zone definition for {{.Zone}}
+#
+# Edit this file -- add, change, or remove records under "records:" --
+# then push it:
+#   sazuctl push-zone -zone {{.Zone}} -key <your-key> -zonefile {{.FileName}} -target <host:port>
+#
+# A record's "value" is ordinary zone-file syntax for whatever comes
+# after the type, e.g.:
+#   type: MX,  value: "10 mail.{{.Zone}}"     (priority, then target)
+#   type: TXT, value: "\"some text\""          (a quoted string)
+#   type: CNAME, value: "{{.Zone}}"
+#
+# "name: \"@\"" means the zone apex itself. Any other name without a
+# trailing dot is relative to the zone (e.g. "www" becomes
+# "www.{{.Zone}}"); a name ending in "." is used exactly as written.
+
+zone: {{.Zone}}
+ttl: 3600
+
+soa:
+  ns: ns1.{{.Zone}}
+  admin_email: hostmaster@{{.ZoneNoDot}}
+  # "auto" fills in today's date as YYYYMMDD00 -- the conventional
+  # format, and one less number to get right by hand. If you push this
+  # zone more than once today, replace it with an explicit, higher
+  # number so each push carries a strictly increasing serial.
+  serial: auto
+  refresh: 3600
+  retry: 900
+  expire: 604800
+  minttl: 3600
+
+records:
+  - name: www
+    type: A
+    value: 203.0.113.10
+  - name: "@"
+    type: MX
+    value: "10 mail.{{.Zone}}"
+  - name: mail
+    type: A
+    value: 203.0.113.20
+{{end}}

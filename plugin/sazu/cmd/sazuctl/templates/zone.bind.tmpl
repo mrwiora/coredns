@@ -1,0 +1,20 @@
+{{define "zone.bind.tmpl"}}; SAZU zone definition for {{.Zone}}
+;
+; Edit this file, then push it:
+;   sazuctl push-zone -zone {{.Zone}} -key <your-key> -zonefile {{.FileName}} -target <host:port>
+;
+; The serial below is today's date as YYYYMMDD00 (a common convention,
+; not a requirement) -- if you push this zone more than once today, bump
+; it to a strictly higher number for each subsequent push.
+$TTL 3600
+{{.Zone}} IN SOA ns1.{{.Zone}} hostmaster.{{.Zone}} (
+        {{.Serial}} ; serial
+        3600        ; refresh
+        900         ; retry
+        604800      ; expire
+        3600 )      ; minimum
+
+www.{{.Zone}}  300 IN A  203.0.113.10
+{{.Zone}}          IN MX 10 mail.{{.Zone}}
+mail.{{.Zone}} 300 IN A  203.0.113.20
+{{end}}

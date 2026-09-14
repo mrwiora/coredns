@@ -297,3 +297,81 @@ func TestE2ERotateKeyZSKRoleRegistersThenRetires(t *testing.T) {
 		t.Fatalf("expected the new ZSK's push to be servable, got %d answers", len(answer))
 	}
 }
+
+// TestE2EInitZoneThenPushZoneWithYAML exercises the "how do I even get
+// a zone file to push" onboarding path end to end: init-zone writes a
+// starter YAML zone definition, and push-zone accepts it directly as
+// -zonefile (no separate conversion step) -- proving the YAML front end
+// (zoneyaml.go) produces real, servable zone content through the actual
+// CLI commands a customer would run.
+func TestE2EInitZoneThenPushZoneWithYAML(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-yaml-zone.example."
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "zone.yaml")
+	kskPath := filepath.Join(dir, "ksk.private")
+
+	if err := runInitZone([]string{"-zone", zone, "-out", yamlPath}); err != nil {
+		t.Fatalf("init-zone: %v", err)
+	}
+	if _, err := os.Stat(yamlPath); err != nil {
+		t.Fatalf("expected init-zone to create %s: %v", yamlPath, err)
+	}
+
+	if err := runPushZone([]string{"-zone", zone, "-key", kskPath, "-zonefile", yamlPath, "-target", addr}); err != nil {
+		t.Fatalf("push-zone with a YAML zonefile: %v", err)
+	}
+
+	// The starter template's own example records (www and mail) should
+	// be exactly what got onboarded.
+	if answer := queryA(t, addr, "www."+zone); len(answer) != 1 {
+		t.Fatalf("expected the YAML template's www record to be servable, got %d answers", len(answer))
+	}
+	if answer := queryA(t, addr, "mail."+zone); len(answer) != 1 {
+		t.Fatalf("expected the YAML template's mail record to be servable, got %d answers", len(answer))
+	}
+}
+
+// TestE2EInitZoneRefusesToOverwriteExistingFile proves init-zone
+// doesn't silently clobber a file a customer may have already started
+// editing.
+func TestE2EInitZoneRefusesToOverwriteExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.yaml")
+	if err := os.WriteFile(path, []byte("not a zone definition"), 0o644); err != nil {
+		t.Fatalf("writing pre-existing file: %v", err)
+	}
+	if err := runInitZone([]string{"-zone", "example.org.", "-out", path}); err == nil {
+		t.Fatalf("expected init-zone to refuse overwriting an existing file")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "not a zone definition" {
+		t.Fatalf("expected the existing file to survive untouched, got %q err=%v", data, err)
+	}
+}
+
+// TestE2EZoneConvertProducesAPushableZoneFile proves zone-convert's
+// output isn't just plausible-looking text -- push-zone can load and
+// push the exact BIND-format file it produces from a YAML source.
+func TestE2EZoneConvertProducesAPushableZoneFile(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-zone-convert.example."
+	dir := t.TempDir()
+	yamlPath := filepath.Join(dir, "zone.yaml")
+	zonePath := filepath.Join(dir, "zone.zone")
+	kskPath := filepath.Join(dir, "ksk.private")
+
+	if err := runInitZone([]string{"-zone", zone, "-out", yamlPath}); err != nil {
+		t.Fatalf("init-zone: %v", err)
+	}
+	if err := runZoneConvert([]string{"-in", yamlPath, "-out", zonePath}); err != nil {
+		t.Fatalf("zone-convert: %v", err)
+	}
+
+	if err := runPushZone([]string{"-zone", zone, "-key", kskPath, "-zonefile", zonePath, "-target", addr}); err != nil {
+		t.Fatalf("push-zone with the converted BIND zone file: %v", err)
+	}
+	if answer := queryA(t, addr, "www."+zone); len(answer) != 1 {
+		t.Fatalf("expected the converted zone file's www record to be servable, got %d answers", len(answer))
+	}
+}

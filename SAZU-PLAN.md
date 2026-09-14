@@ -836,6 +836,55 @@ for a manually verified real-binary walkthrough.
   cert, real TLS handshake) pushed to by a real `sazuctl` binary in both
   forms.
 
+- **`sazuctl` transport default: TCP always, UDP an explicit opt-in.**
+  Reconsidered after a direct question about it: is choosing UDP by
+  message size actually the right default for a client tool that only
+  ever does one-shot administrative pushes, given the whole reasoning
+  `safeUDPPushSize`'s own doc comment already lays out against UDP for
+  this exact content (MTU fragmentation, no safe multi-datagram UPDATE
+  mechanism)? Concluded no: `signSelfVerifyAndSend` now uses TCP
+  unconditionally for every `host:port` target unless a new `-udp` flag
+  opts back in, which `push`, `push-zone`, and `rotate-key -role ksk`
+  don't even offer (they're always first-contact- or KSK-rollover-
+  shaped, and SEC-01 refuses either over UDP regardless of size
+  regardless). Where `-udp` is offered (`push-update`, `contact`,
+  `add-zsk`, `retire-zsk`, `rotate-key -role zsk`), it still falls back
+  to TCP with a clear warning rather than sending a datagram guaranteed
+  to be truncated or dropped once the message exceeds
+  `safeUDPPushSize`. The decision itself is a pure `chooseNetwork`
+  function with direct unit tests, rather than inline logic only a real
+  socket could exercise.
+
+- **`sazuctl init-zone` / `zone-convert`: a friendlier way to create a
+  zone.** A direct gap report: nothing in this tool answered "how do I
+  even get a zone file to push" for a brand-new domain, and a raw
+  BIND-format zone file's SOA line has two fields that consistently
+  confuse people writing one by hand -- the serial number (an opaque
+  integer with a conventional but unenforced format) and the
+  responsible-party mailbox (`@` becomes `.`, and a literal `.` in the
+  local part needs escaping). `init-zone -zone <zone>` now writes a
+  starter definition; by default that's a small, commented **YAML**
+  file (`zoneyaml.go`) that fixes exactly those two pain points --
+  `admin_email: hostmaster@example.org` instead of the raw mailbox
+  encoding, and `serial: auto` (today's date as YYYYMMDD00, the
+  conventional format) instead of a number the customer has to compute
+  themselves -- while a record's own `value` field stays ordinary
+  zone-file syntax (reusing `dns.NewRR` under the hood, not a new
+  content model), and a record `name` resolves relative-to-the-zone /
+  absolute / apex (`"@"`) exactly the way a real zone file already does,
+  so nothing about the format is unfamiliar to someone who already
+  knows zone files. `push-zone -zonefile` accepts a `.yaml`/`.yml` file
+  directly (`loadZoneSource` dispatches on extension) with no separate
+  conversion step; `init-zone -format bind` writes a real, directly
+  hand-editable zone file instead for anyone who'd rather have that, and
+  `zone-convert` materializes a YAML source into one at any point (for
+  tracking both, or just inspecting what a YAML file expands to).
+  `init-zone` refuses to overwrite an existing file rather than risk
+  discarding a customer's in-progress edits. No new external dependency:
+  `go.yaml.in/yaml/v3` was already present (indirect) in the module
+  graph at a compatible version, so promoting it to a direct import
+  needed no `go.mod`/`go.sum` changes at all.
+
 ## Outstanding
 
 Every item the architectural review that led to this document identified

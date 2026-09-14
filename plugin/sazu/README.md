@@ -124,6 +124,15 @@ go build -o sazuctl ./plugin/sazu/cmd/sazuctl
 
 Subcommands:
 
+* `sazuctl init-zone -zone <zone> [-out <path>] [-format yaml|bind]` — write a
+  starter zone definition for a brand-new domain, ready to extend. `-format`
+  defaults to `yaml` (see **Creating a new zone**, below, for why); `bind`
+  writes an ordinary, directly hand-editable zone file with the same starter
+  content instead. Refuses to overwrite an existing file.
+* `sazuctl zone-convert -in <path.yaml> -out <path.zone> [-zone <zone>]` —
+  materialize a YAML zone definition as a real BIND-format zone file, for
+  tracking both, or just inspecting what a YAML source actually expands to.
+  `push-zone` never needs this step itself — see below.
 * `sazuctl keygen -out <path> [-zone <owner>] [-role ksk|zsk]` — generate a
   new Ed25519 key, saved in BIND9's private-key-file format. `-role`
   defaults to `ksk` — every zone needs exactly one, and this is what
@@ -137,9 +146,9 @@ Subcommands:
   onboards a zone (first contact) and what re-publishes a whole zone
   afterward. `-previous-serial` adds the SOA-serial staleness guard for a
   *re*-push against an already-onboarded zone; omit it for first contact.
-  `-zonefile` is required — author a small BIND-format zone file (SOA plus
-  whatever records you're onboarding) even for a brand-new domain; there is
-  no synthesized-SOA shortcut.
+  `-zonefile` is required — either a BIND-format zone file, or a YAML zone
+  definition (`.yaml`/`.yml`, converted automatically, no separate step);
+  see `sazuctl init-zone` to create a starter one for a brand-new domain.
 * `sazuctl push-update -zone <zone> -key <path> [-zsk-key <path>] [-add "rr"]... [-del "rr"]... [-del-rrset "name TYPE"]... [-target host:port|url] [-json]` —
   build, sign, and (optionally) send a **partial** push: individual
   add/delete operations against an already-onboarded zone. No DNSKEY is
@@ -178,9 +187,14 @@ Subcommands:
 Every subcommand without `-target` just prints the signed wire bytes and
 self-verifies — safe to run with nothing listening yet.
 
-`-target` accepts either `host:port` (sent over UDP, or TCP automatically
-for anything too large for a single UDP datagram) or an `http://`/`https://`
-URL — §7.3's HTTPS carrier, POSTed to `<url>/dns-query` exactly like a DoH
+`-target` accepts either `host:port` (sent over TCP, always, by default —
+it works regardless of message size or path MTU, at the cost of one extra
+round trip; a `-udp` flag on the subcommands where a server can actually
+accept it — never `push`, `push-zone`, or `rotate-key -role ksk`, which are
+always first-contact- or KSK-rollover-shaped and so always require a
+connection-oriented transport — opts back into UDP, falling back to TCP
+with a warning if the push is too large for one safe datagram) or an
+`http://`/`https://` URL — §7.3's HTTPS carrier, POSTed to `<url>/dns-query` exactly like a DoH
 client would, reusing the RFC 8484 convention as-is: no separate account or
 authorization step, the same SIG(0)-signed push either way. `-json` sends a
 small JSON envelope (`{"wire": "<base64>"}`) instead of a raw
@@ -203,6 +217,67 @@ from before this existed.
 manually checking DS-digest wire correctness offline. It **cannot** be used
 to satisfy chain-of-trust validation itself, which always walks the real DNS
 root — see the next two sections for how to actually test that.
+
+#### Creating a new zone
+
+`push-zone` needs a zone file to push, and hand-writing a BIND-format one
+from scratch means getting two things right that regularly trip people up:
+the SOA serial number (an opaque integer with a conventional-but-unenforced
+format) and the responsible-party mailbox (an email address written with
+the `@` replaced by a `.`, and any literal `.` in the local part escaped).
+`sazuctl init-zone` sidesteps both:
+
+```
+./sazuctl init-zone -zone yourdomain.example
+```
+
+writes `yourdomain.example.yaml` — a small, commented, directly editable
+file:
+
+```yaml
+zone: yourdomain.example.
+ttl: 3600
+soa:
+  ns: ns1.yourdomain.example.
+  admin_email: hostmaster@yourdomain.example
+  serial: auto   # today's date as YYYYMMDD00 -- see the file's own comment
+  refresh: 3600
+  retry: 900
+  expire: 604800
+  minttl: 3600
+records:
+  - name: www
+    type: A
+    value: 203.0.113.10
+  - name: "@"
+    type: MX
+    value: "10 mail.yourdomain.example"
+  - name: mail
+    type: A
+    value: 203.0.113.20
+```
+
+Add, edit, or remove entries under `records:` — a record's `value` is
+ordinary zone-file syntax for whatever comes after the type (an MX's is
+`"<priority> <target>"`, a TXT's is a quoted string, and so on), and a
+`name` without a trailing dot is relative to the zone the same way a real
+zone file already works, so this stays familiar to anyone who has written
+one by hand. `push-zone` accepts this file directly — no separate
+conversion step:
+
+```
+./sazuctl push-zone -zone yourdomain.example -key client.private \
+    -zonefile yourdomain.example.yaml -target 127.0.0.1:15353
+```
+
+`admin_email` and `serial: auto` are the two conveniences over a raw zone
+file; everything else is the exact same content a zone file carries, just
+in a shape that's easier to read a diff of. If you'd rather hand-edit a
+real zone file directly, `init-zone -format bind` writes one with the same
+starter content instead, or `sazuctl zone-convert -in <path.yaml> -out
+<path.zone>` materializes one from a YAML source at any point (useful if
+you want to track both, or just want to see exactly what a YAML file
+expands to before pushing it).
 
 ### sazu-watchd: §11 delegation-change monitoring
 
