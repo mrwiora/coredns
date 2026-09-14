@@ -645,6 +645,30 @@ for a manually verified real-binary walkthrough.
   existing ZSK's key tag), a full ZSK rotation (register new, retire
   old) via `rotate-key -role zsk`, and `rotate-key -role ksk` correctly
   routing into the existing (unchanged) DS-guidance/rollover machinery.
+  Also covered by dedicated CLI-level end-to-end tests
+  (`cmd/sazuctl/e2e_test.go`, a real `dnsserver.Server` driven by the
+  actual `run*` subcommand entry points, not just the plugin package's
+  own internal API) for both the KSK use case (onboard, differential
+  push, full KSK rollover, old key rejected/new key accepted afterward)
+  and the ZSK use case (register, ZSK-only authentication, KSK-
+  authenticated-but-ZSK-signed content, retirement, retired key
+  rejected).
+
+  Writing those end-to-end tests found a real, if narrow, bug the
+  in-process `zsk_test.go` tests couldn't have caught (they always send
+  over TCP directly, bypassing `sazuctl`'s own transport choice
+  entirely): `sazuctl`'s UDP-vs-TCP choice was purely size-based, so a
+  small `rotate-key -role ksk` push -- a real KSK rollover, needing the
+  SEC-01 connection-oriented-transport requirement satisfied -- went out
+  over plain UDP and was correctly, but unhelpfully, refused
+  (`ERR_TRANSPORT_NOT_ALLOWED`) by a compliant server. Fixed by adding a
+  `forceTCP` parameter to `signSelfVerifyAndSend`, set for every
+  first-contact- or KSK-rollover-shaped push (`push`, `push-zone`,
+  `rotate-key -role ksk`) regardless of message size; every other push
+  kind (differential updates, contact registration, ZSK add/retire --
+  none of them ever first-contact/rollover-shaped) keeps the original,
+  size-based choice unchanged.
+
   Deliberately out of scope for this pass, and left for a real need to
   justify: independent per-instance authorized-pusher identities for
   HA/multi-signer deployments (a genuinely different, authorization-not-

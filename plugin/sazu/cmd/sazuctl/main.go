@@ -1,10 +1,11 @@
-// Command sazuctl is a minimal test client for the SAZU push protocol --
-// the Go/CoreDNS counterpart to the earlier Rust/rDNS port's sazu-client.
-// It builds a first-contact SAZU push (a DNSKEY add for the client's own
-// key, plus one A record), signs it with SIG(0) (RFC 2931) using that same
-// key -- the design's central decision (§9.1: one key does both jobs) --
-// and either sends it to a target (UDP or TCP, chosen automatically by
-// size -- see safeUDPPushSize) or just prints/self-verifies it.
+// Command sazuctl is the customer-side SAZU push client -- the Go/CoreDNS
+// counterpart to the earlier Rust/rDNS port's sazu-client. Every
+// subcommand builds and signs an RFC 2136 UPDATE with SIG(0) (RFC 2931)
+// and either sends it to a -target (UDP or TCP -- TCP is chosen
+// automatically for anything too large for a single UDP datagram, and
+// unconditionally for a first-contact- or KSK-rollover-shaped push,
+// which a compliant server refuses over plain UDP regardless of size;
+// see signSelfVerifyAndSend's forceTCP) or just prints/self-verifies it.
 package main
 
 import (
@@ -386,7 +387,7 @@ func runPush(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier)
+	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, true)
 }
 
 // addZSKKeyFlag registers the -zsk-key (and matching -zsk-key-
@@ -484,7 +485,7 @@ func runPushZone(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier)
+	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, true)
 }
 
 // runPushUpdate builds an ordinary (non-first-contact) SAZU push: no
@@ -575,7 +576,7 @@ func runPushUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier)
+	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false)
 }
 
 // runContact registers or clears a zone's §10.6 registration-contact
@@ -638,7 +639,7 @@ func runContact(args []string) error {
 	if err != nil {
 		return err
 	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier)
+	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false)
 }
 
 // runAddZSK registers a new, optional ZSK for a zone that already has a
@@ -699,7 +700,7 @@ func runAddZSK(args []string) error {
 		return err
 	}
 	fmt.Printf("Registering ZSK key tag %d for %s, authenticated by key tag %d\n", zsk.KeyTag(), *zone, ksk.KeyTag())
-	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier)
+	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier, false)
 }
 
 // runRetireZSK removes a previously registered ZSK from a zone -- the
@@ -752,7 +753,7 @@ func runRetireZSK(args []string) error {
 		return err
 	}
 	fmt.Printf("Retiring ZSK key tag %d for %s, authenticated by key tag %d\n", zsk.KeyTag(), *zone, ksk.KeyTag())
-	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier)
+	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier, false)
 }
 
 // rotateKeyChoiceData is rotate-key-choice.txt's template data.
@@ -860,7 +861,7 @@ func runRotateKey(args []string) error {
 		if err != nil {
 			return err
 		}
-		return signSelfVerifyAndSend(*zone, wire, newKSK, *target, *jsonCarrier)
+		return signSelfVerifyAndSend(*zone, wire, newKSK, *target, *jsonCarrier, true)
 	default:
 		return fmt.Errorf(`-role must be "ksk" or "zsk", got %q`, *role)
 	}
@@ -923,7 +924,20 @@ func parseNameTypePairs(values []string) ([]dns.RR, error) {
 // envelope over that carrier instead of raw wire bytes) -- and reports
 // what the server did with it, or just prints the wire bytes if no
 // target was given.
-func signSelfVerifyAndSend(zone string, wire []byte, key *dns.DNSKEY, target string, asJSON bool) error {
+//
+// forceTCP skips the ordinary size-based UDP/TCP choice and always uses
+// TCP for a "host:port" target (an http(s):// target is unaffected --
+// TLS/QUIC are connection-oriented regardless). Pass true from any
+// caller building a first-contact- or KSK-rollover-shaped push: a
+// compliant server refuses either over plain UDP outright (SEC-01 --
+// the source address can't be validated without a completed handshake),
+// so picking UDP there purely because the message happens to be small
+// would get a real push refused for a reason that has nothing to do
+// with its content. Every other push kind (an ordinary differential
+// update, a ZSK registration/retirement, a contact registration) is
+// never first-contact/rollover-shaped and keeps the original,
+// size-based choice.
+func signSelfVerifyAndSend(zone string, wire []byte, key *dns.DNSKEY, target string, asJSON bool, forceTCP bool) error {
 	if err := sazu.VerifySIG0(wire, key); err != nil {
 		return fmt.Errorf("self-verification failed (this would be a bug): %w", err)
 	}
@@ -939,7 +953,7 @@ func signSelfVerifyAndSend(zone string, wire []byte, key *dns.DNSKEY, target str
 	}
 
 	network := "udp"
-	if len(wire) > safeUDPPushSize {
+	if forceTCP || len(wire) > safeUDPPushSize {
 		network = "tcp"
 	}
 
@@ -954,9 +968,12 @@ func signSelfVerifyAndSend(zone string, wire []byte, key *dns.DNSKEY, target str
 	if err := writeRequest(conn, network, wire); err != nil {
 		return err
 	}
-	if network == "tcp" {
+	switch {
+	case network == "tcp" && forceTCP:
+		fmt.Printf("Sent %d bytes to %s over TCP (required for a first-contact/rollover-shaped push, regardless of size)\n", len(wire), target)
+	case network == "tcp":
 		fmt.Printf("Sent %d bytes to %s over TCP (exceeds the %d-byte safe UDP size)\n", len(wire), target, safeUDPPushSize)
-	} else {
+	default:
 		fmt.Printf("Sent %d bytes to %s\n", len(wire), target)
 	}
 
