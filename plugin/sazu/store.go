@@ -1,6 +1,7 @@
 package sazu
 
 import (
+	"sort"
 	"strings"
 	"sync"
 
@@ -132,12 +133,17 @@ func (z *ZoneData) insertLocked(rr dns.RR) {
 		return
 	}
 
-	if rr.Header().Rrtype == dns.TypeNSEC {
-		// Exactly one NSEC record per name, always -- unlike an ordinary
-		// RRset, a differing NSEC at the same name (e.g. the zone's name
-		// set changed and this name's "next" pointer needs to reflect
-		// that) is a replacement, not a second value to keep alongside
-		// the first.
+	if rr.Header().Rrtype == dns.TypeNSEC || rr.Header().Rrtype == dns.TypeNSEC3 || rr.Header().Rrtype == dns.TypeNSEC3PARAM {
+		// Exactly one record of these types per name, always -- unlike
+		// an ordinary RRset, a differing one at the same name (e.g. the
+		// zone's name set changed and this name's "next" pointer needs
+		// to reflect that, or a full push changed NSEC3's
+		// iterations/salt) is a replacement, not a second value to keep
+		// alongside the first. NSEC3PARAM only ever appears at the
+		// apex, but is included here for the same reason: a changed
+		// salt/iterations across two full pushes has different RDATA,
+		// so RFC 2136's "identical RDATA replaces" rule alone wouldn't
+		// catch it either.
 		z.rrsets[name][rr.Header().Rrtype] = []dns.RR{dns.Copy(rr)}
 		return
 	}
@@ -224,30 +230,34 @@ func (z *ZoneData) DeleteRR(rr dns.RR) {
 	byType[rr.Header().Rrtype] = kept
 }
 
-// PurgeNSEC removes every stored NSEC record (and its covering RRSIGs)
-// across the whole zone. Called before applying any update (see
+// PurgeNSEC removes every stored NSEC or NSEC3(PARAM) record (and their
+// covering RRSIGs) across the whole zone -- whichever scheme, if either,
+// the zone was last pushed with. Called before applying any update (see
 // handler.go's serveUpdate): SAZU's split-signing model means only a
 // freshly, completely recomputed chain -- from a full push, the only
 // kind that sees the zone's entire name set at once -- can be trusted as
 // correct, so any existing chain is invalidated up front rather than
 // risked going stale. Serving no negative-existence proof is safe;
 // serving a stale one that contradicts what the zone actually contains
-// now is not. A full push's own NSEC records (see BuildNSECChain)
-// repopulate the chain in the same update, immediately afterward; a
-// partial push that doesn't include any leaves the zone with none until
-// the next full push does.
+// now is not. A full push's own NSEC or NSEC3 records (see
+// BuildNSECChain / BuildNSEC3Chain) repopulate the chain in the same
+// update, immediately afterward; a partial push that doesn't include any
+// leaves the zone with none until the next full push does.
 func (z *ZoneData) PurgeNSEC() {
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	for _, byType := range z.rrsets {
 		delete(byType, dns.TypeNSEC)
+		delete(byType, dns.TypeNSEC3)
+		delete(byType, dns.TypeNSEC3PARAM)
 		sigs, ok := byType[dns.TypeRRSIG]
 		if !ok {
 			continue
 		}
 		kept := sigs[:0]
 		for _, rr := range sigs {
-			if sig, ok := rr.(*dns.RRSIG); !ok || sig.TypeCovered != dns.TypeNSEC {
+			if sig, ok := rr.(*dns.RRSIG); !ok ||
+				(sig.TypeCovered != dns.TypeNSEC && sig.TypeCovered != dns.TypeNSEC3 && sig.TypeCovered != dns.TypeNSEC3PARAM) {
 				kept = append(kept, rr)
 			}
 		}
@@ -272,29 +282,43 @@ func (z *ZoneData) ownerNames() []string {
 	return names
 }
 
-// NegativeProof returns the NSEC record(s) (each paired with its RRSIG)
-// needed to authenticate qname's negative result, per RFC 4035 §3.1.3:
+// NegativeProof returns the NSEC or NSEC3 record(s) (each paired with
+// its RRSIG) needed to authenticate qname's negative result, per RFC
+// 4035 §3.1.3 (NSEC) or RFC 5155 §7.2 (NSEC3) -- whichever scheme the
+// zone's last full push used (detected via nsec3Param: an NSEC3PARAM
+// record at the apex means NSEC3, its absence means plain NSEC or no
+// chain at all). The two return different record shapes but the same
+// proof, for the same reason:
 //
-//   - NODATA (nameExists true): just the NSEC stored at qname itself --
-//     its type bitmap simply won't list the queried type, which is the
-//     whole proof.
-//   - NXDOMAIN (nameExists false): the NSEC covering qname itself, plus
-//     the NSEC covering the wildcard slot ("*." + qname's closest
-//     encloser) -- proving not only that qname doesn't exist, but that
-//     no wildcard elsewhere in the zone could have matched it either.
-//     SAZU never synthesizes wildcard-matched answers (see this file's
-//     own top-of-file doc comment), so this is a completeness proof
-//     about the zone's actual (non-wildcard) content, not a corner this
-//     package cuts by ignoring wildcards it might otherwise need to
-//     handle.
+//   - NODATA (nameExists true): the record stored at (NSEC) or matching
+//     the hash of (NSEC3) qname itself -- its type bitmap simply won't
+//     list the queried type, which is the whole proof.
+//   - NXDOMAIN (nameExists false): NSEC needs two records -- the one
+//     covering qname itself, plus the one covering the wildcard slot
+//     ("*." + qname's closest encloser) -- proving not only that qname
+//     doesn't exist, but that no wildcard elsewhere in the zone could
+//     have matched it either. NSEC3 needs the closest encloser's own
+//     matching record too (hashing hides the tree structure NSEC's
+//     covering record alone reveals for free), so up to three: closest
+//     encloser match, next-closer-name cover, wildcard cover.
 //
-// Returns nil if the zone has no NSEC chain at all -- either nothing was
-// ever pushed with one (an older push, from before this feature), or a
+// SAZU never synthesizes wildcard-matched answers (see nsec.go's
+// top-of-file doc comment), so in both cases this is a completeness
+// proof about the zone's actual (non-wildcard) content, not a corner
+// this package cuts by ignoring wildcards it might otherwise need to
+// handle.
+//
+// Returns nil if the zone has no chain at all -- either nothing was ever
+// pushed with one (an older push, from before this feature), or a
 // partial push invalidated it (see PurgeNSEC) and no full push has
 // repopulated it since. A negative response simply carries no
 // authenticated denial in that case, the same as before this existed.
 func (z *ZoneData) NegativeProof(qname string, nameExists bool) []dns.RR {
 	qname = strings.ToLower(dns.Fqdn(qname))
+
+	if param := z.nsec3Param(); param != nil {
+		return z.nsec3NegativeProof(qname, nameExists, param)
+	}
 
 	if nameExists {
 		out := z.Lookup(qname, dns.TypeNSEC)
@@ -328,6 +352,65 @@ func (z *ZoneData) NegativeProof(qname string, nameExists bool) []dns.RR {
 	ce := closestEncloser(qname, ownerSet)
 	if owner, ok := coveringOwner("*."+ce, owners); ok {
 		add(owner)
+	}
+	return out
+}
+
+// nsec3Param returns the zone's NSEC3PARAM record, or nil if the zone
+// isn't (currently) using NSEC3.
+func (z *ZoneData) nsec3Param() *dns.NSEC3PARAM {
+	rrs := z.Lookup(z.Origin, dns.TypeNSEC3PARAM)
+	if len(rrs) == 0 {
+		return nil
+	}
+	param, _ := rrs[0].(*dns.NSEC3PARAM)
+	return param
+}
+
+// nsec3NegativeProof is NegativeProof's RFC 5155 §7.2 path. Unlike a
+// resolver validating an NSEC3 chain it received blind, this server
+// already knows qname's closest encloser and next-closer name in
+// plaintext (see this file's own top-of-file doc comment) -- so it
+// hashes exactly the specific candidate names it needs a record for,
+// rather than needing to walk the hash ring to find them.
+func (z *ZoneData) nsec3NegativeProof(qname string, nameExists bool, param *dns.NSEC3PARAM) []dns.RR {
+	var out []dns.RR
+	added := make(map[string]bool, 3)
+	addByHash := func(hash string) {
+		if hash == "" || added[hash] {
+			return
+		}
+		added[hash] = true
+		owner := hash + "." + z.Origin
+		out = append(out, z.Lookup(owner, dns.TypeNSEC3)...)
+		out = append(out, z.LookupRRSIG(owner, dns.TypeNSEC3)...)
+	}
+
+	if nameExists {
+		addByHash(nsec3Hash(qname, param))
+		return out
+	}
+
+	owners := z.ownerNames()
+	if len(owners) == 0 {
+		return nil
+	}
+	ownerSet := make(map[string]bool, len(owners))
+	sortedHashes := make([]string, len(owners))
+	for i, o := range owners {
+		ownerSet[o] = true
+		sortedHashes[i] = nsec3Hash(o, param)
+	}
+	sort.Strings(sortedHashes)
+
+	ce := closestEncloser(qname, ownerSet)
+	addByHash(nsec3Hash(ce, param)) // closest-encloser match: ce is a real owner, so this is exact
+
+	if h, ok := coveringHash(nsec3Hash(nextCloserName(qname, ce), param), sortedHashes); ok {
+		addByHash(h)
+	}
+	if h, ok := coveringHash(nsec3Hash("*."+ce, param), sortedHashes); ok {
+		addByHash(h)
 	}
 	return out
 }

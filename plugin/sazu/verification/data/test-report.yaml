@@ -5,7 +5,7 @@ document:
 execution_summary:
   stats:
   - label: tests run
-    value: 2156
+    value: 2168
   - label: failures
     value: 0
   - label: errors
@@ -76,6 +76,29 @@ execution_summary:
     class="inline">coverage_exceptions</code> is now empty: every requirement in this
     document has a real citation. +1 test (<code class="inline">plugin/sazu</code>), 0
     failures, 0 errors.
+  - |-
+    A seventh run added RFC 5155 NSEC3 (CONTENT-13): an opt-in alternative to plain NSEC
+    (CONTENT-07) that additionally hides a zone's owner-name set from enumeration. <code
+    class="inline">nsec3.go</code>'s <code class="inline">BuildNSEC3Chain</code> is <code
+    class="inline">BuildNSECChain</code>'s RFC 5155 equivalent; <code
+    class="inline">BuildFullZonePushNSEC3</code>/<code
+    class="inline">BuildFullZonePushSplitNSEC3</code> are new entry points alongside the
+    existing plain-NSEC ones (choosing NSEC3 is a push-time decision the signer makes, not a
+    server-side toggle), exposed as <code class="inline">sazuctl push-zone</code>'s <code
+    class="inline">-nsec3</code>/<code class="inline">-nsec3-iterations</code>/<code
+    class="inline">-nsec3-salt</code>/<code class="inline">-nsec3-opt-out</code> flags.
+    <code class="inline">ZoneData.NegativeProof</code> branches on whether an NSEC3PARAM
+    record is present at the apex, computing the closest encloser and next-closer name from
+    the server's own plaintext copy of the zone's name set and hashing exactly the candidates
+    it needs a record for, rather than walking the hash ring blind the way an external
+    resolver would have to. Covered at three levels: chain construction and hashing
+    (nsec3_test.go, unit level), a real onboarded zone serving a genuinely verifying NSEC3
+    proof for both NODATA and NXDOMAIN plus the partial-push invalidation behavior
+    (nsec3_test.go, end to end against a real <code class="inline">dnsserver.Server</code>),
+    and the actual <code class="inline">sazuctl push-zone -nsec3</code> CLI flag proven to
+    change what the server serves (cmd/sazuctl/e2e_test.go). +12 tests (11 in <code
+    class="inline">plugin/sazu</code>, 1 in <code class="inline">plugin/sazu/cmd/sazuctl</code>),
+    0 failures, 0 errors, also re-run clean under <code class="inline">go test -race</code>.
 results_by_package:
   rows:
   - package: core/dnsserver
@@ -83,11 +106,11 @@ results_by_package:
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu
-    tests: '218'
+    tests: '229'
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/sazu/cmd/sazuctl
-    tests: '33'
+    tests: '34'
     result: |-
       <span class="pill ok">PASS</span>
   - package: plugin/pkg/doh
@@ -139,7 +162,7 @@ results_by_area:
     result: |-
       <span class="pill ok">PASS</span>
   - area: CONTENT
-    cases: TC-CONTENT-01 … 14
+    cases: TC-CONTENT-01 … 17
     result: |-
       <span class="pill ok">PASS</span>
   - area: CONTACT
@@ -384,11 +407,11 @@ defects:
 conclusion:
   paragraphs:
   - |-
-    All 84 requirements in the companion Requirements Specification are traced to at least
+    All 85 requirements in the companion Requirements Specification are traced to at least
     one passing automated test case, or to a manually-verified real-binary scenario for the
     small remaining subset (the real self-signed-TLS HTTPS carrier and the real three-binary
     <code class="inline">sazu-watchd</code> chain) that automated coverage reaches only
-    indirectly. The full repository test suite — 2151 tests across 110 packages, including
+    indirectly. The full repository test suite — 2168 tests across 110 packages, including
     every package this work touched directly and every pre-existing package alongside it —
     passes with 0 failures and 0 errors at commit <code class="inline">5101e77e8</code> on
     <code class="inline">feat/sazu</code>, confirmed by two consecutive clean runs (and,

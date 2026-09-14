@@ -16,6 +16,7 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -184,7 +185,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sazuctl keygen -out <path> [-zone <owner>] [-role ksk|zsk] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl ds -zone <zone> -key <path> [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-ttl 300] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl push-zone -zone <zone> -key <path> -zonefile <path> [-zsk-key <path>] [-previous-serial N] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl push-zone -zone <zone> -key <path> -zonefile <path> [-zsk-key <path>] [-previous-serial N] [-nsec3] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl push-update -zone <zone> -key <path> [-zsk-key <path>] [-udp] [-add \"rr\"]... [-del \"rr\"]... [-del-rrset \"name TYPE\"]... [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl contact -zone <zone> -key <path> [-address mailto:you@example.org]... [-clear] [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
@@ -195,6 +196,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "-target accepts an http(s):// URL to push over §7.3's HTTPS carrier instead of TCP; -json then sends a JSON wire envelope instead of raw bytes.")
 	fmt.Fprintln(os.Stderr, "TCP is the default and always used for push/push-zone/rotate-key -role ksk (a compliant server refuses those over UDP regardless of size); -udp, where offered, opts other pushes back into UDP, falling back to TCP with a warning if the push is too large for one safe datagram.")
 	fmt.Fprintln(os.Stderr, "-zsk-key, where accepted, signs zone content with that optional ZSK instead of -key (the KSK); -key still authenticates the transaction. See 'sazuctl rotate-key' for the KSK-vs-ZSK tradeoff.")
+	fmt.Fprintln(os.Stderr, "-nsec3 (push-zone) uses RFC 5155 NSEC3 instead of plain NSEC for authenticated denial of existence, additionally hiding the zone's name set from enumeration; -nsec3-iterations and -nsec3-salt (hex, e.g. AABBCCDD) default to RFC 9276's current guidance (0, none) if omitted, and -nsec3-opt-out sets the Opt-Out flag.")
 	fmt.Fprintln(os.Stderr, "-zonefile (push-zone) accepts a YAML zone definition (.yaml/.yml) as a drop-in alternative to a raw zone file -- see 'sazuctl init-zone' to create a starter one.")
 }
 
@@ -586,11 +588,18 @@ func runPushZone(args []string) error {
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
 	passphraseFile := addPassphraseFlag(fs)
+	useNSEC3 := fs.Bool("nsec3", false, "use RFC 5155 NSEC3 instead of plain NSEC for authenticated denial of existence")
+	nsec3Iterations := fs.Uint("nsec3-iterations", 0, "NSEC3 hash iterations (RFC 9276: 0 is current guidance; ignored without -nsec3)")
+	nsec3Salt := fs.String("nsec3-salt", "", "NSEC3 salt, hex-encoded (RFC 9276: none is current guidance; ignored without -nsec3)")
+	nsec3OptOut := fs.Bool("nsec3-opt-out", false, "set the NSEC3 Opt-Out flag (ignored without -nsec3)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *zone == "" || *keyPath == "" || *zoneFile == "" {
 		return fmt.Errorf("-zone, -key, and -zonefile are required")
+	}
+	if _, err := hex.DecodeString(*nsec3Salt); *useNSEC3 && err != nil {
+		return fmt.Errorf("-nsec3-salt must be hex-encoded: %w", err)
 	}
 	passphrase, err := readPassphraseFile(*passphraseFile)
 	if err != nil {
@@ -627,7 +636,13 @@ func runPushZone(args []string) error {
 		prev.Serial = uint32(*previousSerial)
 		previousSOA = &prev
 	}
-	m, err := sazu.BuildFullZonePushSplit(*zone, soa, rrs, key, priv, zsk, zskPriv, previousSOA)
+	var m *dns.Msg
+	if *useNSEC3 {
+		opts := sazu.NSEC3Options{Iterations: uint16(*nsec3Iterations), Salt: *nsec3Salt, OptOut: *nsec3OptOut}
+		m, err = sazu.BuildFullZonePushSplitNSEC3(*zone, soa, rrs, key, priv, zsk, zskPriv, previousSOA, opts)
+	} else {
+		m, err = sazu.BuildFullZonePushSplit(*zone, soa, rrs, key, priv, zsk, zskPriv, previousSOA)
+	}
 	if err != nil {
 		return err
 	}

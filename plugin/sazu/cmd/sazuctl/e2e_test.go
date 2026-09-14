@@ -180,6 +180,60 @@ func TestE2EKSKFullLifecycle(t *testing.T) {
 	}
 }
 
+// TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC exercises push-zone's
+// -nsec3/-nsec3-salt/-nsec3-opt-out flags end to end through the actual
+// CLI entry point: proves the flag genuinely changes what the server
+// ends up serving (RFC 5155 NSEC3, not plain NSEC), not just that
+// runPushZone accepts it without erroring. plugin/sazu/nsec3_test.go
+// already covers RRSIG validity and closest-encloser/next-closer proof
+// structure at the plugin-package level; this is the CLI's own
+// black-box wiring, mirroring startTestServer/queryA's own level for
+// every other flag in this file.
+func TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-nsec3.example."
+	dir := t.TempDir()
+	kskPath := filepath.Join(dir, "ksk.private")
+	zoneFile := writeTestZoneFile(t, zone)
+
+	if err := runPushZone([]string{
+		"-zone", zone, "-key", kskPath, "-zonefile", zoneFile,
+		"-nsec3", "-nsec3-salt", "AABBCCDD", "-nsec3-opt-out",
+		"-target", addr,
+	}); err != nil {
+		t.Fatalf("push-zone -nsec3: %v", err)
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("does-not-exist."+zone), dns.TypeA)
+	m.SetEdns0(4096, true)
+	resp, _, err := new(dns.Client).Exchange(m, addr)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	var sawNSEC3, sawNSEC bool
+	for _, rr := range resp.Ns {
+		switch v := rr.(type) {
+		case *dns.NSEC3:
+			sawNSEC3 = true
+			if v.Flags != 1 {
+				t.Fatalf("NSEC3 Flags = %d, want 1 (-nsec3-opt-out)", v.Flags)
+			}
+		case *dns.NSEC:
+			sawNSEC = true
+		}
+	}
+	if !sawNSEC3 {
+		t.Fatalf("expected NSEC3 record(s) in authority, got %+v", resp.Ns)
+	}
+	if sawNSEC {
+		t.Fatalf("expected no plain NSEC records alongside NSEC3, got %+v", resp.Ns)
+	}
+}
+
 // TestE2EZSKFullLifecycle exercises the ZSK use case end to end through
 // the actual sazuctl CLI entry points: onboarding a KSK, registering a
 // ZSK (add-zsk), authenticating a routine push with the ZSK alone,

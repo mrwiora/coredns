@@ -140,7 +140,7 @@ Subcommands:
   generated, so omitting it changes nothing.
 * `sazuctl ds -zone <zone> -key <path>` — print the DS record for a key,
   ready to hand to a registrar. Generates the key first if it doesn't exist.
-* `sazuctl push-zone -zone <zone> -key <path> -zonefile <path> [-zsk-key <path>] [-previous-serial N] [-target host:port|url] [-json]` —
+* `sazuctl push-zone -zone <zone> -key <path> -zonefile <path> [-zsk-key <path>] [-previous-serial N] [-nsec3] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json]` —
   build, sign, and (optionally) send a **full-zone** push: every record in a
   BIND-format zone file, plus the signing key as a DNSKEY. This is what
   onboards a zone (first contact) and what re-publishes a whole zone
@@ -149,6 +149,13 @@ Subcommands:
   `-zonefile` is required — either a BIND-format zone file, or a YAML zone
   definition (`.yaml`/`.yml`, converted automatically, no separate step);
   see `sazuctl init-zone` to create a starter one for a brand-new domain.
+  `-nsec3` builds an RFC 5155 NSEC3 chain instead of plain NSEC for
+  authenticated denial of existence, additionally hiding the zone's name
+  set from enumeration ("zone walking"); `-nsec3-iterations`/`-nsec3-salt`
+  default to RFC 9276's current guidance (0, none) if omitted, and
+  `-nsec3-opt-out` sets the Opt-Out flag. This is a push-time choice the
+  signer makes — the server just stores and serves whichever chain it was
+  given, same as for plain NSEC.
 * `sazuctl push-update -zone <zone> -key <path> [-zsk-key <path>] [-add "rr"]... [-del "rr"]... [-del-rrset "name TYPE"]... [-target host:port|url] [-json]` —
   build, sign, and (optionally) send a **partial** push: individual
   add/delete operations against an already-onboarded zone. No DNSKEY is
@@ -627,13 +634,8 @@ a real-world test isn't mistaken for a production trial run:
   bottleneck the per-zone locking above actually targets — but a
   deployment pushing very high concurrent write volume across many zones
   would eventually want WAL mode and/or more connections here too.
-* **NSEC, not NSEC3** for authenticated denial of existence. NSEC3 exists
-  to additionally hide a zone's name set from enumeration ("zone
-  walking"); that's a real but separate, opt-in privacy property, not
-  something a correct NXDOMAIN/NODATA proof requires, so it isn't
-  implemented.
-* **A partial push (`push-update`) invalidates the zone's NSEC chain
-  until the next full push.** Only a full push (`push-zone`) ever
+* **A partial push (`push-update`) invalidates the zone's NSEC/NSEC3
+  chain until the next full push.** Only a full push (`push-zone`) ever
   computes one, since only it sees the entire zone's name set at once;
   see SAZU-PLAN.md for why a partial push can't safely patch the existing
   chain instead of just discarding it. Negative answers still work

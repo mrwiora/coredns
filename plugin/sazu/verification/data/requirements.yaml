@@ -49,8 +49,11 @@ normative_references:
   role: UUID. Audit-trail transaction identifiers (v4).
 - rfc: RFC 5155
   role: |-
-    DNSSEC Hashed Authenticated Denial of Existence (NSEC3). Cited as the
-    deliberately-not-taken alternative to NSEC.
+    DNSSEC Hashed Authenticated Denial of Existence (NSEC3). Implemented as an opt-in
+    alternative to NSEC (CONTENT-13).
+- rfc: RFC 9276
+  role: |-
+    Guidance for NSEC3 Parameter Settings. NSEC3Options' zero-iterations/no-salt defaults.
 - rfc: RFC 6068
   role: |-
     The 'mailto' URI Scheme. Contact-record email addressing.
@@ -292,8 +295,8 @@ areas:
     source: RFC 2308 §3
   - id: CONTENT-09
     text: |-
-      A partial (differential) push SHALL invalidate any existing NSEC chain until the next
-      full push recomputes it.
+      A partial (differential) push SHALL invalidate any existing NSEC or NSEC3 chain until
+      the next full push recomputes it.
     source: Engineering decision
   - id: CONTENT-10
     text: |-
@@ -312,6 +315,14 @@ areas:
       which specific zones have actually been onboarded; a name within scope but never
       onboarded SHALL fall through to the next plugin rather than being swallowed.
     source: Engineering decision (multi-tenant onboarding)
+  - id: CONTENT-13
+    text: |-
+      A full-zone push SHALL be able to compute an RFC 5155 NSEC3 chain, hiding the zone's
+      owner-name set from enumeration, as an opt-in alternative to plain NSEC (CONTENT-07);
+      the closest-encloser/next-closer-name/wildcard-cover proof for NXDOMAIN, and the
+      matching record for NODATA, SHALL be served when the querier sets the DO bit, exactly
+      as for plain NSEC.
+    source: RFC 5155 &middot; §7.2
 - id: contact
   code: CONTACT
   title: Registration record

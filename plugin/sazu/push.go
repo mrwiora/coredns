@@ -81,11 +81,11 @@ func LoadZoneFile(path, origin string) (soa *dns.SOA, rrs []dns.RR, err error) {
 // exactly the "bogus" state that produces SERVFAIL for real DNSSEC
 // clients, regardless of whether the push mechanics themselves are sound.
 //
-// A full push is the only kind that ever computes or sends NSEC records
-// -- it's the only one that sees the zone's entire name set at once,
-// which a correct chain needs. The server invalidates any existing chain
-// before applying a push that doesn't include one (see
-// ZoneData.PurgeNSEC); this one always does.
+// A full push is the only kind that ever computes or sends a
+// denial-of-existence chain -- it's the only one that sees the zone's
+// entire name set at once, which a correct chain needs. The server
+// invalidates any existing chain before applying a push that doesn't
+// include one (see ZoneData.PurgeNSEC); this one always does.
 func BuildFullZonePush(zone string, soa *dns.SOA, rrs []dns.RR, candidateKey *dns.DNSKEY, signer crypto.Signer, previousSOA *dns.SOA) (*dns.Msg, error) {
 	return BuildFullZonePushSplit(zone, soa, rrs, candidateKey, signer, nil, nil, previousSOA)
 }
@@ -100,7 +100,32 @@ func BuildFullZonePush(zone string, soa *dns.SOA, rrs []dns.RR, candidateKey *dn
 // zsk as nil reproduces BuildFullZonePush's original single-key behavior
 // exactly (byte-for-byte: it's the same code path with the same key
 // signing everything), which is what BuildFullZonePush itself now does.
+//
+// Uses plain NSEC (BuildNSECChain). See BuildFullZonePushSplitNSEC3 for
+// the RFC 5155 NSEC3 alternative.
 func BuildFullZonePushSplit(zone string, soa *dns.SOA, rrs []dns.RR, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY, zskSigner crypto.Signer, previousSOA *dns.SOA) (*dns.Msg, error) {
+	return buildFullZonePushSplit(zone, soa, rrs, ksk, kskSigner, zsk, zskSigner, previousSOA, BuildNSECChain)
+}
+
+// BuildFullZonePushNSEC3 is BuildFullZonePush's RFC 5155 NSEC3
+// equivalent -- see BuildNSEC3Chain and NSEC3Options.
+func BuildFullZonePushNSEC3(zone string, soa *dns.SOA, rrs []dns.RR, candidateKey *dns.DNSKEY, signer crypto.Signer, previousSOA *dns.SOA, opts NSEC3Options) (*dns.Msg, error) {
+	return BuildFullZonePushSplitNSEC3(zone, soa, rrs, candidateKey, signer, nil, nil, previousSOA, opts)
+}
+
+// BuildFullZonePushSplitNSEC3 is BuildFullZonePushSplit's RFC 5155
+// NSEC3 equivalent -- see BuildNSEC3Chain and NSEC3Options. Choosing
+// NSEC3 over plain NSEC is a push-time decision the customer's own
+// signer makes (there is no server-side toggle: the server just stores
+// and serves whichever chain it was given), so this is a distinct entry
+// point rather than an option on BuildFullZonePushSplit.
+func BuildFullZonePushSplitNSEC3(zone string, soa *dns.SOA, rrs []dns.RR, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY, zskSigner crypto.Signer, previousSOA *dns.SOA, opts NSEC3Options) (*dns.Msg, error) {
+	return buildFullZonePushSplit(zone, soa, rrs, ksk, kskSigner, zsk, zskSigner, previousSOA, func(soa *dns.SOA, adds []dns.RR) []dns.RR {
+		return BuildNSEC3Chain(soa, adds, opts)
+	})
+}
+
+func buildFullZonePushSplit(zone string, soa *dns.SOA, rrs []dns.RR, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY, zskSigner crypto.Signer, previousSOA *dns.SOA, denialChain func(*dns.SOA, []dns.RR) []dns.RR) (*dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
 	m.Opcode = dns.OpcodeUpdate
@@ -133,7 +158,7 @@ func BuildFullZonePushSplit(zone string, soa *dns.SOA, rrs []dns.RR, ksk *dns.DN
 	}
 	adds = append(adds, soa)
 	adds = append(adds, rrs...)
-	adds = append(adds, BuildNSECChain(soa, adds)...)
+	adds = append(adds, denialChain(soa, adds)...)
 
 	now := time.Now()
 	signed, err := SignZoneContentSplit(adds, kskRR, kskSigner, contentKeyRR, contentSigner, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))

@@ -243,12 +243,40 @@ for a manually verified real-binary walkthrough.
     from two different full pushes) are a replacement, not a legitimate
     second value the existing RFC 2136 "identical RDATA replaces" rule
     would ever recognize as such.
-  - **NSEC3 is a deliberate non-goal for now.** It exists to additionally
-    hide a zone's name set from enumeration ("zone walking"), which is a
-    real but separate, opt-in privacy property -- not something a correct
-    NXDOMAIN/NODATA proof requires. Plain NSEC is what actually resolves
-    validating resolvers treating this server's negative answers as
-    Bogus, which was the real problem.
+  - NSEC3 (the separate, opt-in privacy property NSEC doesn't cover) was
+    deliberately left out of this first pass and implemented later --
+    see below.
+- **NSEC3 (RFC 5155), opt-in, as an alternative to plain NSEC.** The
+  privacy property plain NSEC deliberately didn't cover above: NSEC3
+  additionally hides a zone's actual name set from enumeration ("zone
+  walking") by proving non-existence over hashed owner names instead of
+  the names themselves. `nsec3.go`'s `BuildNSEC3Chain` is
+  `BuildNSECChain`'s RFC 5155 equivalent, using `miekg/dns`'s own
+  `HashName`; `NSEC3Options` (`Iterations`, `Salt`, `OptOut`) defaults to
+  RFC 9276's current guidance (zero iterations, no salt -- the iterated
+  hashing turned out to cost real resolver/attacker CPU for negligible
+  additional security) when left unset. Choosing NSEC3 is a push-time
+  decision the customer's own signer makes, same as choosing which
+  content to push at all -- `BuildFullZonePushNSEC3`/
+  `BuildFullZonePushSplitNSEC3` are new entry points alongside the
+  existing plain-NSEC ones (not a new option on them, and not a
+  server-side Corefile toggle: the server just stores and serves
+  whichever chain it was given), exposed as `sazuctl push-zone`'s
+  `-nsec3`/`-nsec3-iterations`/`-nsec3-salt`/`-nsec3-opt-out` flags.
+  `store.go`'s `ZoneData.NegativeProof` branches on whether an
+  NSEC3PARAM record is present at the apex; unlike a resolver validating
+  an NSEC3 chain blind, the server already knows every pushed name in
+  plaintext (hiding names from wire responses never requires hiding them
+  from the server that has to serve correct answers), so it computes the
+  closest encloser and next-closer name directly from the real name set
+  and hashes exactly the specific candidates it needs a record for,
+  rather than walking the hash ring. `PurgeNSEC` and `insertLocked`'s
+  singleton-per-name handling were generalized to cover NSEC3/NSEC3PARAM
+  the same way they already covered NSEC. Scoped simplification, stated
+  in `nsec3.go`'s own top comment: SAZU zones have no delegations of
+  their own, so `OptOut` applies uniformly rather than per-delegation --
+  a zone with its own delegations would need logic this package doesn't
+  implement.
 - **TCP support for pushes, replacing the earlier `Config.UDPSize`
   workaround.** Found live against a real server: a genuine signed push
   well under `UDPSize`'s 16 KiB ceiling (around 1.5-2 KB) got *no

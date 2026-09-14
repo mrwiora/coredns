@@ -451,6 +451,32 @@ areas:
       TestDBCommitUpdateAppliesAllFourOpForms, TestDBCommitUpdateRollsBackOnMalformedOp,
       TestDBCommitUpdatePurgesStaleNSECOnNextUpdate
     verifies: PERSIST-02, CONTENT-09
+  - id: TC-CONTENT-15
+    objective: |-
+      NSEC3 chain construction covers every owner name and cycles correctly by hash order;
+      type bitmap reflects actual content (apex-only NSEC3PARAM, never NSEC3 itself);
+      Opt-Out and the hash parameters land on every record; hashing is deterministic,
+      case-insensitive on the input name, and depends on salt/iterations.
+    functions: |-
+      8 functions in nsec3_test.go (TestNSEC3Hash*, TestBuildNSEC3Chain*, TestNextCloserName,
+      TestCoveringHashFindsPredecessorAndWraps)
+    verifies: CONTENT-13
+  - id: TC-CONTENT-16
+    objective: |-
+      End-to-end, a zone onboarded with NSEC3 instead of plain NSEC serves a genuinely
+      verifying NSEC3 proof for both NODATA and NXDOMAIN (closest-encloser match included),
+      and a partial push invalidates the NSEC3 chain the same way it does a plain NSEC one.
+    functions: |-
+      TestNODATACarriesValidNSEC3Proof, TestNXDOMAINCarriesValidNSEC3Proof,
+      TestPartialPushInvalidatesNSEC3UntilNextFullPush (nsec3_test.go)
+    verifies: CONTENT-13, CONTENT-08, CONTENT-09
+  - id: TC-CONTENT-17
+    objective: |-
+      cmd/sazuctl's "push-zone -nsec3" flag (plus -nsec3-salt/-nsec3-opt-out) genuinely
+      changes what the server ends up serving for a real NXDOMAIN query -- NSEC3, with the
+      Opt-Out flag set, and no plain NSEC alongside it.
+    functions: TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC (cmd/sazuctl/e2e_test.go)
+    verifies: CONTENT-13
 - id: contact
   title: CONTACT
   cases:
@@ -975,6 +1001,9 @@ suite_inventory:
   - file: nsec_test.go
     count: 10
     area: CONTENT (NSEC chain)
+  - file: nsec3_test.go
+    count: 11
+    area: CONTENT (NSEC3 chain)
   - file: contact_test.go
     count: 10
     area: CONTACT
@@ -1038,7 +1067,7 @@ suite_inventory:
     area: |-
       CLIENT (guidance templates, transport choice, small helpers)
   - file: cmd/sazuctl/e2e_test.go
-    count: 6
+    count: 7
     area: |-
       CLIENT (CLI-level, end to end: KSK/ZSK use cases, init-zone/zone-convert)
   - file: cmd/sazuctl/https_test.go
