@@ -54,21 +54,36 @@ func startTestServer(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
+
+	// Binding UDP first (to learn an available ephemeral port) and then
+	// TCP to that exact same port has an inherent, if narrow, TOCTOU
+	// race: under load, something else on the machine can grab that TCP
+	// port in the gap between the two calls. A handful of retries with a
+	// fresh UDP port each time makes that vanishingly unlikely to affect
+	// a real test run, at negligible cost on the far more common
+	// immediate-success path.
+	var pc net.PacketConn
+	var l net.Listener
+	for attempt := 0; ; attempt++ {
+		pc, err = net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("ListenPacket: %v", err)
+		}
+		_, port, serr := net.SplitHostPort(pc.LocalAddr().String())
+		if serr != nil {
+			t.Fatalf("SplitHostPort: %v", serr)
+		}
+		l, err = net.Listen("tcp", "127.0.0.1:"+port)
+		if err == nil {
+			break
+		}
+		pc.Close()
+		if attempt >= 4 {
+			t.Fatalf("Listen (after %d attempts): %v", attempt+1, err)
+		}
 	}
 	t.Cleanup(func() { pc.Close() })
 	go func() { _ = srv.ServePacket(pc) }()
-
-	_, port, err := net.SplitHostPort(pc.LocalAddr().String())
-	if err != nil {
-		t.Fatalf("SplitHostPort: %v", err)
-	}
-	l, err := net.Listen("tcp", "127.0.0.1:"+port)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
 	t.Cleanup(func() { l.Close() })
 	go func() { _ = srv.Serve(l) }()
 
