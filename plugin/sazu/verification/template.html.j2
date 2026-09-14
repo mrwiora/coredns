@@ -553,7 +553,15 @@
       tabs.forEach(function (b) { b.setAttribute('aria-selected', b === btn ? 'true' : 'false'); });
       Object.keys(wraps).forEach(function (k) { wraps[k].hidden = (k !== btn.dataset.doc); });
       var target = document.getElementById(firstSection[btn.dataset.doc]);
-      if (target) target.scrollIntoView({ block: 'start' });
+      if (target) {
+        // Deferred to the next frame: the wrap we just un-hid hasn't
+        // been laid out yet in this same tick (it was display:none a
+        // moment ago), so calling scrollIntoView synchronously here
+        // measures stale (zero-height) geometry and lands somewhere
+        // wrong -- typically the very top of the page. Waiting one
+        // frame lets the browser finish that layout first.
+        requestAnimationFrame(function () { target.scrollIntoView({ block: 'start' }); });
+      }
     });
   });
 })();
