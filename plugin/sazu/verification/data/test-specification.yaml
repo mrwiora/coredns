@@ -1,0 +1,1038 @@
+document:
+  id: SAZU-TS
+  version: '1.2'
+  title: Test Specification
+strategy:
+  intro: |-
+    Verification is entirely automated Go tests (<code class="inline">go test</code>), run
+    at three levels, from the same source tree as the implementation:
+  levels:
+  - |-
+    <strong>Unit</strong> — pure functions and small types in isolation (signature
+    primitives, canonical-name ordering, algorithm tables, sliding-window counters).
+  - |-
+    <strong>Integration / end-to-end</strong> — a real <code
+    class="inline">dnsserver.Server</code>, <code
+    class="inline">dnsserver.ServerHTTPS</code>, or <code
+    class="inline">dnsserver.ServerHTTPS3</code> is started with the SAZU plugin installed,
+    and a genuine SIG(0)-signed RFC 2136 UPDATE is sent over an actual UDP, TCP, or HTTP
+    socket — not a direct function call into the handler. Chain-of-trust tests substitute a
+    fake, deterministic <code class="inline">ChainValidator</code> for the real DNS-root
+    walk (which chain.go's own dedicated tests cover against real network queries).
+  - |-
+    <strong>Manual / real-binary</strong> — a separately compiled <code
+    class="inline">coredns</code>, <code class="inline">sazuctl</code>, and <code
+    class="inline">sazu-watchd</code>, run against each other over real sockets (including
+    real TLS for HTTPS), performed during development and re-summarised in the companion
+    Test Report §5. Not part of the repeatable <code class="inline">go test</code> suite,
+    and not re-executed for every change — recorded once, at the point each capability was
+    verified working end to end.
+  outro: |-
+    Every test case below is traced to at least one requirement in the companion
+    Requirements Specification, and every requirement is covered by at least one test case
+    (§3 tables, column "Verifies").
+environment:
+- item: Command
+  value: go test ./...
+- item: Go toolchain
+  value: go1.27.0
+- item: Repository / branch
+  value: coredns @ feat/sazu
+- item: Packages under test
+  value: |-
+    plugin/sazu, plugin/sazu/cmd/sazu_watchd, core/dnsserver, plugin/pkg/doh,
+    plugin/pkg/dnsutil (+ 105 unrelated pre-existing CoreDNS packages exercised incidentally
+    by the full-repo run)
+- item: External services
+  value: |-
+    None required. Chain-of-trust unit tests use a fake validator; the real network-querying
+    validator has its own separate tests, not part of the default run's network dependency.
+catalogue_intro: |-
+  Grouped by requirement area. Each row is one test scenario, naming the actual automated
+  Go test function(s) that implement it and the requirement ID(s) it verifies. Function
+  names are exact and file-locatable (<code
+  class="inline">plugin/sazu/&lt;file&gt;_test.go</code> unless noted).
+areas:
+- id: auth
+  title: AUTH
+  cases:
+  - id: TC-AUTH-01
+    objective: A genuine SIG(0) signature signs and verifies.
+    functions: TestSignThenVerifySIG0Succeeds
+    verifies: AUTH-01, AUTH-02
+  - id: TC-AUTH-02
+    objective: |-
+      A single-bit tamper to the signed message fails verification.
+    functions: TestTamperedMessageFailsSIG0Verification
+    verifies: AUTH-02
+  - id: TC-AUTH-03
+    objective: Verification against the wrong key fails.
+    functions: TestWrongKeyFailsSIG0Verification
+    verifies: AUTH-02
+  - id: TC-AUTH-04
+    objective: An expired or not-yet-valid SIG(0) is rejected.
+    functions: |-
+      TestExpiredSIG0Rejected, TestNotYetValidSIG0Rejected
+    verifies: AUTH-02
+  - id: TC-AUTH-05
+    objective: |-
+      A message with no trailing SIG(0) record is rejected.
+    functions: TestMissingSIG0Rejected
+    verifies: AUTH-02
+  - id: TC-AUTH-06
+    objective: |-
+      Captured wire bytes round-trip exactly; single-use; keyed by address+ID with no
+      cross-address collision.
+    functions: |-
+      TestRawCapturePutTakeRoundTrip, TestRawCaptureTakeIsSingleUse,
+      TestRawCaptureTakeWithoutPutFindsNothing, TestRawCaptureDifferentAddressesDoNotCollide
+    verifies: AUTH-03
+  - id: TC-AUTH-07
+    objective: |-
+      Capture entries expire after TTL, and the oldest is evicted at capacity.
+    functions: |-
+      TestRawCaptureExpiredEntryNotReturned, TestRawCaptureEvictsOldestWhenFull
+    verifies: AUTH-03
+  - id: TC-AUTH-08
+    objective: |-
+      End-to-end capture through the real UDP and TCP <code
+      class="inline">DecorateReaderFunc</code> hooks.
+    functions: |-
+      TestRawCaptureEndToEndThroughUDPDecorateReaderFunc,
+      TestRawCaptureEndToEndThroughTCPDecorateReaderFunc
+    verifies: AUTH-03
+  - id: TC-AUTH-09
+    objective: |-
+      Over HTTPS/HTTP3, the exact wire bytes are recoverable via request-context propagation
+      instead of socket capture.
+    functions: |-
+      https_test.go (§3.8 TC-CARRIER-08); core/dnsserver TC-CARRIER-07
+    verifies: AUTH-03
+- id: chain
+  title: CHAIN
+  cases:
+  - id: TC-CHAIN-01
+    objective: |-
+      RRSIG-verification primitive: accepts a genuine signature; rejects a tampered RRset, the
+      wrong key, and an expired signature.
+    functions: |-
+      TestVerifyAnyRRSIGAcceptsGenuineSignature, TestVerifyAnyRRSIGRejectsTamperedRRset,
+      TestVerifyAnyRRSIGRejectsWrongKey, TestVerifyAnyRRSIGRejectsExpired
+    verifies: CHAIN-03
+  - id: TC-CHAIN-02
+    objective: |-
+      DS-digest match round-trips and rejects a tampered digest.
+    functions: TestDsMatchesKeyRoundtripAndRejectsTamperedDigest
+    verifies: CHAIN-03
+  - id: TC-CHAIN-03
+    objective: |-
+      Root trust anchor verifies the real digest (not just metadata) and rejects a non-KSK
+      candidate.
+    functions: |-
+      TestTrustAnchorVerifiesRealDigestNotJustMetadata, TestTrustAnchorRejectsNonKSK
+    verifies: CHAIN-03
+  - id: TC-CHAIN-04
+    objective: |-
+      RRset canonical ordering (RFC 4034) is handled regardless of input order.
+    functions: |-
+      TestMultiRecordRRsetCanonicalOrderingIsDeterministic
+    verifies: CHAIN-03
+  - id: TC-CHAIN-05
+    objective: |-
+      First contact is denied with <code class="inline">ERR_NO_DS_PUBLISHED</code> when the
+      parent publishes no DS.
+    functions: TestOnboardDeniedWithNoDSPublishedGivesDiagnostic
+    verifies: CHAIN-04, CHAIN-07, OPS-04
+  - id: TC-CHAIN-06
+    objective: |-
+      First contact is denied with <code class="inline">ERR_UNKNOWN_SIGNER</code> when a DS
+      exists but doesn't match.
+    functions: TestOnboardDeniedWithKeyMismatchGivesDiagnostic
+    verifies: CHAIN-05, CHAIN-07, OPS-04
+  - id: TC-CHAIN-07
+    objective: |-
+      A generic chain failure carries no diagnostic status, distinguishing it from
+      TC-CHAIN-05/06's specific cases.
+    functions: |-
+      TestOnboardDeniedForOtherChainReasonsCarriesNoDiagnostic
+    verifies: CHAIN-04, CHAIN-05 (negative)
+  - id: TC-CHAIN-08
+    objective: |-
+      First contact without an apex SOA is rejected without pinning a key.
+    functions: TestOnboardWithoutSOAIsRejected
+    verifies: CHAIN-06
+  - id: TC-CHAIN-09
+    objective: |-
+      A full, successful onboarding is servable, including RRSIGs with the DO bit.
+    functions: |-
+      TestOnboardFullPushThenQuery, TestOnboardedZoneServesRRSIGsWithDOBit
+    verifies: CHAIN-01, CHAIN-02, CONTENT-11
+  - id: TC-CHAIN-10
+    objective: |-
+      A wildcard Corefile scope onboards multiple independent domains with no restart, and
+      never onboarding a name still falls through to the next plugin.
+    functions: |-
+      TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges,
+      TestWildcardScopeFallsThroughForNeverOnboardedNames
+    verifies: CONTENT-12
+- id: key
+  title: KEY
+  cases:
+  - id: TC-KEY-01
+    objective: |-
+      KeyRegistry KSK pin/get round-trips; zone names are compared case-insensitively.
+    functions: |-
+      TestKeyRegistryPinKSKAndGet, TestKeyRegistryNormalizesZoneNames
+    verifies: KEY-01
+  - id: TC-KEY-02
+    objective: |-
+      A push signed by an unpinned/wrong key is rejected.
+    functions: TestPartialPushFromWrongKeyRejected
+    verifies: KEY-02
+  - id: TC-KEY-03
+    objective: |-
+      An ordinary differential push after onboarding succeeds against the pinned key.
+    functions: TestOrdinaryPartialPushAfterOnboarding
+    verifies: KEY-01
+  - id: TC-KEY-04
+    objective: |-
+      A valid KSK rollover (new candidate independently chains to a DS) succeeds; the
+      superseded key stops working.
+    functions: TestKeyRolloverSwitchesToNewKey
+    verifies: KEY-03, KEY-05
+  - id: TC-KEY-05
+    objective: |-
+      Rollover fails, and the old key remains pinned, when the new candidate has no DS.
+    functions: TestKeyRolloverFailsWithoutADSForTheNewKey
+    verifies: KEY-03
+  - id: TC-KEY-06
+    objective: |-
+      A rollover candidate below the algorithm floor is rejected before any chain-of-trust
+      effort.
+    functions: TestKeyRolloverRejectedForWeakAlgorithm
+    verifies: KEY-03, ALGO-03
+  - id: TC-KEY-07
+    objective: |-
+      A ZSK cannot be registered before a KSK exists; once one does, registering and reading
+      it back round-trips, and a duplicate key tag is rejected.
+    functions: |-
+      TestKeyRegistryAddZSKRequiresExistingKSK, TestKeyRegistryAddZSKThenGet,
+      TestKeyRegistryAddZSKRejectsDuplicateKeyTag
+    verifies: KEY-08
+  - id: TC-KEY-08
+    objective: |-
+      Retiring a registered ZSK removes it; retiring an unknown key tag is a no-op, not an
+      error.
+    functions: |-
+      TestKeyRegistryRetireZSK, TestKeyRegistryRetireZSKOfUnknownKeytagIsANoop
+    verifies: KEY-09
+  - id: TC-KEY-09
+    objective: |-
+      A KSK rollover, at the registry level, preserves an already-registered ZSK untouched.
+    functions: TestKeyRegistryPinKSKPreservesExistingZSKs
+    verifies: KEY-05
+  - id: TC-KEY-10
+    objective: |-
+      The authenticator set is the KSK plus only ZSKs flagged to authenticate transactions;
+      the content-signer set is the KSK plus every registered ZSK.
+    functions: |-
+      TestZoneKeysAuthenticatorsIncludesOnlyCanAuthenticateTxZSKs
+    verifies: KEY-10, KEY-11
+  - id: TC-KEY-11
+    objective: |-
+      End-to-end: a ZSK registers over an ordinary, already-KSK-authenticated push with no
+      chain-of-trust network walk; a zone that never registers one behaves exactly as before
+      the ZSK split existed.
+    functions: |-
+      TestZSKCanBeRegisteredOverAnOrdinaryPush,
+      TestRegisteringAZSKIsOptionalZoneBehaviorIsUnchangedWithoutOne
+    verifies: KEY-06, KEY-08
+  - id: TC-KEY-12
+    objective: |-
+      Once registered, a ZSK authenticates further transactions entirely on its own, with the
+      content it carries servable afterward.
+    functions: |-
+      TestZSKAuthenticatesFurtherTransactionsOnceRegistered
+    verifies: KEY-01, KEY-11
+  - id: TC-KEY-13
+    objective: |-
+      Content signed by a ZSK (rather than the KSK) still verifies under §4's Level-2
+      content-signature check.
+    functions: |-
+      TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs
+    verifies: KEY-10
+  - id: TC-KEY-14
+    objective: |-
+      A retired ZSK no longer authenticates anything, end to end.
+    functions: TestZSKCanBeRetired
+    verifies: KEY-09
+  - id: TC-KEY-15
+    objective: |-
+      A KSK rollover, end to end, preserves and keeps trusting an already-registered ZSK
+      afterward.
+    functions: TestKSKRolloverPreservesExistingZSK
+    verifies: KEY-05
+  - id: TC-KEY-16
+    objective: |-
+      A first-contact candidate without the SEP (KSK) flag is refused with a dedicated
+      diagnostic and pins nothing.
+    functions: TestFirstContactRejectsNonKSKCandidate
+    verifies: KEY-07
+  - id: TC-KEY-17
+    objective: |-
+      A ZSK registration below the algorithm floor is refused before being registered.
+    functions: TestAddZSKRejectsWeakAlgorithm
+    verifies: KEY-08, ALGO-01
+  - id: TC-KEY-18
+    objective: |-
+      End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
+      against a real server: the full KSK use case — onboarding, a differential push, and a
+      full KSK rollover, with the superseded key rejected and the new one accepted afterward.
+    functions: TestE2EKSKFullLifecycle
+    verifies: |-
+      KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, CLIENT-04, CLIENT-05
+  - id: TC-KEY-19
+    objective: |-
+      End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
+      against a real server: the full ZSK use case — registration, ZSK-only authentication,
+      KSK-authenticated-but-ZSK-signed content, retirement, the retired key rejected
+      afterward, and the <code class="inline">rotate-key -role zsk</code> register-then-retire
+      convenience path.
+    functions: |-
+      TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires
+    verifies: KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, CLIENT-04
+- id: algo
+  title: ALGO
+  cases:
+  - id: TC-ALGO-01
+    objective: |-
+      Recommended algorithms are accepted; weak or unrecognised ones are rejected, at the
+      classification primitive.
+    functions: |-
+      TestAlgorithmMeetsFloorAcceptsRecommendedAlgorithms,
+      TestAlgorithmMeetsFloorRejectsWeakOrUnknownAlgorithms
+    verifies: ALGO-01, ALGO-02
+  - id: TC-ALGO-02
+    objective: |-
+      A first-contact push with a weak-algorithm candidate is refused with <code
+      class="inline">ERR_WEAK_ALGORITHM</code>, even though its transaction signature is
+      otherwise genuine.
+    functions: TestOnboardWithWeakAlgorithmKeyIsRejected
+    verifies: ALGO-01, ALGO-03
+- id: content
+  title: CONTENT
+  cases:
+  - id: TC-CONTENT-01
+    objective: |-
+      All five RFC 2136 §2.4 prerequisite forms evaluate correctly.
+    functions: |-
+      TestEvaluatePrerequisitesNameIsInUse, TestEvaluatePrerequisitesNameNotInUse,
+      TestEvaluatePrerequisitesRRsetExistsValueIndependent,
+      TestEvaluatePrerequisitesRRsetDoesNotExist
+    verifies: CONTENT-01
+  - id: TC-CONTENT-02
+    objective: |-
+      The SOA-serial staleness guard rejects a stale push with its specific status; an
+      ordinary value-dependent mismatch on another RRset carries none.
+    functions: |-
+      TestEvaluatePrerequisitesRRsetExistsValueDependentSOAStalenessGuard,
+      TestEvaluatePrerequisitesGenericValueDependentPrereqCarriesNoStatus
+    verifies: CONTENT-03
+  - id: TC-CONTENT-03
+    objective: |-
+      All four RFC 2136 §2.5 update-op forms apply correctly.
+    functions: |-
+      TestApplyUpdateOpsAddToRRset, TestApplyUpdateOpsDeleteRRset,
+      TestApplyUpdateOpsDeleteAllRRsetsFromName, TestApplyUpdateOpsDeleteOneRR
+    verifies: CONTENT-02
+  - id: TC-CONTENT-04
+    objective: |-
+      Signing produces exactly one RRSIG per RRset, with the correct TTL, and the signature
+      verifies.
+    functions: |-
+      TestSignZoneContentProducesOneRRSIGPerRRset,
+      TestSignZoneContentRRSIGsCarryTheCoveredRRsetsTTL,
+      TestSignZoneContentRRSIGsActuallyVerify
+    verifies: CONTENT-06
+  - id: TC-CONTENT-05
+    objective: |-
+      Content-level (Level 2) verification accepts genuine signatures and rejects unsigned,
+      wrong-key, and expired content; delete-shaped ops need none.
+    functions: |-
+      TestVerifySignedRRsetsAcceptsGenuinelySignedContent,
+      TestVerifySignedRRsetsRejectsUnsignedRRset,
+      TestVerifySignedRRsetsRejectsWrongKeySignature,
+      TestVerifySignedRRsetsRejectsExpiredSignature,
+      TestVerifySignedRRsetsMissingSignatureCarriesNoExpiredStatus,
+      TestVerifySignedRRsetsIgnoresDeleteShapedOps
+    verifies: CONTENT-04, CONTENT-05
+  - id: TC-CONTENT-06
+    objective: |-
+      End-to-end: the opt-in verification gate rejects unsigned content, distinguishes an
+      expired-but-genuine signature, and (off by default) still accepts unsigned content.
+    functions: |-
+      TestRequireValidRRSIGsRejectsUnsignedContent,
+      TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic,
+      TestRequireValidRRSIGsOffAcceptsUnsignedContent
+    verifies: CONTENT-04, CONTENT-05
+  - id: TC-CONTENT-07
+    objective: |-
+      In-memory zone store: dedup identical rdata, TTL refresh, multi-signer RRSIG
+      coexistence, independent copies on lookup, apex SOA protected from deletion.
+    functions: |-
+      21 functions in store_test.go (TestZoneData*, TestStoreGet*)
+    verifies: CONTENT-02
+  - id: TC-CONTENT-08
+    objective: |-
+      NSEC chain construction covers every owner name and cycles correctly; type bitmap
+      reflects actual content; canonical ordering matches the RFC 4034 worked example.
+    functions: |-
+      10 functions in nsec_test.go (TestCanonicalCompare*, TestSortNamesCanonically,
+      TestClosestEncloser*, TestCoveringOwner*, TestBuildNSECChain*)
+    verifies: CONTENT-07
+  - id: TC-CONTENT-09
+    objective: |-
+      The NSEC chain is replaced, not accumulated, on re-push, and purged together with its
+      RRSIGs.
+    functions: |-
+      TestZoneDataInsertNSECReplacesRatherThanAccumulates,
+      TestZoneDataPurgeNSECRemovesRecordsAndTheirRRSIGs
+    verifies: CONTENT-09
+  - id: TC-CONTENT-10
+    objective: |-
+      Negative-proof construction is correct for NODATA and NXDOMAIN (including the wildcard
+      slot), and degrades to no proof when no chain exists yet.
+    functions: |-
+      TestZoneDataNegativeProofNODATAReturnsNSECAtQueriedName,
+      TestZoneDataNegativeProofNXDOMAINCoversQnameAndWildcardSlot,
+      TestZoneDataNegativeProofReturnsNilWithNoChainPushed
+    verifies: CONTENT-07
+  - id: TC-CONTENT-11
+    objective: |-
+      End-to-end negative answers carry SOA in authority (with/without DO) and a valid NSEC
+      proof under DO; a partial push invalidates the chain until the next full push.
+    functions: |-
+      TestNXDOMAINCarriesSOAInAuthority, TestNODATACarriesSOAInAuthority,
+      TestNegativeResponseCarriesSOARRSIGWithDOBit, TestNXDOMAINCarriesValidNSECProof,
+      TestNODATACarriesValidNSECProof, TestPartialPushInvalidatesNSECUntilNextFullPush
+    verifies: CONTENT-07, CONTENT-08, CONTENT-09
+  - id: TC-CONTENT-12
+    objective: |-
+      Zone-file loading separates SOA correctly and rejects a file with none; full-zone push
+      shapes prerequisite/update sections correctly for first contact and re-push, accepts
+      hand-built records, and its signatures verify.
+    functions: |-
+      TestLoadZoneFileSeparatesSOAFromOtherRecords, TestLoadZoneFileRejectsMissingSOA,
+      TestBuildFullZonePushShapesPrerequisiteAndUpdateSections,
+      TestBuildFullZonePushFirstContactHasNoPrerequisite,
+      TestBuildFullZonePushAcceptsHandBuiltRecords, TestBuildFullZonePushSignsAndVerifies
+    verifies: CONTENT-01, CONTENT-06
+  - id: TC-CONTENT-13
+    objective: |-
+      Ten typical RR types sign/verify (with tamper detection), serve correctly with and
+      without DO, and are all accepted together under the content-verification gate.
+    functions: |-
+      TestSignZoneContentAndVerifyAcrossTypicalRRTypes,
+      TestServeAndVerifyAcrossTypicalRRTypes, TestRequireValidRRSIGsAcceptsEveryTypicalRRType
+    verifies: CONTENT-10
+  - id: TC-CONTENT-14
+    objective: |-
+      A malformed persisted op rolls the whole transaction back atomically; all four op forms
+      persist and reload correctly; NSEC purge is mirrored on disk.
+    functions: |-
+      TestDBCommitUpdateAppliesAllFourOpForms, TestDBCommitUpdateRollsBackOnMalformedOp,
+      TestDBCommitUpdatePurgesStaleNSECOnNextUpdate
+    verifies: PERSIST-02, CONTENT-09
+- id: contact
+  title: CONTACT
+  cases:
+  - id: TC-CONTACT-01
+    objective: |-
+      A contact add/delete op is correctly split from the update ops; non-contact ops pass
+      through untouched; no contact op yields no update.
+    functions: |-
+      TestSplitContactOpsExtractsAddOp, TestSplitContactOpsExtractsDeleteOp,
+      TestSplitContactOpsNoContactOpReturnsNilUpdate
+    verifies: CONTACT-01, CONTACT-03
+  - id: TC-CONTACT-02
+    objective: |-
+      An address with an unrecognised scheme, or an empty list, is rejected.
+    functions: |-
+      TestSplitContactOpsRejectsInvalidScheme,
+      TestValidateContactAddressesRejectsUnknownScheme,
+      TestValidateContactAddressesRejectsEmptyList
+    verifies: CONTACT-02
+  - id: TC-CONTACT-03
+    objective: |-
+      More than one contact directive per push is rejected; multiple addresses in one
+      directive are all kept.
+    functions: |-
+      TestSplitContactOpsRejectsMoreThanOneDirective,
+      TestSplitContactOpsAcceptsMultipleAddressesInOneOp
+    verifies: CONTACT-01
+  - id: TC-CONTACT-04
+    objective: |-
+      An orphan RRSIG over the contact record is dropped rather than persisted.
+    functions: |-
+      TestSplitContactOpsDropsOrphanRRSIGOverTheContactRecord
+    verifies: CONTACT-04
+  - id: TC-CONTACT-05
+    objective: ContactRegistry set/clear round-trips in memory.
+    functions: TestContactRegistrySetAndClear
+    verifies: CONTACT-01
+  - id: TC-CONTACT-06
+    objective: |-
+      A contact registration rides a real onboarded push end to end and is never itself
+      servable as DNS content.
+    functions: |-
+      TestContactRegistrationRidesOrdinaryPushAndIsNeverServed
+    verifies: CONTACT-01, CONTACT-03
+  - id: TC-CONTACT-07
+    objective: |-
+      A contact registration persists to, and survives reload from, the database; clearing it
+      removes the row.
+    functions: TestDBCommitUpdatePersistsAndClearsContact
+    verifies: CONTACT-05
+  - id: TC-CONTACT-08
+    objective: |-
+      The zone/key/contact accessors sazu-watchd depends on return correct data for an
+      onboarded zone and report absence for one never onboarded.
+    functions: TestDBListZonesLoadKeyLoadContact
+    verifies: CONTACT-05, WATCH-02
+- id: custody
+  title: CUSTODY
+  cases:
+  - id: TC-CUSTODY-01
+    objective: |-
+      A plain BIND-format key round-trips to an identical DNSKEY and DS.
+    functions: TestSaveLoadKeyRoundTripsToIdenticalDNSKEYAndDS
+    verifies: CUSTODY-01
+  - id: TC-CUSTODY-02
+    objective: |-
+      Load-or-generate creates once and reuses thereafter, for plain and encrypted key files
+      alike.
+    functions: |-
+      TestLoadOrGenerateKeyGeneratesThenReusesSameKey,
+      TestLoadOrGenerateKeyWithPassphraseGeneratesEncryptedFile
+    verifies: CUSTODY-01, CUSTODY-02
+  - id: TC-CUSTODY-03
+    objective: |-
+      An encrypted key round-trips to the identical key material and is recognisably
+      encrypted.
+    functions: |-
+      TestSaveLoadEncryptedKeyRoundTripsToIdenticalKey,
+      TestIsEncryptedKeyFileDistinguishesFromPlainBINDFormat
+    verifies: CUSTODY-02, CUSTODY-03
+  - id: TC-CUSTODY-04
+    objective: |-
+      A wrong/missing passphrase, a plain file handed to the decrypt path, and a tampered
+      ciphertext are all rejected.
+    functions: |-
+      TestLoadEncryptedKeyRejectsWrongOrMissingPassphrase,
+      TestDecryptKeyFileBytesRejectsWrongPassphrase,
+      TestDecryptKeyFileBytesRejectsTamperedCiphertext,
+      TestDecryptKeyFileBytesRejectsNonEncryptedInput
+    verifies: CUSTODY-04
+  - id: TC-CUSTODY-05
+    objective: |-
+      The raw encrypt/decrypt primitive round-trips exactly.
+    functions: TestEncryptDecryptKeyFileBytesRoundTrip
+    verifies: CUSTODY-02
+- id: carrier
+  title: CARRIER
+  cases:
+  - id: TC-CARRIER-01
+    objective: |-
+      <code class="inline">dnsutil.UnpackRequest</code> keeps its original default policy
+      unchanged (regression baseline for the accept-func extension).
+    functions: TestUnpackRequest (plugin/pkg/dnsutil)
+    verifies: CARRIER-03 (baseline)
+  - id: TC-CARRIER-02
+    objective: |-
+      A custom accept function can opt UPDATE in where the default would reject it; a nil
+      function still enforces the default.
+    functions: |-
+      TestUnpackRequestWithAcceptFuncNilFallsBackToDefault,
+      TestUnpackRequestWithAcceptFuncHonorsCustomPolicy (dnsutil)
+    verifies: CARRIER-03
+  - id: TC-CARRIER-03
+    objective: |-
+      The DoH request parser rejects UPDATE by default and accepts it once opted in, for GET
+      and POST, with byte-exact raw output.
+    functions: |-
+      TestRequestToMsgWireRejectsUpdateByDefault,
+      TestRequestToMsgWireWithAcceptAllowsOptedInOpcode (plugin/pkg/doh)
+    verifies: CARRIER-02, CARRIER-03
+  - id: TC-CARRIER-04
+    objective: |-
+      The JSON wire envelope decodes to the exact original bytes under its own and the generic
+      content type; malformed JSON/base64 is rejected; a plain body is never mistaken for
+      JSON.
+    functions: |-
+      TestRequestToMsgWireWithAcceptJSONEnvelope,
+      TestRequestToMsgWireWithAcceptJSONEnvelopeGenericContentType,
+      TestRequestToMsgWireWithAcceptJSONEnvelopeRejectsMalformedJSON,
+      TestRequestToMsgWireWithAcceptJSONEnvelopeRejectsBadBase64,
+      TestPlainDNSMessageContentTypeIsNeverTreatedAsJSON (doh)
+    verifies: CARRIER-04, CARRIER-05
+  - id: TC-CARRIER-05
+    objective: |-
+      Ordinary DoH GET/POST round trips still parse correctly; an oversized GET query is
+      rejected (regression baseline).
+    functions: TestDoH, TestDoHGETRejectsOversizedDNSQuery (doh)
+    verifies: CARRIER-01, CARRIER-02 (baseline)
+  - id: TC-CARRIER-06
+    objective: |-
+      core/dnsserver's HTTPS and HTTP3 servers reject UPDATE by default and accept it once
+      <code class="inline">Config.AllowOpcode</code> is set, over POST/GET/JSON, with the
+      exact original wire bytes recoverable from the request context.
+    functions: |-
+      TestServerHTTPSRejectsUpdate, TestServerHTTPSAllowOpcodeAcceptsUpdate,
+      TestServerHTTPS3RejectsUpdate, TestServerHTTPS3AllowOpcodeAcceptsUpdate (core/dnsserver)
+    verifies: |-
+      CARRIER-02, CARRIER-03, CARRIER-04, CARRIER-05, AUTH-03
+  - id: TC-CARRIER-07
+    objective: |-
+      The plugin onboards a zone and pushes a differential update over a real HTTPS round
+      trip, both as raw bytes and as the JSON envelope.
+    functions: |-
+      TestOnboardOverHTTPSRawWireBytes, TestOnboardOverHTTPSJSONWireEnvelope,
+      TestPartialPushOverHTTPSAfterOnboarding (https_test.go)
+    verifies: CARRIER-02, CARRIER-04, CARRIER-05
+- id: sec
+  title: SEC
+  cases:
+  - id: TC-SEC-01
+    objective: |-
+      A first-contact/rollover attempt over plain UDP is refused; the identical push succeeds
+      resent over TCP; an already-pinned zone's ordinary push still works over UDP.
+    functions: |-
+      TestFirstContactOverUDPIsRefused, TestFirstContactOverUDPStillWorksAfterRetryOverTCP,
+      TestKeyRolloverOverUDPIsRefused, TestOrdinaryPartialPushOverUDPStillWorks
+      (transport_test.go)
+    verifies: SEC-01
+  - id: TC-SEC-02
+    objective: |-
+      The transport classifier is correct in isolation, including treating an HTTP/3-shaped
+      UDP address as connection-oriented via the context signal.
+    functions: |-
+      TestConnectionOrientedUDPIsNotConnectionOriented,
+      TestConnectionOrientedTCPIsConnectionOriented,
+      TestConnectionOrientedNilAddrIsNotConnectionOriented,
+      TestConnectionOrientedHTTP3ShapedUDPAddrIsStillConnectionOriented
+    verifies: SEC-01
+  - id: TC-SEC-03
+    objective: |-
+      The per-zone quota enforces its limit, tracks full/differential and distinct zones
+      independently, slides its window, and is case-insensitive on zone name.
+    functions: |-
+      TestRateLimiterAllowsUpToTheLimitThenRefuses,
+      TestRateLimiterTracksFullAndDifferentialIndependently,
+      TestRateLimiterTracksZonesIndependently, TestRateLimiterSlidesTheWindow,
+      TestRateLimiterIsCaseInsensitiveOnZoneName
+    verifies: SEC-03
+  - id: TC-SEC-04
+    objective: |-
+      An exhausted per-zone quota rejects a further differential push end to end and never
+      applies its content.
+    functions: |-
+      TestRateLimiterExceededRejectsFurtherDifferentialPushes
+    verifies: SEC-03
+  - id: TC-SEC-05
+    objective: |-
+      The per-source-IP limiter enforces its budget, is port-independent, slides its window,
+      and covers many distinct zone names from one address.
+    functions: |-
+      TestIPRateLimiterAllowsUpToTheLimitThenRefuses,
+      TestIPRateLimiterTracksAddressesIndependently, TestIPRateLimiterSlidesTheWindow,
+      TestIPRateLimiterCoversManyDistinctZoneNamesFromOneAddress, TestSourceIPStripsPort,
+      TestSourceIPFallsBackToOriginalWhenNotHostPort
+    verifies: SEC-02
+  - id: TC-SEC-06
+    objective: |-
+      <strong>End-to-end scanning scenario:</strong> three distinct never-before-seen zones
+      onboard normally from one address; a fourth, still holding its own fresh per-zone quota,
+      is refused purely on address volume; the limiter also counts an ordinary
+      already-authenticated push.
+    functions: |-
+      TestIPRateLimiterCoversScanningAcrossManyDistinctZoneNames,
+      TestIPRateLimiterCountsEveryUpdateAttemptNotJustFirstContact
+    verifies: SEC-02
+  - id: TC-SEC-07
+    objective: |-
+      Both limiters garbage-collect stale entries at most once per window, bounding memory to
+      recently active keys.
+    functions: |-
+      TestIPRateLimiterSweepsStaleAddressesOutOfMemory,
+      TestRateLimiterSweepsStaleZoneNamesOutOfMemory, TestSweepIfDueOnlyRunsOncePerWindow
+    verifies: SEC-04
+  - id: TC-SEC-08
+    objective: |-
+      Transport-gate and per-IP-limiter rejections leave no audit-trail row; an ordinary
+      rejection is still fully audited.
+    functions: TestTransportAndRateLimitRejectionsAreNotAudited
+    verifies: SEC-05
+- id: ops
+  title: OPS
+  cases:
+  - id: TC-OPS-01
+    objective: |-
+      One audit row is recorded for a rejected attempt and one for a later successful
+      onboarding, each with a distinct transaction ID, newest first.
+    functions: |-
+      TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions
+    verifies: OPS-01, OPS-02
+  - id: TC-OPS-02
+    objective: |-
+      Audit-trail entries persist and page/limit correctly, including for a zone with none at
+      all.
+    functions: TestDBRecordTransactionAndRecentTransactions
+    verifies: OPS-02, OPS-03
+  - id: TC-OPS-03
+    objective: |-
+      <code class="inline">rate_limit</code>/<code class="inline">ip_rate_limit</code>
+      Corefile directives parse correctly, default correctly when omitted, and reject
+      malformed arguments; the plugin wires up with or without persistence.
+    functions: |-
+      TestParseSazu, TestParseSazuRateLimitDefaultsAndOverride,
+      TestParseSazuIPRateLimitDefaultAndOverride, TestSetupWiresPluginAndOptionalDB,
+      TestSetupWithoutDBIsPurelyInMemory
+    verifies: OPS-05, PERSIST-04
+- id: watch
+  title: WATCH
+  cases:
+  - id: TC-WATCH-01
+    objective: |-
+      A zone's first observation establishes a baseline without alerting, even if already
+      failing.
+    functions: |-
+      TestCheckOnceFirstObservationEstablishesBaselineWithoutAlerting (sazu_watchd)
+    verifies: WATCH-03, WATCH-05
+  - id: TC-WATCH-02
+    objective: |-
+      An alert fires on OK→failing and failing→OK; none fires while the outcome is unchanged.
+    functions: |-
+      TestCheckOnceAlertsOnTransitionFromOKToFailing, TestCheckOnceAlertsOnRecovery,
+      TestCheckOnceStaysSilentAcrossRepeatedIdenticalOutcomes
+    verifies: WATCH-01, WATCH-03
+  - id: TC-WATCH-03
+    objective: |-
+      Multiple zones are tracked independently; a transition with no registered contact is
+      still logged.
+    functions: |-
+      TestCheckOnceHandlesMultipleZonesIndependently,
+      TestCheckOnceAlertWithNoRegisteredContactStillReported
+    verifies: WATCH-01, WATCH-02
+  - id: TC-WATCH-04
+    objective: |-
+      A webhook alert posts the expected JSON, reports a non-2xx response, omits the error
+      field on recovery, and dispatches to multiple addresses independently.
+    functions: |-
+      TestNotifierSendWebhookPostsExpectedPayload, TestNotifierSendWebhookReportsNonOKStatus,
+      TestNotifierSendRecoveryPayloadCarriesNoError,
+      TestNotifierSendDispatchesToMultipleAddressesIndependently
+    verifies: WATCH-04
+  - id: TC-WATCH-05
+    objective: |-
+      An email alert fails clearly with no SMTP configured or an invalid address; an
+      unrecognised scheme is reported as an error.
+    functions: |-
+      TestNotifierSendEmailWithoutSMTPAddrConfiguredFails,
+      TestNotifierSendEmailRejectsInvalidAddress, TestNotifierSendUnknownSchemeReportsError
+    verifies: WATCH-04
+- id: persist
+  title: PERSIST
+  cases:
+  - id: TC-PERSIST-01
+    objective: |-
+      A committed update reproduces identically after a full reload (key, SOA, RRset).
+    functions: TestDBCommitUpdateThenLoadAllReproducesOnboarding
+    verifies: PERSIST-02, PERSIST-03
+  - id: TC-PERSIST-02
+    objective: |-
+      State survives a real close-and-reopen of the database file.
+    functions: TestDBPersistsAcrossReopen
+    verifies: PERSIST-01, PERSIST-03
+  - id: TC-PERSIST-03
+    objective: |-
+      Registering and retiring a ZSK persist and reload correctly via <code
+      class="inline">LoadZoneKeys</code>, independently of the KSK; the lighter-weight <code
+      class="inline">LoadKey</code> accessor keeps returning only the KSK.
+    functions: TestDBCommitUpdateAddsAndRetiresZSK
+    verifies: KEY-08, KEY-09, PERSIST-02
+  - id: TC-PERSIST-04
+    objective: |-
+      A KSK rollover replaces that zone's sole KSK database row rather than leaving the
+      superseded key tag behind as a stale second row.
+    functions: TestDBCommitUpdateKSKRolloverReplacesRowNotAdds
+    verifies: KEY-05, PERSIST-02
+  - id: TC-PERSIST-05
+    objective: |-
+      A database written before the optional-ZSK key-storage schema existed is transparently
+      migrated in place on open — every pre-existing key becomes that zone's KSK, and a second
+      <code class="inline">Open</code> on an already-migrated database is a safe no-op.
+    functions: TestDBOpenMigratesPreZSKKeysTable
+    verifies: PERSIST-05
+- id: client
+  title: CLIENT
+  cases:
+  - id: TC-CLIENT-01
+    objective: |-
+      Every embedded guidance template (onboarding-denied diagnostics, the rotate-key
+      tradeoff) executes without error against the data its caller passes it, and renders
+      non-empty output.
+    functions: TestGuidanceTemplatesRenderWithoutError
+    verifies: CLIENT-03, CLIENT-04
+  - id: TC-CLIENT-02
+    objective: |-
+      The no-DS guidance text actually contains the concrete, actionable values a customer
+      needs (the DS record's fields, the zone name, a ready-to-run <code
+      class="inline">dig</code> command) — not just that it renders.
+    functions: TestNoDSGuidanceIncludesTheDSRecordAndZone
+    verifies: CLIENT-03
+  - id: TC-CLIENT-03
+    objective: |-
+      The rotate-key decision text actually branches on whether a ZSK already exists — naming
+      its key tag when one does, pointing at <code class="inline">add-zsk</code> first when
+      none does — rather than printing the same generic advice regardless of zone state.
+    functions: |-
+      TestRotateKeyChoiceGuidanceReflectsWhetherAZSKExists
+    verifies: CLIENT-04
+  - id: TC-CLIENT-04
+    objective: |-
+      The small display/parsing helpers the CLI and its guidance depend on — DNSKEY flags to a
+      KSK/ZSK label, algorithm number to name, and the <code class="inline">-role</code>
+      flag's three cases — are correct.
+    functions: |-
+      TestKeyTypeLabelAndAlgorithmLabel, TestParseRoleFlag
+    verifies: CLIENT-01
+  - id: TC-CLIENT-05
+    objective: |-
+      End-to-end through the real CLI entry points: the KSK use case (see TC-KEY-18) and the
+      ZSK use case (see TC-KEY-19), each driving the actual <code class="inline">run*</code>
+      subcommand functions <code class="inline">main</code> itself dispatches to against a
+      real server — not a direct call into the plugin package.
+    functions: |-
+      TestE2EKSKFullLifecycle, TestE2EZSKFullLifecycle,
+      TestE2ERotateKeyZSKRoleRegistersThenRetires
+    verifies: CLIENT-01, CLIENT-02, CLIENT-04, CLIENT-05
+  - id: TC-CLIENT-06
+    objective: |-
+      The transport decision is TCP regardless of message size by default, opts into UDP only
+      when explicitly allowed and the message actually fits, and falls back to TCP with a
+      specific, informative warning otherwise.
+    functions: |-
+      TestChooseNetworkDefaultsToTCPRegardlessOfSize,
+      TestChooseNetworkAllowUDPUsesUDPWhenItFits,
+      TestChooseNetworkAllowUDPFallsBackToTCPWithWarningWhenTooLarge
+    verifies: CLIENT-06
+  - id: TC-CLIENT-07
+    objective: |-
+      An ordinary email address converts to the correct RFC&nbsp;1035 §8.13 SOA mailbox
+      encoding, including escaping a literal dot in the local part; a malformed address is
+      rejected.
+    functions: |-
+      TestEmailToMboxConvertsOrdinaryAddress, TestEmailToMboxEscapesLiteralDotsInLocalPart,
+      TestEmailToMboxRejectsAddressWithoutAt
+    verifies: CLIENT-07
+  - id: TC-CLIENT-08
+    objective: |-
+      An SOA serial of <code class="inline">"auto"</code> or empty resolves to today's date as
+      YYYYMMDD00; an explicit numeric serial is used as given; a non-numeric, non-"auto" value
+      is rejected.
+    functions: |-
+      TestResolveSerialAutoIsTodayAsYYYYMMDD00, TestResolveSerialEmptyIsAlsoAuto,
+      TestResolveSerialAcceptsExplicitNumber, TestResolveSerialRejectsGarbage,
+      TestDateSerialFormat
+    verifies: CLIENT-07
+  - id: TC-CLIENT-09
+    objective: |-
+      A YAML zone definition converts to the same (SOA, records) shape a real zone file
+      produces — apex/relative/absolute record names resolve correctly, a record's own TTL
+      overrides the zone default, and required fields (SOA nameserver, mailbox source, record
+      type/value) are enforced — round-tripping correctly through an actual file on disk, and
+      <code class="inline">push-zone</code>'s own loader dispatches to it purely by file
+      extension.
+    functions: |-
+      TestRecordOwnerNameResolvesApexRelativeAndAbsolute,
+      TestYamlZoneToRRsBuildsSOAAndRecords, TestYamlZoneToRRsRejectsMissingAdminEmailOrMbox,
+      TestYamlZoneToRRsRejectsMissingNS, TestYamlZoneToRRsFallsBackToGivenZoneWhenFileOmitsIt,
+      TestYamlZoneToRRsRejectsRecordWithoutTypeOrValue,
+      TestLoadYAMLZoneRoundTripsThroughAFile, TestLoadZoneSourceDispatchesOnExtension
+    verifies: CLIENT-07
+  - id: TC-CLIENT-10
+    objective: |-
+      End-to-end: <code class="inline">init-zone</code> writes a starter YAML definition <code
+      class="inline">push-zone</code> accepts directly (no conversion step) and which onboards
+      correctly; it refuses to overwrite an existing file; <code
+      class="inline">zone-convert</code>'s generated BIND-format output is itself directly
+      pushable.
+    functions: |-
+      TestE2EInitZoneThenPushZoneWithYAML, TestE2EInitZoneRefusesToOverwriteExistingFile,
+      TestE2EZoneConvertProducesAPushableZoneFile
+    verifies: CLIENT-07
+- id: nfr
+  title: NFR
+  abstract: |-
+    Non-functional requirements (§4 of the Requirements Specification) are mostly verified
+    by the rest of the suite passing at all rather than a dedicated test file of their own:
+    NFR-01 (no cgo) by every package here building and testing successfully with CGO_ENABLED
+    implicitly unset; NFR-03 (persistence consistency) by the PERSIST area's
+    transactional-rollback cases (TC-PERSIST is in §3.12); NFR-04 (HTTPS/HTTP3 backward
+    compatibility) by CARRIER's regression-baseline cases (§3.8); NFR-05 (safe defaults) by
+    every chain-of-trust/algorithm-floor/rate-limiting case throughout this catalogue
+    passing with its respective safeguard left at its default. NFR-02 (per-zone, not global,
+    update serialization) is the one specific enough to warrant its own dedicated tests.
+  cases:
+  - id: TC-NFR-01
+    objective: |-
+      The per-zone lock stripe is a pure, stable function of the (case/FQDN-normalized) zone
+      name, and a realistic number of distinct zone names spreads across most of the available
+      stripes rather than colliding onto a handful.
+    functions: |-
+      TestUpdateLockForIsStableForTheSameZone, TestUpdateLockForSpreadsAcrossStripes
+    verifies: NFR-02
+  - id: TC-NFR-02
+    objective: |-
+      End-to-end: a slow, in-flight first-contact chain-of-trust walk for one zone (a fake,
+      delay-injecting validator standing in for the real network round trip) does not delay an
+      unrelated, already-authenticated push to a different zone.
+    functions: |-
+      TestConcurrentUpdatesToDifferentZonesDoNotSerialize
+    verifies: NFR-02
+  - id: TC-NFR-03
+    objective: |-
+      Switching from one global lock to per-zone stripes does not weaken correctness for the
+      *same* zone: 20 concurrent differential pushes to one already-onboarded zone all still
+      apply, with none silently lost to a race.
+    functions: |-
+      TestConcurrentUpdatesToSameZoneStillSerializeCorrectly
+    verifies: NFR-02
+suite_inventory:
+  intro: |-
+    Per-file function counts, for exhaustive cross-reference against the repository. A
+    single Go test function may contain several sub-assertions or table-driven cases (the
+    Test Report's totals count these individually, per <code class="inml">go test
+    -json</code>).
+  files:
+  - file: handler_test.go
+    count: 28
+    area: |-
+      End-to-end: onboarding, rollover, quotas, audit, DO/NSEC
+  - file: store_test.go
+    count: 21
+    area: CONTENT (in-memory zone store)
+  - file: prereq_test.go
+    count: 10
+    area: CONTENT (RFC 2136 prerequisites/ops)
+  - file: nsec_test.go
+    count: 10
+    area: CONTENT (NSEC chain)
+  - file: contact_test.go
+    count: 10
+    area: CONTACT
+  - file: transport_test.go
+    count: 9
+    area: SEC (transport gate)
+  - file: sign_test.go
+    count: 9
+    area: CONTENT (signing/verification)
+  - file: rawcapture_test.go
+    count: 8
+    area: AUTH (wire-byte capture)
+  - file: db_test.go
+    count: 11
+    area: |-
+      PERSIST / CONTACT / OPS / KEY (ZSK persistence, schema migration)
+  - file: chain_test.go
+    count: 8
+    area: CHAIN (crypto primitives)
+  - file: sig0_test.go
+    count: 6
+    area: AUTH
+  - file: push_test.go
+    count: 6
+    area: CONTENT (zone-file / full push)
+  - file: ipratelimit_test.go
+    count: 6
+    area: SEC (per-IP limiter)
+  - file: setup_test.go
+    count: 5
+    area: OPS (Corefile)
+  - file: ratelimit_test.go
+    count: 5
+    area: SEC (per-zone quota)
+  - file: key_test.go
+    count: 5
+    area: CUSTODY
+  - file: keycrypt_test.go
+    count: 5
+    area: CUSTODY (encryption primitive)
+  - file: rrtypes_test.go
+    count: 3
+    area: CONTENT (RR-type coverage)
+  - file: ratelimit_sweep_test.go
+    count: 3
+    area: SEC (memory bound)
+  - file: https_test.go
+    count: 3
+    area: CARRIER
+  - file: zsk_test.go
+    count: 8
+    area: KEY (ZSK lifecycle, end to end)
+  - file: keys_test.go
+    count: 9
+    area: KEY (registry, KSK + optional ZSKs)
+  - file: cmd/sazuctl/zoneyaml_test.go
+    count: 16
+    area: CLIENT (YAML zone format conversion)
+  - file: cmd/sazuctl/main_test.go
+    count: 8
+    area: |-
+      CLIENT (guidance templates, transport choice, small helpers)
+  - file: cmd/sazuctl/e2e_test.go
+    count: 6
+    area: |-
+      CLIENT (CLI-level, end to end: KSK/ZSK use cases, init-zone/zone-convert)
+  - file: concurrency_test.go
+    count: 4
+    area: NFR (per-zone update locking)
+  - file: algorithm_test.go
+    count: 2
+    area: ALGO
+  - file: cmd/sazu_watchd/alert_test.go
+    count: 7
+    area: WATCH (notifier)
+  - file: cmd/sazu_watchd/watch_test.go
+    count: 6
+    area: WATCH (check loop)
+  - file: plugin/pkg/doh/doh_test.go
+    count: 9
+    area: CARRIER
+  - file: plugin/pkg/dnsutil/message_test.go
+    count: 3
+    area: CARRIER (baseline)
+  - file: core/dnsserver/server_https_test.go, server_https3_test.go (relevant subset)
+    count: 4
+    area: CARRIER
+manual_verification:
+  intro: |-
+    Performed during development against separately compiled binaries over real sockets; not
+    part of the repeatable <code class="inline">go test</code> suite. Recorded in full in
+    the companion Test Report §5.
+  entries:
+  - |-
+    A real <code class="inline">coredns</code> binary onboarding a zone via a real <code
+    class="inline">sazuctl</code> push over UDP/TCP, and serving it correctly afterwards.
+  - |-
+    A real <code class="inline">coredns</code> HTTPS listener (genuine self-signed TLS
+    handshake) accepting a real <code class="inline">sazuctl</code> push in both raw-bytes
+    and JSON-envelope form.
+  - |-
+    A real three-binary chain — <code class="inline">coredns</code>, <code
+    class="inline">sazuctl</code>, <code class="inline">sazu-watchd</code> — sharing one
+    SQLite file, with <code class="inline">sazu-watchd</code> independently reading the
+    zone, key, and contact rows CoreDNS wrote.
+  - |-
+    The <code class="inline">ip_rate_limit</code> Corefile directive against a real binary,
+    reproducing the exact multi-zone scanning scenario TC-SEC-06 automates.

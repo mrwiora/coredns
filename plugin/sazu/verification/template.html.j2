@@ -1,0 +1,550 @@
+<title>{{ title }}</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Serif:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  /* ---------- tokens ---------- */
+  :root {
+    --bg: #f5f6f4;
+    --surface: #ffffff;
+    --surface-2: #edf1ef;
+    --ink: #16211f;
+    --ink-muted: #52625e;
+    --ink-faint: #7c8b87;
+    --border: #dbe1de;
+    --border-strong: #c2ccc8;
+    --accent: #1f6f66;
+    --accent-ink: #123f3a;
+    --accent-tint: #e4f0ee;
+    --ok: #2f7a4f;
+    --ok-tint: #e4f3e9;
+    --warn: #a6741f;
+    --warn-tint: #f7ecd8;
+    --fail: #b23b3b;
+    --fail-tint: #fbe9e9;
+    --code-bg: #101917;
+    --code-ink: #d8ece7;
+    --shadow: 0 1px 2px rgba(20,32,29,.06), 0 6px 20px -8px rgba(20,32,29,.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10161a;
+      --surface: #161f23;
+      --surface-2: #1c272b;
+      --ink: #e7ece9;
+      --ink-muted: #9fb0ab;
+      --ink-faint: #728480;
+      --border: #29363a;
+      --border-strong: #38484c;
+      --accent: #59c2b3;
+      --accent-ink: #bfe8e1;
+      --accent-tint: #17302d;
+      --ok: #5fbf85;
+      --ok-tint: #16281e;
+      --warn: #d9a53d;
+      --warn-tint: #2c2412;
+      --fail: #e2685f;
+      --fail-tint: #2c1817;
+      --code-bg: #0b1210;
+      --code-ink: #cfe8e1;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px -10px rgba(0,0,0,.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #10161a;
+    --surface: #161f23;
+    --surface-2: #1c272b;
+    --ink: #e7ece9;
+    --ink-muted: #9fb0ab;
+    --ink-faint: #728480;
+    --border: #29363a;
+    --border-strong: #38484c;
+    --accent: #59c2b3;
+    --accent-ink: #bfe8e1;
+    --accent-tint: #17302d;
+    --ok: #5fbf85;
+    --ok-tint: #16281e;
+    --warn: #d9a53d;
+    --warn-tint: #2c2412;
+    --fail: #e2685f;
+    --fail-tint: #2c1817;
+    --code-bg: #0b1210;
+    --code-ink: #cfe8e1;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px -10px rgba(0,0,0,.5);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 15.5px;
+    line-height: 1.6;
+    padding-inline: 20px;
+  }
+  h1, h2, h3 { font-family: "IBM Plex Serif", Georgia, serif; text-wrap: balance; color: var(--ink); }
+  code, .mono, .id, th.num, td.num { font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace; }
+  .num, td.num, th.num { font-variant-numeric: tabular-nums; }
+  a { color: var(--accent-ink); }
+  a:hover { text-decoration-thickness: 2px; }
+
+  /* ---------- shell ---------- */
+  .shell { max-width: 1180px; margin-inline: auto; }
+
+  .masthead {
+    max-width: 780px;
+    margin: 40px auto 0;
+    padding: 0 0 28px;
+  }
+  .masthead .kicker {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent-ink); background: var(--accent-tint);
+    border: 1px solid var(--border-strong);
+    padding: 4px 10px; border-radius: 999px;
+  }
+  .masthead h1 { font-size: clamp(28px, 4vw, 38px); margin: 16px 0 8px; letter-spacing: -.01em; }
+  .masthead p.lede { color: var(--ink-muted); font-size: 17px; max-width: 62ch; }
+
+  .coversheet {
+    max-width: 780px; margin: 22px auto 0;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .coversheet table { width: 100%; border-collapse: collapse; }
+  .coversheet td { padding: 10px 16px; font-size: 13.5px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .coversheet tr:last-child td { border-bottom: none; }
+  .coversheet td.k { color: var(--ink-faint); width: 34%; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; padding-top: 13px; }
+  .coversheet td.v { font-weight: 500; }
+  .coversheet td.v a { text-decoration: none; border-bottom: 1px dotted var(--border-strong); }
+
+  /* ---------- tab nav ---------- */
+  .doc-tabs {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; gap: 2px; justify-content: center;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    margin-top: 34px; padding: 10px 12px;
+    flex-wrap: wrap;
+  }
+  .doc-tabs button {
+    font: inherit; font-family: "IBM Plex Mono", monospace; font-size: 13px;
+    background: transparent; border: 1px solid transparent; color: var(--ink-muted);
+    padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .doc-tabs button .n { color: var(--ink-faint); }
+  .doc-tabs button:hover { background: var(--surface-2); color: var(--ink); }
+  .doc-tabs button[aria-selected="true"] {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .doc-tabs button[aria-selected="true"] .n { color: rgba(255,255,255,.75); }
+
+  /* ---------- layout: rail + content ---------- */
+  .layout { display: grid; grid-template-columns: 220px minmax(0,1fr); gap: 40px; padding: 34px 0 90px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .rail { display: none; } }
+
+  .rail { position: sticky; top: 66px; max-height: calc(100vh - 90px); overflow: auto; padding-right: 4px; }
+  .rail .railtitle { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 10px; }
+  .rail nav a {
+    display: block; font-size: 13px; color: var(--ink-muted); text-decoration: none;
+    padding: 5px 0 5px 12px; border-left: 2px solid var(--border); line-height: 1.4;
+  }
+  .rail nav a:hover { color: var(--accent-ink); border-left-color: var(--accent); }
+  .rail nav a.l2 { padding-left: 24px; font-size: 12.3px; color: var(--ink-faint); }
+
+  .doc-panel { min-width: 0; }
+  .doc-panel > section { margin-bottom: 52px; scroll-margin-top: 76px; }
+  .doc-panel > section > h2 { font-size: 22px; display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .doc-panel > section > .sec-abstract { color: var(--ink-muted); margin: 0 0 18px; max-width: 68ch; }
+  .secno {
+    font-family: "IBM Plex Mono", monospace; font-size: 14px; color: var(--accent-ink);
+    background: var(--accent-tint); border-radius: 6px; padding: 1px 8px;
+  }
+  h3.subhead { font-size: 16px; margin: 26px 0 8px; }
+  h3.subhead .secno { font-size: 12px; }
+  p { max-width: 70ch; }
+  .doc-panel ul, .doc-panel ol { max-width: 68ch; padding-left: 22px; }
+  .doc-panel li { margin: 4px 0; }
+
+  /* ---------- tables ---------- */
+  table.spec { width: 100%; border-collapse: collapse; margin: 14px 0 8px; font-size: 13.6px; }
+  table.spec caption { text-align: left; font-size: 12px; color: var(--ink-faint); margin-bottom: 6px; }
+  table.spec th {
+    text-align: left; font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--ink-faint); padding: 8px 10px; border-bottom: 1px solid var(--border-strong);
+    position: sticky; top: 0; background: var(--bg);
+  }
+  table.spec td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.spec tr:hover td { background: var(--surface-2); }
+  table.spec .reqid, table.spec .tcid { white-space: nowrap; font-weight: 600; color: var(--accent-ink); }
+  table.spec td.src { color: var(--ink-muted); white-space: nowrap; font-size: 12.6px; }
+  .wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 2px 0; }
+  .wrap table.spec { margin: 0; }
+  .wrap table.spec th:first-child, .wrap table.spec td:first-child { padding-left: 16px; }
+  .wrap table.spec th:last-child, .wrap table.spec td:last-child { padding-right: 16px; }
+
+  /* ---------- badges / pills ---------- */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .03em;
+    padding: 2px 9px; border-radius: 999px; white-space: nowrap; font-weight: 500;
+  }
+  .pill.ok { color: var(--ok); background: var(--ok-tint); }
+  .pill.warn { color: var(--warn); background: var(--warn-tint); }
+  .pill.fail { color: var(--fail); background: var(--fail-tint); }
+  .pill.neutral { color: var(--ink-muted); background: var(--surface-2); border: 1px solid var(--border); }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .rfc { font-family: "IBM Plex Mono", monospace; font-size: 12.6px; color: var(--ink-muted); }
+
+  /* ---------- stat tiles ---------- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 18px 0 26px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .stat .v { font-family: "IBM Plex Mono", monospace; font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .v.ok { color: var(--ok); }
+  .stat .l { font-size: 11.5px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+
+  /* ---------- misc content blocks ---------- */
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-tint);
+    border-radius: 0 10px 10px 0; padding: 12px 16px; margin: 16px 0; max-width: 68ch; font-size: 14px;
+  }
+  .callout.warn { border-color: var(--warn); background: var(--warn-tint); }
+  blockquote {
+    margin: 14px 0; padding: 2px 0 2px 16px; border-left: 2px solid var(--border-strong);
+    color: var(--ink-muted); max-width: 66ch; font-style: italic;
+  }
+  pre {
+    background: var(--code-bg); color: var(--code-ink); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; font-size: 12.6px; line-height: 1.55;
+  }
+  code.inline { background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12.8px; }
+  hr.rule { border: none; border-top: 1px solid var(--border); margin: 44px 0; }
+
+  .crosslinks { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .crosslinks button {
+    font: inherit; font-family: "IBM Plex Mono", monospace; font-size: 12px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border-strong); color: var(--accent-ink);
+    padding: 6px 12px; border-radius: 8px;
+  }
+  .crosslinks button:hover { background: var(--accent-tint); }
+
+  footer.docfoot {
+    max-width: 1180px; margin: 0 auto; padding: 30px 0 60px; text-align: center;
+    color: var(--ink-faint); font-size: 12.5px; border-top: 1px solid var(--border);
+  }
+
+  [hidden] { display: none !important; }
+</style>
+
+<div class="masthead">
+  <span class="kicker">{{ kicker }}</span>
+  <h1>{{ title }}</h1>
+  <p class="lede">{{ lede }}</p>
+</div>
+
+<div class="coversheet">
+  <table>
+    <tr><td class="k">Document set</td><td class="v">{{ req.document.id }}-{{ req.document.version }} &middot; {{ ts.document.id }}-{{ ts.document.version }} &middot; {{ tr.document.id }}-{{ tr.document.version }}</td></tr>
+    <tr><td class="k">Subject system</td><td class="v">{{ subject_system }}</td></tr>
+    <tr><td class="k">Branch / commit</td><td class="v">{{ branch }} @ <code class="inline">{{ commit }}</code></td></tr>
+    <tr><td class="k">Status</td><td class="v"><span class="pill ok">all requirements implemented</span> &nbsp;<span class="pill ok">{{ tests_passing }}/{{ tests_total }} tests passing</span></td></tr>
+    <tr><td class="k">Derivation</td><td class="v">{{ derivation }}</td></tr>
+  </table>
+</div>
+
+<nav class="doc-tabs" role="tablist" aria-label="Document set">
+  <button role="tab" data-doc="req" aria-selected="true"><span class="n">1</span> Requirements Specification</button>
+  <button role="tab" data-doc="test" aria-selected="false"><span class="n">2</span> Test Specification</button>
+  <button role="tab" data-doc="report" aria-selected="false"><span class="n">3</span> Test Report</button>
+</nav>
+
+<div class="shell layout">
+  <aside class="rail" id="rail-req">
+    <div class="railtitle">In this document</div>
+    <nav>
+      <a href="#req-1">1 Introduction</a>
+      <a href="#req-2">2 System overview</a>
+      <a href="#req-3">3 Requirements</a>
+{%- for area in req.areas %}
+      <a class="l2" href="#req-{{ area.id }}">3.{{ loop.index }} {{ area.code }} &mdash; {{ area.title }}</a>
+{%- endfor %}
+      <a href="#req-4">4 Non-functional requirements</a>
+      <a href="#req-5">5 Traceability summary</a>
+    </nav>
+  </aside>
+  <main class="doc-panel" id="doc-req">
+
+<section id="req-1">
+  <h2><span class="secno">1</span> Introduction</h2>
+  <h3 class="subhead"><span class="secno">1.1</span> Purpose</h3>
+  <p>{{ req.introduction.purpose }}</p>
+
+  <h3 class="subhead"><span class="secno">1.2</span> Scope</h3>
+  <p>{{ req.introduction.scope }}</p>
+
+  <h3 class="subhead"><span class="secno">1.3</span> Conventions</h3>
+  <p>{{ req.introduction.conventions }}</p>
+
+  <h3 class="subhead"><span class="secno">1.4</span> Normative references</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>RFC</th><th>Title / role</th></tr>
+{%- for r in req.normative_references %}
+    <tr><td class="rfc">{{ r.rfc }}</td><td>{{ r.role }}</td></tr>
+{%- endfor %}
+  </table></div>
+</section>
+
+<section id="req-2">
+  <h2><span class="secno">2</span> System overview</h2>
+{%- for p in req.system_overview %}
+  <p>{{ p }}</p>
+{%- endfor %}
+</section>
+
+<section id="req-3">
+  <h2><span class="secno">3</span> Requirements</h2>
+  <p class="sec-abstract">Grouped by functional area. Each row is one discrete, independently verifiable requirement.</p>
+
+{% for area in req.areas %}
+  <h3 class="subhead" id="req-{{ area.id }}"><span class="secno">3.{{ loop.index }}</span> {{ area.code }} &mdash; {{ area.title }}</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>
+{%- for r in area.requirements %}
+    <tr><td class="reqid">{{ r.id }}</td><td>{{ r.text }}</td><td class="src">{{ r.source }}</td></tr>
+{%- endfor %}
+  </table></div>
+{% endfor -%}
+</section>
+
+<section id="req-4">
+  <h2><span class="secno">4</span> Non-functional requirements</h2>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Category</th></tr>
+{%- for n in req.non_functional_requirements %}
+    <tr><td class="reqid">{{ n.id }}</td><td>{{ n.text }}</td><td class="src">{{ n.category }}</td></tr>
+{%- endfor %}
+  </table></div>
+</section>
+
+<section id="req-5">
+  <h2><span class="secno">5</span> Traceability summary</h2>
+  <p>Every requirement above is verified by at least one automated test case; the mapping is maintained in the companion <a href="#" onclick="document.querySelector('[data-doc=test]').click();return false;">Test Specification</a> (&sect;3, per-area tables) and its execution recorded in the <a href="#" onclick="document.querySelector('[data-doc=report]').click();return false;">Test Report</a> (&sect;3). No requirement in this document is currently unverified or outstanding.</p>
+  <div class="stats">
+    <div class="stat"><div class="v ok">{{ stats.total_requirements }}</div><div class="l">requirements specified</div></div>
+    <div class="stat"><div class="v ok">{{ stats.total_areas }}</div><div class="l">functional areas</div></div>
+    <div class="stat"><div class="v ok">{{ stats.total_nfrs }}</div><div class="l">non-functional</div></div>
+    <div class="stat"><div class="v ok">0</div><div class="l">unimplemented</div></div>
+  </div>
+</section>
+
+  </main>
+</div>
+
+<div class="shell layout" hidden id="wrap-test">
+  <aside class="rail" id="rail-test">
+    <div class="railtitle">In this document</div>
+    <nav>
+      <a href="#ts-1">1 Test strategy</a>
+      <a href="#ts-2">2 Test environment</a>
+      <a href="#ts-3">3 Test case catalogue</a>
+{%- for area in ts.areas %}
+      <a class="l2" href="#ts-{{ area.id }}">3.{{ loop.index }} {{ area.title }}</a>
+{%- endfor %}
+      <a href="#ts-4">4 Automated suite inventory</a>
+      <a href="#ts-5">5 Manual / real-binary verification</a>
+    </nav>
+  </aside>
+  <main class="doc-panel" id="doc-test">
+
+<section id="ts-1">
+  <h2><span class="secno">1</span> Test strategy</h2>
+  <p>{{ ts.strategy.intro }}</p>
+  <ul>
+{%- for item in ts.strategy.levels %}
+    <li>{{ item }}</li>
+{%- endfor %}
+  </ul>
+  <p>{{ ts.strategy.outro }}</p>
+</section>
+
+<section id="ts-2">
+  <h2><span class="secno">2</span> Test environment</h2>
+  <div class="wrap"><table class="spec">
+    <tr><th>Item</th><th>Value</th></tr>
+{%- for row in ts.environment %}
+    <tr><td>{{ row.item }}</td><td class="mono">{{ row.value }}</td></tr>
+{%- endfor %}
+  </table></div>
+</section>
+
+<section id="ts-3">
+  <h2><span class="secno">3</span> Test case catalogue</h2>
+  <p class="sec-abstract">{{ ts.catalogue_intro }}</p>
+
+{% for area in ts.areas %}
+  <h3 class="subhead" id="ts-{{ area.id }}"><span class="secno">3.{{ loop.index }}</span> {{ area.title }}</h3>
+{%- if area.get('abstract') %}
+  <p class="sec-abstract">{{ area.abstract }}</p>
+{%- endif %}
+  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>
+{%- for c in area.cases %}
+    <tr><td class="tcid">{{ c.id }}</td><td>{{ c.objective }}</td><td class="mono">{{ c.functions }}</td><td>{{ c.verifies }}</td></tr>
+{%- endfor %}
+  </table></div>
+{% endfor -%}
+</section>
+
+<section id="ts-4">
+  <h2><span class="secno">4</span> Automated suite inventory</h2>
+  <p class="sec-abstract">{{ ts.suite_inventory.intro }}</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>File</th><th class="num">Test funcs</th><th>Primary area</th></tr>
+{%- for f in ts.suite_inventory.files %}
+    <tr><td class="mono">{{ f.file }}</td><td class="num">{{ f.count }}</td><td>{{ f.area }}</td></tr>
+{%- endfor %}
+  </table></div>
+</section>
+
+<section id="ts-5">
+  <h2><span class="secno">5</span> Manual / real-binary verification</h2>
+  <p class="sec-abstract">{{ ts.manual_verification.intro }}</p>
+  <ul>
+{%- for item in ts.manual_verification.entries %}
+    <li>{{ item }}</li>
+{%- endfor %}
+  </ul>
+</section>
+
+  </main>
+</div>
+
+<div class="shell layout" hidden id="wrap-report">
+  <aside class="rail" id="rail-report">
+    <div class="railtitle">In this document</div>
+    <nav>
+      <a href="#tr-1">1 Execution summary</a>
+      <a href="#tr-2">2 Results by package</a>
+      <a href="#tr-3">3 Results by requirement area</a>
+      <a href="#tr-4">4 Skipped tests</a>
+      <a href="#tr-5">5 Manual verification log</a>
+      <a href="#tr-6">6 Defects found &amp; resolved in development</a>
+      <a href="#tr-7">7 Conclusion &amp; sign-off</a>
+    </nav>
+  </aside>
+  <main class="doc-panel" id="doc-report">
+
+<section id="tr-1">
+  <h2><span class="secno">1</span> Execution summary</h2>
+  <div class="stats">
+{%- for s in tr.execution_summary.stats %}
+    <div class="stat"><span class="stat-n{{ ' ok' if s.label in ('failures', 'errors') else '' }}">{{ s.value }}</span><span class="stat-l">{{ s.label }}</span></div>
+{%- endfor %}
+  </div>
+  <div class="wrap"><table class="spec">
+    <tr><th>Item</th><th>Value</th></tr>
+{%- for row in tr.execution_summary.details %}
+    <tr><td>{{ row.item }}</td><td{{ ' class="mono"' if row.item in ('Command', 'Commit', 'Branch') else '' }}>{{ row.value }}</td></tr>
+{%- endfor %}
+  </table></div>
+{%- for p in tr.execution_summary.narrative %}
+  <p>{{ p }}</p>
+{%- endfor %}
+</section>
+
+<section id="tr-2">
+  <h2><span class="secno">2</span> Results by package</h2>
+  <div class="wrap"><table class="spec">
+    <tr><th>Package</th><th class="num">Tests</th><th>Result</th></tr>
+{%- for row in tr.results_by_package.rows %}
+    <tr><td class="mono">{{ row.package }}</td><td class="num">{{ row.tests }}</td><td>{{ row.result }}</td></tr>
+{%- endfor %}
+  </table></div>
+{%- for p in tr.results_by_package.narrative %}
+  <p>{{ p }}</p>
+{%- endfor %}
+</section>
+
+<section id="tr-3">
+  <h2><span class="secno">3</span> Results by requirement area</h2>
+  <p class="sec-abstract">{{ tr.results_by_area.abstract }}</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>Area</th><th>Test cases</th><th>Result</th></tr>
+{%- for row in tr.results_by_area.rows %}
+    <tr><td>{{ row.area }}</td><td>{{ row.cases }}</td><td>{{ row.result }}</td></tr>
+{%- endfor %}
+  </table></div>
+{%- for p in tr.results_by_area.narrative %}
+  <p>{{ p }}</p>
+{%- endfor %}
+</section>
+
+<section id="tr-4">
+  <h2><span class="secno">4</span> Skipped tests</h2>
+  <p>{{ tr.skipped_tests.intro }}</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>Package</th><th>Guard</th><th>Reason</th></tr>
+{%- for row in tr.skipped_tests.rows %}
+    <tr><td class="mono">{{ row.package }}</td><td class="mono">{{ row.guard }}</td><td>{{ row.reason }}</td></tr>
+{%- endfor %}
+  </table></div>
+  <p>{{ tr.skipped_tests.outro }}</p>
+</section>
+
+<section id="tr-5">
+  <h2><span class="secno">5</span> Manual verification log</h2>
+  <p class="sec-abstract">{{ tr.manual_verification_log.abstract }}</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>#</th><th>Scenario</th><th>Outcome</th></tr>
+{%- for row in tr.manual_verification_log.rows %}
+    <tr><td>{{ row.n }}</td><td>{{ row.scenario }}</td><td>{{ row.outcome }}</td></tr>
+{%- endfor %}
+  </table></div>
+</section>
+
+<section id="tr-6">
+  <h2><span class="secno">6</span> Defects found and resolved during development</h2>
+  <p class="sec-abstract">{{ tr.defects.abstract }}</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>#</th><th>Defect</th><th>Impact if shipped</th><th>Resolution</th></tr>
+{%- for row in tr.defects.rows %}
+    <tr><td>{{ row.n }}</td><td>{{ row.summary }}</td><td>{{ row.impact }}</td><td>{{ row.resolution }}</td></tr>
+{%- endfor %}
+  </table></div>
+</section>
+
+<section id="tr-7">
+  <h2><span class="secno">7</span> Conclusion and sign-off</h2>
+{%- for p in tr.conclusion.paragraphs %}
+  <p>{{ p }}</p>
+{%- endfor %}
+  <div class="wrap"><table class="spec">
+    <tr><th>Field</th><th>Value</th></tr>
+{%- for row in tr.conclusion.signoff %}
+    <tr><td>{{ row.field }}</td><td>{{ row.value }}</td></tr>
+{%- endfor %}
+  </table></div>
+</section>
+
+  </main>
+</div>
+
+<footer class="docfoot">{{ title }} &middot; generated from <code class="inline">{{ branch }} @ {{ commit }}</code> &middot; a private working document, not an RFC submission.</footer>
+
+<script>
+(function () {
+  var tabs = document.querySelectorAll('.doc-tabs button');
+  var wraps = { req: document.querySelector('.shell.layout'), test: document.getElementById('wrap-test'), report: document.getElementById('wrap-report') };
+  tabs.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.setAttribute('aria-selected', b === btn ? 'true' : 'false'); });
+      Object.keys(wraps).forEach(function (k) { wraps[k].hidden = (k !== btn.dataset.doc); });
+      window.scrollTo({ top: 0 });
+    });
+  });
+})();
+</script>
