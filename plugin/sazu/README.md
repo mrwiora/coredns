@@ -476,8 +476,8 @@ a real domain to test live — see below.
 
 A dedicated, start-to-finish walkthrough for onboarding one real domain
 against a real registrar: writing its YAML zone definition, generating its
-keys, and pushing it. This uses the same three `sazuctl` commands as
-**Creating a new zone** above, in the same order — what's different here is
+KSK and ZSK independently (the real-world shape of key custody — see step
+4), and pushing it. What's different from **Creating a new zone** above is
 that a *real* domain also needs a real DS record at your registrar before
 `publish-trust` will succeed, which this walks through end to end.
 
@@ -572,13 +572,29 @@ real nameservers throughout.
    brand-new domain with no live traffic yet has none of this risk and can
    skip straight to the next step.
 
-4. **Generate the zone's KSK/ZSK pair and try establishing trust.** You
-   don't need to generate a key or fetch a DS record up front —
-   `publish-trust` does both for you and, on a domain with no DS published
-   yet, tells you exactly what to do next (including the live-migration
-   warning from the previous step, inline, if you skip reading it up
-   front). This step carries no zone content, so the YAML file from step 2
-   isn't involved yet:
+4. **Generate the zone's KSK and ZSK independently, each with its own
+   `sazuctl keygen` command, then try establishing trust.** This is the
+   real-world shape of key custody, not just a sandbox shortcut: the two
+   keys never have to exist on the same machine at all.
+
+   ```
+   ./sazuctl keygen -out client.private -zone yourdomain.example -role ksk
+   ./sazuctl keygen -out zsk.private -zone yourdomain.example -role zsk
+   ```
+
+   Run the first command only on whichever machine will keep the KSK
+   long-term. The second can be run anywhere — including directly on the
+   separate machine that should end up handling this zone's routine
+   `publish-zone` pushes from now on, with `zsk.private` then copied (or
+   generated in place) onto that machine and never onto the one holding
+   the KSK. (`publish-trust`, below, also generates both keys itself if
+   you skip this step and point it at paths that don't exist yet — a
+   convenience for a quick sandbox test, but the explicit two-command
+   form above is what a deployment with keys living on separate machines
+   actually runs.)
+
+   With both keys in hand, establish trust — this step carries no zone
+   content, so the YAML file from step 2 isn't involved yet:
 
    ```
    ./sazuctl publish-trust -zone yourdomain.example -key client.private \
@@ -587,12 +603,11 @@ real nameservers throughout.
 
    The first attempt against a real, not-yet-onboarded domain is *expected*
    to be denied — that's the chain-of-trust cross-check working correctly,
-   not a bug. `sazuctl` generates both keys (since neither
-   `client.private` nor `zsk.private` exists yet), prints the exact DS
-   record to give your registrar (plus the KSK's raw fields — type,
-   algorithm, key tag, public key — for a registrar like AWS Route 53 that
-   asks you to enter those by hand instead of pasting a DS record), and
-   points you at `REGISTRARS.md` for registrar-specific steps.
+   not a bug. `sazuctl` prints the exact DS record to give your registrar
+   (plus the KSK's raw fields — type, algorithm, key tag, public key —
+   for a registrar like AWS Route 53 that asks you to enter those by hand
+   instead of pasting a DS record), and points you at `REGISTRARS.md` for
+   registrar-specific steps.
 
    A different denial is also possible here: if a DS record already exists
    for this domain but doesn't match this key (`ERR_UNKNOWN_SIGNER`),
@@ -604,6 +619,16 @@ real nameservers throughout.
    existing one (most registrars accept more than one) rather than
    replacing it, so you can proceed the same way as this step without
    disturbing whatever's already keeping the domain validated.
+
+   **As soon as this ZSK is registered (once trust succeeds, below), it
+   is fully authorized for this zone** — not narrowly scoped to "push
+   content." Whichever machine holds `zsk.private` can, from then on, do
+   anything a SIG(0)-authenticated push can do here: push zone content,
+   register or retire further ZSKs (for onboarding yet more signer
+   machines — see `add-zsk`/`retire-zsk` above — without ever touching
+   the KSK again), and manage the zone's contact address. There is no
+   narrower per-key permission than that today; see README's **Known
+   limitations**.
 
 5. **Submit that DS record at your registrar** — every major registrar
    that supports DNSSEC has a form for this (look for "DS record,"
