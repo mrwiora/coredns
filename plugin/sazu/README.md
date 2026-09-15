@@ -35,92 +35,31 @@ the KSK again — unless it's deliberately rolled over.
 *sazu* also answers ordinary queries for the zones it has onboarded, directly
 from the content it has accepted.
 
-## Syntax
+### Keys and validity: quick reference
 
-```
-sazu ZONES... {
-    insecure_skip_chain_validation
-    db PATH
-    rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY
-    ip_rate_limit UPDATES_PER_MINUTE
-}
-```
+Everything about what each key is for, how long anything actually stays
+valid, and what's mandatory vs. configurable — in one place, so none of
+it has to be pieced back together from the sections above.
 
-* **ZONES** the *scope* this instance accepts SAZU pushes and queries
-  for — not a fixed list of pre-declared domains. Use `.` to accept
-  onboarding any domain at all, with no Corefile edit or server restart
-  needed per new customer domain: which specific zones actually exist is
-  entirely driven by what's been onboarded at runtime (in `Store`, and in
-  the `db` file if configured), not by this list. Use a narrower zone
-  (e.g. `customers.example.`) to restrict onboarding to subdomains
-  delegated under one umbrella zone instead. If empty, the zones from the
-  server block are used. A query or push for a name within scope but never
-  onboarded falls through to whatever plugin comes after `sazu` in the
-  Corefile, so a broad `.` scope doesn't swallow every other domain/plugin
-  on the same server; if nothing comes after it, that query is refused
-  (REFUSED) rather than answered with SERVFAIL — the same convention
-  `plugin/auto` uses for the same situation.
-* `insecure_skip_chain_validation` disables the §10.2 chain-of-trust
-  cross-check at first contact. **For local testing only** — see
-  [`docs/SAZU-DEV.md`](docs/SAZU-DEV.md). Never set this in
-  production: with it set, *any* self-signed key claiming *any* zone name is
-  accepted on first contact, which is exactly the spoofable behavior the
-  cross-check exists to prevent.
-* `db PATH` persists every onboarded zone and pinned key to a SQLite
-  database at PATH (created if it doesn't exist), so a restart doesn't
-  forget them. **Omit this and everything is purely in-memory** — lost on
-  every restart, which is fine for a quick one-off test but not for
-  anything you want to survive a redeploy. PATH is an ordinary filesystem
-  path, absolute or relative to wherever `coredns` is run from — the
-  parent directory must already exist (the database *file* itself is
-  created automatically, the directory is not):
+| | **KSK** (key-signing key) | **ZSK** (zone-signing key) |
+|---|---|---|
+| **Use case** | Anchors the chain of trust: the only key ever matched against a DS record at your registrar. Authenticates `publish-trust` and a KSK rollover. | Routine, day-to-day key: authenticates and signs every `publish-zone` content push. An automation box running scheduled pushes only ever needs this one. |
+| **Created** | `sazuctl publish-trust` — always generated together with its paired ZSK, never on its own. | Same `publish-trust` call, paired with the KSK from the start. |
+| **Registrar interaction** | Required — a DS record at your registrar, every time this key changes (onboarding or rollover). | **Never** — a ZSK is trusted purely because an already-trusted key (the KSK) vouched for it; `add-zsk`/`retire-zsk`/`rotate-key -role zsk` involve no registrar step at all. |
+| **How it expires** | It doesn't, on its own. Rotate deliberately with `rotate-key -role ksk` (best-practice hygiene, or a suspected compromise) — there is no forced cadence. | Same — doesn't expire on its own. Retire/replace on your own schedule (`retire-zsk` + `add-zsk`, or `rotate-key -role zsk` for both in one command). |
+| **What invalidates it** | Nothing automatic. Rolling it over never invalidates any registered ZSK (`KeyRegistry.PinKSK`). | Nothing automatic. Rolling the KSK over never invalidates it either — the two rotate completely independently. |
 
-  ```
-  sazu . {
-      db /var/lib/sazu/sazu.db
-  }
-  ```
+**Signature validity windows** (the one place an actual clock matters):
 
-  This is what every example elsewhere in this README that says "for a
-  quick one-off test" or similar is deliberately omitting — add this one
-  line to any of those Corefiles to make onboarding survive a restart.
-  `sazu-watchd` (below) reads this exact same file, so persistence is
-  also what lets it monitor zones independently of whichever CoreDNS
-  process wrote them.
-* `rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY` overrides §12's per-zone
-  push quotas, each enforced over a rolling 24h window: FULL_PER_DAY for a
-  push that actually changes zone content (`publish-zone` — always a
-  complete replacement; see [`docs/SAZU-DIFFUPDATES.md`](docs/SAZU-DIFFUPDATES.md)
-  for why there's no smaller alternative) and
-  KEY_MANAGEMENT_PER_DAY for a push that only changes key state
-  (`publish-trust`, `add-zsk`, `retire-zsk`, `rotate-key`), which costs
-  this server far less to process, tracked independently.
-  Defaults to `5 50` if omitted. An exceeded quota is refused with the
-  `ERR_QUOTA_EXCEEDED` diagnostic. Not persisted across a restart.
-* `ip_rate_limit UPDATES_PER_MINUTE` overrides §12's global, per-source-IP
-  flood/scan throttle: a rolling 1-minute cap on UPDATE attempts from one
-  address, independent of the per-zone quota above and of which zone
-  name(s) it targets — closing the gap a per-zone-only quota leaves open
-  against an attacker probing many different candidate zone names (each
-  gets its own fresh, unused per-zone quota). Defaults to `30` if
-  omitted. Checked before anything else in a push, including SIG(0)
-  verification, since it bounds raw attempt volume, not just
-  successfully authenticated attempts. An exceeded limit is refused with
-  the `ERR_RATE_LIMITED` diagnostic. Not persisted across a restart.
+| Signature | Covers | Validity | What happens if you let it lapse |
+|---|---|---|---|
+| RRSIG (zone content) | Every record in a `publish-zone` push — this is the one that determines whether your zone validates for real DNSSEC resolvers. | **30 days** (`DefaultSignatureValidity`), fixed regardless of which key signs it — using the KSK instead of the ZSK does not extend it. | Resolvers see an expired signature once their cache re-fetches past it — SERVFAIL for a validating resolver. **You must run `publish-zone` again at least this often**, even with zero content changes, purely to refresh signatures. |
+| SIG(0) (transaction) | The UPDATE message itself, for the ~1 hour around when `sazuctl` sends it. | ~1 hour, set fresh by `sazuctl` on every push. | Nothing to manage — this isn't a stored credential, just replay protection for one in-flight push. Never confuse this with the RRSIG window above; they protect different things on completely different timescales. |
 
-  A first-contact or key-rollover attempt (the only operations expensive
-  enough to be worth this) is additionally required to arrive over a
-  connection-oriented transport — TCP, or HTTPS/HTTP3 — never plain UDP:
-  a single forged UDP packet can claim any source address with nothing
-  to disprove it, which would otherwise let an attacker bypass this
-  quota entirely by spoofing a fresh address on every attempt. This
-  never affects a real push in practice — a real signed push routinely
-  exceeds a single UDP datagram's worth of content already (`sazuctl`
-  already sends anything that large over TCP automatically, see
-  `-target` above) — or an ordinary push to an already-pinned zone, which
-  never triggers
-  the chain-of-trust walk this protects. Refused with the
-  `ERR_TRANSPORT_NOT_ALLOWED` diagnostic.
+**What's mandatory vs. configurable:**
+
+- **Content-signature verification is mandatory, unconditionally, with no way to turn it off.** Every pushed RRset must carry a covering RRSIG that actually verifies, or the push is rejected (`NOTAUTH` / `ERR_SIG_INVALID`) before anything is applied. There is no "trust SIG(0) alone" mode — SIG(0) proves who sent a push, never that the content itself would validate for a real resolver.
+- **`insecure_skip_chain_validation`** is the one remaining opt-in toggle anywhere in this plugin, and it's exactly what its name says: disables the §10.2 DS cross-check at first contact, for local testing only where there's no real parent zone to check against. **Never set this in production** — see [Syntax](#syntax) below. Nothing else in this plugin is optional in a way that weakens what gets verified.
 
 ## Examples
 
@@ -697,31 +636,92 @@ you exactly which flags to add for whichever you pick (`-role zsk`
 registers a replacement and retires the old one in one command; `-role
 ksk` performs the rollover above).
 
-### Keys and validity: quick reference
+## Syntax
 
-Everything about what each key is for, how long anything actually stays
-valid, and what's mandatory vs. configurable — in one place, so none of
-it has to be pieced back together from the sections above.
+```
+sazu ZONES... {
+    insecure_skip_chain_validation
+    db PATH
+    rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY
+    ip_rate_limit UPDATES_PER_MINUTE
+}
+```
 
-| | **KSK** (key-signing key) | **ZSK** (zone-signing key) |
-|---|---|---|
-| **Use case** | Anchors the chain of trust: the only key ever matched against a DS record at your registrar. Authenticates `publish-trust` and a KSK rollover. | Routine, day-to-day key: authenticates and signs every `publish-zone` content push. An automation box running scheduled pushes only ever needs this one. |
-| **Created** | `sazuctl publish-trust` — always generated together with its paired ZSK, never on its own. | Same `publish-trust` call, paired with the KSK from the start. |
-| **Registrar interaction** | Required — a DS record at your registrar, every time this key changes (onboarding or rollover). | **Never** — a ZSK is trusted purely because an already-trusted key (the KSK) vouched for it; `add-zsk`/`retire-zsk`/`rotate-key -role zsk` involve no registrar step at all. |
-| **How it expires** | It doesn't, on its own. Rotate deliberately with `rotate-key -role ksk` (best-practice hygiene, or a suspected compromise) — there is no forced cadence. | Same — doesn't expire on its own. Retire/replace on your own schedule (`retire-zsk` + `add-zsk`, or `rotate-key -role zsk` for both in one command). |
-| **What invalidates it** | Nothing automatic. Rolling it over never invalidates any registered ZSK (`KeyRegistry.PinKSK`). | Nothing automatic. Rolling the KSK over never invalidates it either — the two rotate completely independently. |
+* **ZONES** the *scope* this instance accepts SAZU pushes and queries
+  for — not a fixed list of pre-declared domains. Use `.` to accept
+  onboarding any domain at all, with no Corefile edit or server restart
+  needed per new customer domain: which specific zones actually exist is
+  entirely driven by what's been onboarded at runtime (in `Store`, and in
+  the `db` file if configured), not by this list. Use a narrower zone
+  (e.g. `customers.example.`) to restrict onboarding to subdomains
+  delegated under one umbrella zone instead. If empty, the zones from the
+  server block are used. A query or push for a name within scope but never
+  onboarded falls through to whatever plugin comes after `sazu` in the
+  Corefile, so a broad `.` scope doesn't swallow every other domain/plugin
+  on the same server; if nothing comes after it, that query is refused
+  (REFUSED) rather than answered with SERVFAIL — the same convention
+  `plugin/auto` uses for the same situation.
+* `insecure_skip_chain_validation` disables the §10.2 chain-of-trust
+  cross-check at first contact. **For local testing only** — see
+  [`docs/SAZU-DEV.md`](docs/SAZU-DEV.md). Never set this in
+  production: with it set, *any* self-signed key claiming *any* zone name is
+  accepted on first contact, which is exactly the spoofable behavior the
+  cross-check exists to prevent.
+* `db PATH` persists every onboarded zone and pinned key to a SQLite
+  database at PATH (created if it doesn't exist), so a restart doesn't
+  forget them. **Omit this and everything is purely in-memory** — lost on
+  every restart, which is fine for a quick one-off test but not for
+  anything you want to survive a redeploy. PATH is an ordinary filesystem
+  path, absolute or relative to wherever `coredns` is run from — the
+  parent directory must already exist (the database *file* itself is
+  created automatically, the directory is not):
 
-**Signature validity windows** (the one place an actual clock matters):
+  ```
+  sazu . {
+      db /var/lib/sazu/sazu.db
+  }
+  ```
 
-| Signature | Covers | Validity | What happens if you let it lapse |
-|---|---|---|---|
-| RRSIG (zone content) | Every record in a `publish-zone` push — this is the one that determines whether your zone validates for real DNSSEC resolvers. | **30 days** (`DefaultSignatureValidity`), fixed regardless of which key signs it — using the KSK instead of the ZSK does not extend it. | Resolvers see an expired signature once their cache re-fetches past it — SERVFAIL for a validating resolver. **You must run `publish-zone` again at least this often**, even with zero content changes, purely to refresh signatures. |
-| SIG(0) (transaction) | The UPDATE message itself, for the ~1 hour around when `sazuctl` sends it. | ~1 hour, set fresh by `sazuctl` on every push. | Nothing to manage — this isn't a stored credential, just replay protection for one in-flight push. Never confuse this with the RRSIG window above; they protect different things on completely different timescales. |
+  This is what every example elsewhere in this README that says "for a
+  quick one-off test" or similar is deliberately omitting — add this one
+  line to any of those Corefiles to make onboarding survive a restart.
+  `sazu-watchd` (above) reads this exact same file, so persistence is
+  also what lets it monitor zones independently of whichever CoreDNS
+  process wrote them.
+* `rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY` overrides §12's per-zone
+  push quotas, each enforced over a rolling 24h window: FULL_PER_DAY for a
+  push that actually changes zone content (`publish-zone` — always a
+  complete replacement; see [`docs/SAZU-DIFFUPDATES.md`](docs/SAZU-DIFFUPDATES.md)
+  for why there's no smaller alternative) and
+  KEY_MANAGEMENT_PER_DAY for a push that only changes key state
+  (`publish-trust`, `add-zsk`, `retire-zsk`, `rotate-key`), which costs
+  this server far less to process, tracked independently.
+  Defaults to `5 50` if omitted. An exceeded quota is refused with the
+  `ERR_QUOTA_EXCEEDED` diagnostic. Not persisted across a restart.
+* `ip_rate_limit UPDATES_PER_MINUTE` overrides §12's global, per-source-IP
+  flood/scan throttle: a rolling 1-minute cap on UPDATE attempts from one
+  address, independent of the per-zone quota above and of which zone
+  name(s) it targets — closing the gap a per-zone-only quota leaves open
+  against an attacker probing many different candidate zone names (each
+  gets its own fresh, unused per-zone quota). Defaults to `30` if
+  omitted. Checked before anything else in a push, including SIG(0)
+  verification, since it bounds raw attempt volume, not just
+  successfully authenticated attempts. An exceeded limit is refused with
+  the `ERR_RATE_LIMITED` diagnostic. Not persisted across a restart.
 
-**What's mandatory vs. configurable:**
-
-- **Content-signature verification is mandatory, unconditionally, with no way to turn it off.** Every pushed RRset must carry a covering RRSIG that actually verifies, or the push is rejected (`NOTAUTH` / `ERR_SIG_INVALID`) before anything is applied. There is no "trust SIG(0) alone" mode — SIG(0) proves who sent a push, never that the content itself would validate for a real resolver.
-- **`insecure_skip_chain_validation`** is the one remaining opt-in toggle anywhere in this plugin, and it's exactly what its name says: disables the §10.2 DS cross-check at first contact, for local testing only where there's no real parent zone to check against. **Never set this in production** — see [Syntax](#syntax) above. Nothing else in this plugin is optional in a way that weakens what gets verified.
+  A first-contact or key-rollover attempt (the only operations expensive
+  enough to be worth this) is additionally required to arrive over a
+  connection-oriented transport — TCP, or HTTPS/HTTP3 — never plain UDP:
+  a single forged UDP packet can claim any source address with nothing
+  to disprove it, which would otherwise let an attacker bypass this
+  quota entirely by spoofing a fresh address on every attempt. This
+  never affects a real push in practice — a real signed push routinely
+  exceeds a single UDP datagram's worth of content already (`sazuctl`
+  already sends anything that large over TCP automatically, see
+  `-target` above) — or an ordinary push to an already-pinned zone, which
+  never triggers
+  the chain-of-trust walk this protects. Refused with the
+  `ERR_TRANSPORT_NOT_ALLOWED` diagnostic.
 
 ## Known limitations
 
