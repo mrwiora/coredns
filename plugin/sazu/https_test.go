@@ -200,10 +200,14 @@ func TestPartialPushOverHTTPSAfterOnboarding(t *testing.T) {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
+	now = time.Now()
+	signedMail, err := SignZoneContent([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	partial := new(dns.Msg)
 	partial.SetUpdate("example.org.")
-	partial.Insert([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))})
-	now = time.Now()
+	partial.Insert(signedMail)
 	partialWire, err := SignUpdate(partial, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing partial push: %v", err)

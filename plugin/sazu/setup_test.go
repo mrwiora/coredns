@@ -9,12 +9,11 @@ import (
 
 func TestParseSazu(t *testing.T) {
 	tests := []struct {
-		input          string
-		shouldErr      bool
-		wantZones      []string
-		wantInsecure   bool
-		wantRequireSig bool
-		wantDBPath     string
+		input        string
+		shouldErr    bool
+		wantZones    []string
+		wantInsecure bool
+		wantDBPath   string
 	}{
 		{
 			input:     `sazu example.org.`,
@@ -91,19 +90,6 @@ func TestParseSazu(t *testing.T) {
 		},
 		{
 			input: `sazu example.org. {
-				require_valid_rrsigs
-			}`,
-			wantZones:      []string{"example.org."},
-			wantRequireSig: true,
-		},
-		{
-			input: `sazu example.org. {
-				require_valid_rrsigs extra
-			}`,
-			shouldErr: true,
-		},
-		{
-			input: `sazu example.org. {
 				db
 			}`,
 			shouldErr: true,
@@ -150,9 +136,6 @@ func TestParseSazu(t *testing.T) {
 		}
 		if cfg.insecureSkipChainValidation != tc.wantInsecure {
 			t.Fatalf("test %d: insecureSkipChainValidation = %v, want %v", i, cfg.insecureSkipChainValidation, tc.wantInsecure)
-		}
-		if cfg.requireValidRRSIGs != tc.wantRequireSig {
-			t.Fatalf("test %d: requireValidRRSIGs = %v, want %v", i, cfg.requireValidRRSIGs, tc.wantRequireSig)
 		}
 		if cfg.dbPath != tc.wantDBPath {
 			t.Fatalf("test %d: dbPath = %q, want %q", i, cfg.dbPath, tc.wantDBPath)

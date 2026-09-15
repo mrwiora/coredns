@@ -16,7 +16,7 @@ import (
 // implemented first; this is that separate property, for a customer who
 // specifically wants it. Selecting it is a push-time decision the
 // customer's own signer makes (BuildFullZonePushNSEC3 /
-// BuildFullZonePushSplitNSEC3, and sazuctl's "push-zone -nsec3" flag) --
+// BuildFullZonePushSplitNSEC3, and sazuctl's "publish-zone -nsec3" flag) --
 // the server just stores and serves whichever chain it was given,
 // exactly as for plain NSEC.
 //

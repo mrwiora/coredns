@@ -36,13 +36,13 @@ for a manually verified real-binary walkthrough.
 - **Full-zone push**: `push.go`'s `LoadZoneFile`/`BuildFullZonePush` turn a
   real BIND zone file into a signed UPDATE (DNSKEY + SOA + every record),
   with an SOA-serial staleness guard (RFC 2136 §2.4.2) for re-pushes. §12.
-- **Partial/differential push**: `sazuctl push-update` — add/delete
-  individual records against an already-onboarded zone, no DNSKEY, verified
-  against the already-pinned key. §12.
 - **In-memory serving** of everything accepted (`store.go`), answering
   ordinary queries directly from what was pushed.
 - **Client tooling** (`cmd/sazuctl`): `keygen`, `ds` (prints a registrar-ready
-  DS record), `push`, `push-zone`, `push-update`.
+  DS record), `push`, `publish-trust`, `publish-zone`, `contact`, `add-zsk`,
+  `retire-zsk`, `rotate-key`, `init-zone`, `zone-convert`. Every content
+  push (`publish-zone`) sends a zone's complete, authoritative content —
+  see "Decision: no differential/partial update command" below.
 - **Registered as a real CoreDNS plugin** (`plugin.cfg`, `setup.go`,
   regenerated `zdirectives.go`/`zplugin.go`) — a normal `go build .` produces
   a `coredns` binary with `sazu` in it, configurable from a Corefile.
@@ -130,29 +130,27 @@ for a manually verified real-binary walkthrough.
   served correctly and independently; a third, never-onboarded domain
   falls through rather than getting a false NXDOMAIN from this plugin.
   (Client-side, onboarding still requires a real zone file --
-  `sazuctl push-zone -zonefile <path>` -- an earlier synthesized-SOA
-  shortcut that skipped it was tried and then deliberately removed as
-  more confusing than helpful; see git history if it's ever wanted
-  back.)
+  `sazuctl publish-zone -zonefile <path>`.)
 - **Real DNSSEC content-signing, and DNSSEC-aware query serving.**
   `sign.go`'s `SignZoneContent` gives every RRset a full-zone push carries
-  (DNSKEY, SOA, and content alike) a genuine RFC 4034 RRSIG, in both
-  `BuildFullZonePush` and `sazuctl push-update`'s added records --
-  previously SIG(0) authenticated the transaction but nothing signed the
-  content itself. `serveQuery` now attaches the covering RRSIG(s) to an
+  (DNSKEY, SOA, and content alike) a genuine RFC 4034 RRSIG -- SIG(0)
+  alone only authenticates the transaction, never the content itself.
+  `serveQuery` attaches the covering RRSIG(s) to an
   answer when the query's EDNS0 DO bit is set (`store.go`'s
   `LookupRRSIG`), and omits them otherwise -- closing the exact gap found
   diagnosing why sinepress.org was SERVFAIL (DS published, but nothing
   signed being served). This is §4's Level 1 (content is genuinely
-  signed) plus DO-bit-aware serving; Level 2 (below) makes acceptance
-  itself conditional on it.
-- **Content verification, Level 2 (§4), opt-in.** `sign.go`'s
-  `VerifySignedRRsets` plus a new `RequireValidRRSIGs` field on `Sazu`
-  (Corefile: `require_valid_rrsigs`, zero-arg boolean, off by default) --
-  when enabled, a push is rejected (`NOTAUTH` + the new `ERR_SIG_INVALID`
-  diagnostic) unless every added RRset carries a covering RRSIG that
-  actually verifies against the candidate/pinned key. Left off, "Level 0,
-  trust the pipe" (SIG(0) alone) remains a supported, simpler mode. Also
+  signed) plus DO-bit-aware serving; full content verification (below)
+  makes acceptance itself conditional on it.
+- **Content verification (§4), mandatory.** `sign.go`'s
+  `VerifySignedRRsets` runs unconditionally on every update: a push is
+  rejected (`NOTAUTH` + `ERR_SIG_INVALID`) unless every added RRset
+  carries a covering RRSIG that actually verifies against the
+  candidate/pinned key. There is no way to disable this -- SIG(0) alone
+  proves who sent a push, never that the zone content it carries would
+  actually validate for a real DNSSEC resolver once served, which this
+  plugin exists to guarantee, so accepting content nothing has checked
+  is never a legitimate production mode. Also
   surfaced a real, previously-undiscovered CoreDNS-wide bug: `core/dnsserver`
   never raised `dns.Server`'s UDP receive buffer past miekg/dns's 512-byte
   default, silently truncating any signed push over that size. Initially
@@ -182,7 +180,7 @@ for a manually verified real-binary walkthrough.
   of accumulating beside it (scoped by signer/key/covered-type, so a
   second key's simultaneous signature, e.g. mid key rollover, still
   legitimately coexists). Verified against the real binary: three
-  identical `push-zone` calls in a row now leave exactly one A record and
+  identical `publish-zone` calls in a row now leave exactly one A record and
   one RRSIG being served, not three of each.
 - **Negative responses (NXDOMAIN/NODATA) now carry the zone's SOA in the
   authority section**, signed when DO is set. Found the same way as the
@@ -222,22 +220,18 @@ for a manually verified real-binary walkthrough.
     §3.1.3) -- meaningful even though SAZU never synthesizes
     wildcard-matched answers itself, since it's proving no wildcard
     *elsewhere in the zone* could have matched either.
-  - **A partial push (`push-update`) never computes or includes NSEC
-    records** -- only a full push sees the whole name set, so only a full
-    push can be trusted to produce a *complete* chain. Rather than risk
-    serving a stale chain that contradicts what a partial push just
-    changed (a real danger: a stale NSEC's type bitmap could wrongly
-    claim a just-deleted record type still exists, which is worse than no
-    proof at all -- an actively wrong one), `ZoneData.PurgeNSEC` -- called
-    before applying *any* update, full or partial -- invalidates the
-    entire existing chain up front. A full push's own fresh chain
-    repopulates it in the same update, immediately after; a partial push
-    leaves the zone with no negative-existence proof at all until the
-    next full push. A deliberate, documented trade of completeness for
-    correctness, verified end to end (`TestPartialPushInvalidatesNSECUntilNextFullPush`) --
-    narrowed considerably later on (see "Incremental NSEC/NSEC3 chain
-    maintenance for `push-update`," below): a partial push with a local
-    chain cache to draw on no longer needs to give this up at all.
+  - **Only a full content push (`sazuctl publish-zone`) ever computes or
+    includes NSEC records** -- it's the only kind that sees the zone's
+    whole name set at once, which a correct chain needs.
+    `ZoneData.PurgeNSEC`, called before applying an update whose content
+    carries a real SOA or otherwise changes served content (`handler.go`'s
+    two-case rule: `containsAPEXSOA` or `changesChainRelevantContent`),
+    invalidates the existing chain up front rather than risk serving a
+    stale one that contradicts what just changed (a real danger: a stale
+    NSEC's type bitmap could wrongly claim a just-deleted record type
+    still exists, which is worse than no proof at all). A full push's own
+    fresh chain repopulates it in the same update, immediately after --
+    verified end to end (`TestPartialPushInvalidatesNSECUntilNextFullPush`).
     `db.go`'s `CommitUpdate` mirrors the same purge in SQL, so this holds
     across a restart, not just in memory.
   - `store.go`'s `insertLocked` also now treats NSEC as a singleton per
@@ -264,7 +258,7 @@ for a manually verified real-binary walkthrough.
   `BuildFullZonePushSplitNSEC3` are new entry points alongside the
   existing plain-NSEC ones (not a new option on them, and not a
   server-side Corefile toggle: the server just stores and serves
-  whichever chain it was given), exposed as `sazuctl push-zone`'s
+  whichever chain it was given), exposed as `sazuctl publish-zone`'s
   `-nsec3`/`-nsec3-iterations`/`-nsec3-salt`/`-nsec3-opt-out` flags.
   `store.go`'s `ZoneData.NegativeProof` branches on whether an
   NSEC3PARAM record is present at the apex; unlike a resolver validating
@@ -280,69 +274,62 @@ for a manually verified real-binary walkthrough.
   their own, so `OptOut` applies uniformly rather than per-delegation --
   a zone with its own delegations would need logic this package doesn't
   implement.
-- **Incremental NSEC/NSEC3 chain maintenance for `push-update`,** closing
-  the "partial push always invalidates the chain" limitation the
-  original NSEC work above deliberately left open. The design (discussed
-  with, and refined by, feedback on an initial proposal that would have
-  had the client walk the live chain over the network to reconstruct its
-  topology): `sazuctl` keeps its own persistent local cache of the
-  chain -- one small `<zone>.nsec-cache.json` file per zone, next to the
-  running binary (not the current working directory, and not beside
-  `-key`, so it doesn't depend on which key or directory a particular
-  invocation uses), written by every full push (`push-zone`) and updated
-  by every successful incremental patch. There is deliberately no
-  network round trip to reconstruct chain state in the common case --
-  only a client that already trusts its own bookkeeping needs to exist
-  for this to work, matching how a real incremental DNSSEC signer
-  (`dnssec-signzone -incremental`, Knot's zone-in-journal) keeps its own
-  prior-state record to diff against rather than re-deriving it from the
-  live server each time.
-  - `plugin/sazu/chainpatch.go`'s `ComputeChainPatch` is the actual
-    algorithm, living in `plugin/sazu` (not `cmd/sazuctl`) despite only
-    the client ever calling it -- SAZU's split-signing model means only
-    the client can sign whatever new chain content it produces, but the
-    underlying chain math (hashing, ordering, closest-encloser search)
-    already lives here for the server's own `NegativeProof`, and
-    duplicating it client-side to avoid one more exported name would
-    risk the two copies drifting apart. Deliberately not a hand-rolled
-    split/merge implementation: it reconstructs today's complete
-    (name, type) membership purely from the cache's own bitmaps (neither
-    `BuildNSECChain` nor `BuildNSEC3Chain` ever look at a record's real
-    content, only its owner name and type, so a placeholder RR per pair
-    is all either needs), applies the requested ops, and runs the result
-    back through the *same* chain builder a full push already uses --
-    then diffs the fresh, complete chain against the cache to find the
-    smallest true edit. Two names inserted into the same gap in one
-    push, or an insert and a removal together, are handled correctly by
-    construction, with no separate case to get right for each
-    combination -- verified directly (`TestComputeChainPatchTwoInsertsIntoTheSameGapNSEC`).
-  - Server side, the enabling piece already existed: RFC 2136 §2.4.2
-    "RRset exists (value-dependent)" prerequisites, which
-    `BuildFullZonePush`'s `previousSOA` staleness guard already used for
-    the SOA. `EvaluatePrerequisites` needed only a small generalization
-    (it already worked for any RRset, not just SOA) to also return the
-    zone's actual current value on a mismatch, so a stale chain-patch
-    prerequisite (`ERR_STALE_CHAIN`, following `ERR_STALE_SERIAL`'s own
-    precedent) can hand the client back exactly the real record it
-    disagreed about, in the same response, rather than requiring a
-    separate round trip to find out. Because prerequisite evaluation
-    happens before anything is applied, and rejects the *whole* update
-    on the first mismatch, "which record is actually stale" is always
-    unambiguous -- never a fuzzy zone-wide diff to guess at.
-  - `handler.go`'s `PurgeNSEC` call site needed to stop keying off
-    `isFullPush` (whether the update carries an apex DNSKEY): a KSK/ZSK
-    rollover or ZSK add/retire also carries one, so that alone purged
-    the chain on *every* key rotation even though rotation touches no
-    served content and supplies no replacement chain -- a real,
-    previously invisible bug this feature's own end-to-end testing
-    found (see `TestKSKRolloverDoesNotPurgeExistingChain`), not
-    something it introduced. Fixed by keying the purge decision on
-    `containsAPEXSOA` (true only for an actual full push) for the
-    "replace with a fresh complete chain" case, and a new
-    `changesChainRelevantContent` check (does this update touch anything
-    beyond DNSKEY/chain-record types at all) for the "no chain patch
-    supplied, but nothing needed one anyway" case -- purging now happens
-    only when it's actually necessary.
+### Decision: no differential/partial update command
+
+`sazuctl publish-zone` always sends a zone's complete, authoritative
+content — there is no partial/differential update command. Three
+different designs for one were built and tested in turn before this was
+decided against:
+
+1. **A local chain cache on the client**, so `sazuctl` could compute an
+   incremental patch itself with no query first. Rejected: the cache is
+   separate state that can silently drift from the server's actual
+   content, with nothing to detect the drift before a patch is sent
+   against it.
+2. **Live client-side discovery and reconciliation**: query the server
+   for its current state before every push, diff against the zone file,
+   and send only the resulting patch. Rejected: an NSEC3 chain only ever
+   reveals hashed owner names, so a hash that doesn't match one of the
+   zone file's own candidate names can't be resolved back to "which name
+   should be removed" — a structural, permanent limit of NSEC3 itself,
+   not an implementation gap.
+3. **Server-side diffing**, considered but never built: have the server
+   compute the delta instead of the client. Rejected: every record's own
+   RRSIG plus the transaction's overall SIG(0) already fully authenticate
+   content, so reconstructing *intent* (add vs. change vs. remove) from a
+   partial push server-side adds a whole second class of logic for a
+   bandwidth saving that's negligible at this protocol's actual scale (a
+   customer's own domain — dozens to a few hundred records, not a bulk
+   host's multi-million-record zone).
+
+Full detail and the concrete advantages/disadvantages of each are in
+`plugin/sazu/README.md`'s "Considered approaches for differential
+updates" section. `EvaluatePrerequisites`, `ApplyUpdateOps`, and
+`handler.go`'s two-case `PurgeNSEC` decision (`containsAPEXSOA` for a
+real content push, `changesChainRelevantContent` for anything else that
+isn't pure key management) are the general RFC 2136 primitives this work
+needed regardless, and remain in use by `publish-zone` and key-management
+pushes alike.
+
+- **KSK and ZSK are generated together, always, at onboarding
+  (`sazuctl publish-trust`).** An automation box that runs `publish-zone`
+  on a schedule authenticates and signs every push with the ZSK alone and
+  never needs to hold the KSK at all. `sazuctl publish-trust`
+  (KSK-authenticated, establishes the KSK+ZSK DNSKEY RRset, carries no
+  zone content) and `sazuctl publish-zone` (ZSK-authenticated, the zone's
+  complete content, never carries a DNSKEY) are separate commands along
+  the same seam DNSSEC already draws between the two key roles.
+  `add-zsk`/`retire-zsk`/`rotate-key -role zsk` handle ongoing ZSK
+  management (adding an additional one, or replacing one after
+  retirement) on top of `publish-trust`'s initial pairing.
+  `handler.go`'s `isFullPush` (§12 quota metering) is `containsAPEXSOA` --
+  the same signal that decides the `PurgeNSEC` case above, so both are the
+  same predicate for the same reason. `findCandidateKey` tolerates a
+  first-contact push presenting a KSK and its paired ZSK together, and
+  first contact doesn't require a real SOA in the same push (a zone is
+  briefly onboarded-but-empty between `publish-trust` and `publish-zone`,
+  which `serveQuery` degrades safely for: no SOA to answer with yet, same
+  as any zone with no content).
 - **TCP support for pushes, replacing the earlier `Config.UDPSize`
   workaround.** Found live against a real server: a genuine signed push
   well under `UDPSize`'s 16 KiB ceiling (around 1.5-2 KB) got *no
@@ -371,12 +358,13 @@ for a manually verified real-binary walkthrough.
     `Put` (it was a silent passthrough before). The same `RawCapture`
     instance and the same `DecorateReaderFunc` now serve both
     `UDPDecorateReaderFunc` and `TCPDecorateReaderFunc`.
-  - `sazuctl` now picks the transport automatically by size
-    (`safeUDPPushSize`) rather than always using UDP: small pushes (most
-    `push-update` calls) stay on UDP: fewer round trips, no connection
-    overhead; anything larger (most `push-zone` full pushes, especially
-    now that a real NSEC chain is included) goes over TCP automatically,
-    with RFC 1035 §4.2.2's 2-byte length-prefix framing. There is no
+  - `sazuctl` sends over TCP by default for every subcommand, with RFC
+    1035 §4.2.2's 2-byte length-prefix framing -- correct regardless of
+    message size or path MTU. A `-udp` flag, offered only on the
+    subcommands a compliant server can actually accept it from (never a
+    first-contact- or KSK-rollover-shaped push), opts back into UDP for
+    anything within `safeUDPPushSize`, falling back to TCP with a warning
+    once a push exceeds it. There is no
     "split one UPDATE across several UDP datagrams" mechanism in RFC 2136
     or any real implementation -- escalating transport, not shrinking the
     message, is the only real option once a push is this size.
@@ -476,19 +464,20 @@ for a manually verified real-binary walkthrough.
   `meets_minimum_floor()` check, which hadn't carried over until now.
 
 - **Rate limiting / quota (§12).** Each zone gets two independent
-  per-day quotas over a rolling (not calendar-day) 24h window: full-zone
-  pushes and differential (`push-update`) ones, defaulting to the design
-  doc's starting numbers (5 and 50) and overridable per-instance via the
-  new `rate_limit FULL_PER_DAY DIFFERENTIAL_PER_DAY` Corefile directive.
-  `ratelimit.go`'s `RateLimiter` classifies a push as full-zone if it
-  carries a DNSKEY at the apex (true of every first-contact push, and of
-  every full re-push, since `BuildFullZonePush` always re-asserts it) --
-  the same signal that already distinguishes the two client-side
-  subcommands (`push-zone` vs `push-update`). Checked right after SIG(0)
-  verification, before the expensive first-contact chain-of-trust walk,
-  so an already-exhausted quota doesn't also pay for that network round
-  trip. An exceeded quota is refused with the new `ERR_QUOTA_EXCEEDED`
-  diagnostic. Deliberately not persisted across a restart -- a purely
+  per-day quotas over a rolling (not calendar-day) 24h window: a push
+  that changes real zone content (`publish-zone`) and one that only
+  changes key state (`publish-trust`, `add-zsk`, `retire-zsk`,
+  `rotate-key`), defaulting to the design doc's starting numbers (5 and
+  50) and overridable per-instance via the `rate_limit FULL_PER_DAY
+  DIFFERENTIAL_PER_DAY` Corefile directive. `ratelimit.go`'s
+  `RateLimiter` classifies a push as full-zone if it carries a real apex
+  SOA (`containsAPEXSOA` -- true only of `publish-zone`, the only command
+  that ever changes ordinary content, and always a complete replacement
+  when it does). Checked right after SIG(0) verification, before the
+  expensive first-contact chain-of-trust walk, so an already-exhausted
+  quota doesn't also pay for that network round trip. An exceeded quota
+  is refused with the `ERR_QUOTA_EXCEEDED` diagnostic. Deliberately not
+  persisted across a restart -- a purely
   advisory abuse/churn guard, not something a customer depends on for
   correctness, so the failure mode of losing quota history is "briefly
   too permissive," never "a customer locked out of their own zone."
@@ -700,7 +689,7 @@ for a manually verified real-binary walkthrough.
   `VerifySignedRRsets` now takes the whole current content-signer set
   (`ZoneKeys.ContentSigners()`, KSK plus every registered ZSK) rather
   than one fixed key, so content signed by whichever key a customer
-  designated still verifies under §4's "Level 2" mode.
+  designated still verifies under §4's mandatory content verification.
 
   Persistence (`db.go`): the `keys` table moved from one row per zone to
   one row per key (`PRIMARY KEY (zone, keytag)`, a `role` column, a
@@ -717,11 +706,12 @@ for a manually verified real-binary walkthrough.
   `LoadZoneKeys` returns the full set for `LoadAll` and any caller that
   needs more than that.
 
-  `sazuctl` gained three new subcommands -- `add-zsk`, `retire-zsk`, and
-  a `rotate-key` decision-support entry point -- plus a `-role ksk|zsk`
-  flag on `keygen` and an optional `-zsk-key` flag on `push-zone`/
-  `push-update` (sign content with a registered ZSK while `-key`, the
-  KSK, still authenticates the transaction). `rotate-key`, run with no
+  `sazuctl` has `add-zsk`, `retire-zsk`, and a `rotate-key`
+  decision-support entry point, plus a `-role ksk|zsk` flag on `keygen`.
+  `sazuctl publish-zone` authenticates and signs a routine content push
+  entirely with a registered ZSK -- there is no `-key`/KSK flag on it at
+  all (see "Decision: no differential/partial update command" above for
+  why). `rotate-key`, run with no
   `-role`, makes no change and instead prints an explanation of the
   ZSK-vs-KSK tradeoff and asks the operator to choose explicitly -- this
   and the two onboarding-denied diagnostics (`ERR_NO_DS_PUBLISHED`/
@@ -742,11 +732,11 @@ for a manually verified real-binary walkthrough.
   Also covered by dedicated CLI-level end-to-end tests
   (`cmd/sazuctl/e2e_test.go`, a real `dnsserver.Server` driven by the
   actual `run*` subcommand entry points, not just the plugin package's
-  own internal API) for both the KSK use case (onboard, differential
-  push, full KSK rollover, old key rejected/new key accepted afterward)
-  and the ZSK use case (register, ZSK-only authentication, KSK-
-  authenticated-but-ZSK-signed content, retirement, retired key
-  rejected).
+  own internal API) for the KSK use case (`publish-trust` onboarding, a
+  content re-push, full KSK rollover, the ZSK still authenticating
+  afterward), the ZSK use case (ZSK-only content authentication,
+  retirement, retired key rejected, a fresh replacement working again),
+  and `rotate-key -role zsk`'s combined register-then-retire path.
 
   Writing those end-to-end tests found a real, if narrow, bug the
   in-process `zsk_test.go` tests couldn't have caught (they always send
@@ -757,11 +747,11 @@ for a manually verified real-binary walkthrough.
   over plain UDP and was correctly, but unhelpfully, refused
   (`ERR_TRANSPORT_NOT_ALLOWED`) by a compliant server. Fixed by adding a
   `forceTCP` parameter to `signSelfVerifyAndSend`, set for every
-  first-contact- or KSK-rollover-shaped push (`push`, `push-zone`,
+  first-contact- or KSK-rollover-shaped push (`push`, `publish-trust`,
   `rotate-key -role ksk`) regardless of message size; every other push
-  kind (differential updates, contact registration, ZSK add/retire --
-  none of them ever first-contact/rollover-shaped) keeps the original,
-  size-based choice unchanged.
+  kind (`publish-zone`, contact registration, ZSK add/retire -- none of
+  them ever first-contact/rollover-shaped) keeps the original, size-based
+  choice unchanged.
 
   Deliberately out of scope for this pass, and left for a real need to
   justify: independent per-instance authorized-pusher identities for
@@ -938,10 +928,10 @@ for a manually verified real-binary walkthrough.
   this exact content (MTU fragmentation, no safe multi-datagram UPDATE
   mechanism)? Concluded no: `signSelfVerifyAndSend` now uses TCP
   unconditionally for every `host:port` target unless a new `-udp` flag
-  opts back in, which `push`, `push-zone`, and `rotate-key -role ksk`
+  opts back in, which `push`, `publish-trust`, and `rotate-key -role ksk`
   don't even offer (they're always first-contact- or KSK-rollover-
   shaped, and SEC-01 refuses either over UDP regardless of size
-  regardless). Where `-udp` is offered (`push-update`, `contact`,
+  regardless). Where `-udp` is offered (`contact`,
   `add-zsk`, `retire-zsk`, `rotate-key -role zsk`), it still falls back
   to TCP with a clear warning rather than sending a datagram guaranteed
   to be truncated or dropped once the message exceeds
@@ -967,7 +957,7 @@ for a manually verified real-binary walkthrough.
   content model), and a record `name` resolves relative-to-the-zone /
   absolute / apex (`"@"`) exactly the way a real zone file already does,
   so nothing about the format is unfamiliar to someone who already
-  knows zone files. `push-zone -zonefile` accepts a `.yaml`/`.yml` file
+  knows zone files. `publish-zone -zonefile` accepts a `.yaml`/`.yml` file
   directly (`loadZoneSource` dispatches on extension) with no separate
   conversion step; `init-zone -format bind` writes a real, directly
   hand-editable zone file instead for anyone who'd rather have that, and

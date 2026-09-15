@@ -69,7 +69,7 @@ type yamlRecord struct {
 // loadZoneSource loads a zone's SOA and other records from path,
 // dispatching on its extension: ".yaml"/".yml" through the friendlier
 // format above, anything else through sazu.LoadZoneFile exactly as
-// before. push-zone calls this instead of sazu.LoadZoneFile directly,
+// before. publish-zone calls this instead of sazu.LoadZoneFile directly,
 // so a YAML zone definition works as a drop-in -zonefile value with no
 // separate conversion step required.
 func loadZoneSource(path, zone string) (*dns.SOA, []dns.RR, error) {

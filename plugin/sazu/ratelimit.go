@@ -6,12 +6,13 @@ import (
 )
 
 // DefaultFullPushesPerDay and DefaultDifferentialPushesPerDay are §12's
-// starting quota numbers: 5 full-zone pushes and 50 differential
-// (push-update) pushes per zone, per rolling 24h window. Different limits
-// for the two kinds because they have very different costs -- a full push
-// re-verifies and re-signs an entire zone's worth of content (and, when
-// it's also first contact, walks the chain of trust to the real DNS
-// root), while a differential one only ever touches a handful of records.
+// starting quota numbers: 5 content pushes (sazuctl publish-zone) and 50
+// key-management pushes (publish-trust, add-zsk, retire-zsk, rotate-key)
+// per zone, per rolling 24h window. Different limits for the two kinds
+// because they have very different costs -- a content push re-verifies
+// and re-signs an entire zone's worth of content (and, at first contact,
+// walks the chain of trust to the real DNS root), while a key-management
+// push never touches served content at all.
 const (
 	DefaultFullPushesPerDay         = 5
 	DefaultDifferentialPushesPerDay = 50

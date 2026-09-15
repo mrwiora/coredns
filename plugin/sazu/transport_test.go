@@ -269,10 +269,14 @@ func TestOrdinaryPartialPushOverUDPStillWorks(t *testing.T) {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
+	now = time.Now()
+	signedMail, err := SignZoneContent([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	partial := new(dns.Msg)
 	partial.SetUpdate("example.org.")
-	partial.Insert([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))})
-	now = time.Now()
+	partial.Insert(signedMail)
 	partialWire, err := SignUpdate(partial, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing partial push: %v", err)
@@ -293,21 +297,22 @@ func TestOrdinaryPartialPushOverUDPStillWorks(t *testing.T) {
 // such attempt would let an attacker varying the address on every packet
 // turn the audit trail itself into an unbounded-growth vector. Every
 // other rejection reason must still be fully audited, including this
-// same zone's earlier, ordinary no-SOA rejection.
+// same zone's earlier, ordinary non-SEP-candidate rejection.
 func TestTransportAndRateLimitRejectionsAreNotAudited(t *testing.T) {
 	s := newTestSazu("example.org.")
 	s.DB = openTestDB(t)
 	// 2, not 1: the test's own loopback client shares one source address
 	// across every message it sends, so the first two attempts below
-	// (the ordinary no-SOA rejection, then the UDP transport rejection)
-	// must both still fit within budget -- otherwise the second one would
-	// itself be IP rate limited before ever reaching the transport gate
-	// this test means to exercise.
+	// (the ordinary non-SEP-candidate rejection, then the UDP transport
+	// rejection) must both still fit within budget -- otherwise the
+	// second one would itself be IP rate limited before ever reaching
+	// the transport gate this test means to exercise.
 	s.IPRateLimiter = NewIPRateLimiter(2)
 	addr := serveThroughRealServer(t, s)
 
-	// First: an ordinary rejection (no SOA) -- must still be audited.
-	badKey, badPriv, err := GenerateEd25519Key("example.org.", true)
+	// First: an ordinary rejection (a non-SEP-flagged candidate -- first
+	// contact can only ever establish a KSK) -- must still be audited.
+	badKey, badPriv, err := GenerateEd25519Key("example.org.", false)
 	if err != nil {
 		t.Fatalf("generating key: %v", err)
 	}
@@ -323,7 +328,7 @@ func TestTransportAndRateLimitRejectionsAreNotAudited(t *testing.T) {
 		t.Fatalf("signing: %v", err)
 	}
 	if resp := sendRaw(t, addr, badWire); resp.Rcode == dns.RcodeSuccess {
-		t.Fatalf("expected the no-SOA push to be rejected")
+		t.Fatalf("expected the non-SEP-flagged candidate to be rejected")
 	}
 
 	// Second: a first-contact attempt over UDP -- refused with
@@ -362,10 +367,10 @@ func TestTransportAndRateLimitRejectionsAreNotAudited(t *testing.T) {
 		t.Fatalf("RecentTransactions: %v", err)
 	}
 	if len(entries) != 1 {
-		t.Fatalf("expected exactly 1 audited entry (the no-SOA rejection) for example.org., got %d: %+v", len(entries), entries)
+		t.Fatalf("expected exactly 1 audited entry (the non-SEP-candidate rejection) for example.org., got %d: %+v", len(entries), entries)
 	}
-	if entries[0].Status != "" {
-		t.Fatalf("expected the one audited entry to be the ordinary no-SOA rejection (no status), got %+v", entries[0])
+	if entries[0].Status != statusErrFirstContactNeedsKSK {
+		t.Fatalf("expected the one audited entry to be the ordinary non-SEP-candidate rejection (%s), got %+v", statusErrFirstContactNeedsKSK, entries[0])
 	}
 
 	if entries, err := s.DB.RecentTransactions("other.example.", 10); err != nil {

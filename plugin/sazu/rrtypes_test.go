@@ -291,13 +291,12 @@ func TestServeAndVerifyAcrossTypicalRRTypes(t *testing.T) {
 	}
 }
 
-// TestRequireValidRRSIGsAcceptsEveryTypicalRRType proves §4's "Level 2"
-// content-signature verification (RequireValidRRSIGs) doesn't silently
-// special-case which types it can check -- a push carrying every type in
-// rrTypeCases, each with its own genuine RRSIG, is accepted in full.
+// TestRequireValidRRSIGsAcceptsEveryTypicalRRType proves §4's mandatory
+// content-signature verification doesn't silently special-case which
+// types it can check -- a push carrying every type in rrTypeCases, each
+// with its own genuine RRSIG, is accepted in full.
 func TestRequireValidRRSIGsAcceptsEveryTypicalRRType(t *testing.T) {
 	s := newTestSazu("example.org.")
-	s.RequireValidRRSIGs = true
 	addr := serveThroughRealServer(t, s)
 
 	key, priv, err := GenerateEd25519Key("example.org.", true)

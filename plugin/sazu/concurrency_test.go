@@ -161,11 +161,15 @@ func TestConcurrentUpdatesToDifferentZonesDoNotSerialize(t *testing.T) {
 	// ordinary differential update to the already-onboarded
 	// fast.example. -- this must complete quickly, not wait for
 	// slow.example.'s chain walk to finish.
+	now = time.Now()
+	signedWWW, err := SignZoneContent([]dns.RR{testA("www.fast.example.", net.IPv4(203, 0, 113, 10))}, fastKey, fastPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	partial := new(dns.Msg)
 	partial.SetQuestion("fast.example.", dns.TypeSOA)
 	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert([]dns.RR{testA("www.fast.example.", net.IPv4(203, 0, 113, 10))})
-	now = time.Now()
+	partial.Insert(signedWWW)
 	partialWire, err := SignUpdate(partial, fastKey, fastPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing fast zone partial push: %v", err)
@@ -229,11 +233,17 @@ func TestConcurrentUpdatesToSameZoneStillSerializeCorrectly(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			now := time.Now()
+			signedRR, err := SignZoneContent([]dns.RR{testA(fmt.Sprintf("rec%d.example.org.", i), net.IPv4(203, 0, 113, byte(i)))},
+				key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+			if err != nil {
+				t.Errorf("signing content for push %d: %v", i, err)
+				return
+			}
 			partial := new(dns.Msg)
 			partial.SetQuestion("example.org.", dns.TypeSOA)
 			partial.Opcode = dns.OpcodeUpdate
-			partial.Insert([]dns.RR{testA(fmt.Sprintf("rec%d.example.org.", i), net.IPv4(203, 0, 113, byte(i)))})
-			now := time.Now()
+			partial.Insert(signedRR)
 			w, err := SignUpdate(partial, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 			if err != nil {
 				t.Errorf("signing push %d: %v", i, err)

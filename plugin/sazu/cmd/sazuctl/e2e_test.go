@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,45 +111,71 @@ func queryA(t *testing.T, addr, name string) []dns.RR {
 
 func writeTestZoneFile(t *testing.T, zone string) string {
 	t.Helper()
+	return writeZoneFileWithRecords(t, zone, 1, "www."+zone+" 300 IN A 203.0.113.10")
+}
+
+// writeZoneFileWithRecords writes a BIND-format zone file for zone with
+// the given SOA serial and exactly the record lines given -- every
+// content-changing push is a full publish-zone of the zone's complete,
+// authoritative content (there is no partial/differential update
+// command; see plugin/sazu/README.md's "Considered approaches for
+// differential updates"), so a test driving several pushes in sequence
+// must pass every record that should still exist at each step, not just
+// a newly-added one.
+func writeZoneFileWithRecords(t *testing.T, zone string, serial uint32, records ...string) string {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "zone.txt")
-	content := zone + " 3600 IN SOA ns1." + zone + " hostmaster." + zone + " 1 3600 900 604800 3600\n" +
-		"www." + zone + " 300 IN A 203.0.113.10\n"
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "%s 3600 IN SOA ns1.%s hostmaster.%s %d 3600 900 604800 3600\n", zone, zone, zone, serial)
+	for _, r := range records {
+		buf.WriteString(r)
+		buf.WriteString("\n")
+	}
+	if err := os.WriteFile(path, []byte(buf.String()), 0o644); err != nil {
 		t.Fatalf("writing zone file: %v", err)
 	}
 	return path
 }
 
 // TestE2EKSKFullLifecycle exercises the KSK use case end to end through
-// the actual sazuctl CLI entry points against a real server: onboarding
-// (push-zone), an ordinary differential push (push-update), and a full
-// KSK rollover (rotate-key -role ksk) -- proving the old key stops
-// authenticating and the new one takes over, exactly as a real operator
-// invoking these subcommands would experience it.
+// the actual sazuctl CLI entry points against a real server: publish-
+// trust onboarding (generating a KSK and ZSK together), a full content
+// re-push adding a new record, and a full KSK rollover (rotate-key -role
+// ksk) -- proving the ZSK it registered still authenticates content
+// pushes afterward (a KSK rollover never touches existing ZSKs; see
+// KeyRegistry.PinKSK) exactly as a real operator invoking these
+// subcommands would experience it.
 func TestE2EKSKFullLifecycle(t *testing.T) {
 	addr := startTestServer(t)
 	zone := "e2e-ksk.example."
 	dir := t.TempDir()
 	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
 	newKSKPath := filepath.Join(dir, "new-ksk.private")
 
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+
+	// publish-zone has no -key flag at all -- routine content pushes
+	// never need or accept the KSK by construction, only -zsk-key.
 	zoneFile := writeTestZoneFile(t, zone)
-	if err := runPushZone([]string{"-zone", zone, "-key", kskPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
-		t.Fatalf("push-zone (onboarding): %v", err)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone (onboarding content): %v", err)
 	}
 	if answer := queryA(t, addr, "www."+zone); len(answer) != 1 {
 		t.Fatalf("expected the onboarded zone to be servable, got %d answers", len(answer))
 	}
 
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", kskPath,
-		"-add", "mail." + zone + " 300 IN A 203.0.113.20",
-		"-target", addr,
-	}); err != nil {
-		t.Fatalf("push-update: %v", err)
+	withMail := writeZoneFileWithRecords(t, zone, 1,
+		"www."+zone+" 300 IN A 203.0.113.10",
+		"mail."+zone+" 300 IN A 203.0.113.20",
+	)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", withMail, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone (re-push adding mail): %v", err)
 	}
 	if answer := queryA(t, addr, "mail."+zone); len(answer) != 1 {
-		t.Fatalf("expected the differential push's content to be servable, got %d answers", len(answer))
+		t.Fatalf("expected the re-pushed content to be servable, got %d answers", len(answer))
 	}
 
 	if err := runRotateKey([]string{
@@ -158,33 +186,26 @@ func TestE2EKSKFullLifecycle(t *testing.T) {
 		t.Fatalf("rotate-key -role ksk: %v", err)
 	}
 
-	// The old KSK no longer authenticates anything for this zone.
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", kskPath,
-		"-add", "evil." + zone + " 300 IN A 198.51.100.1",
-		"-target", addr,
-	}); err == nil {
-		t.Fatalf("expected a push signed by the superseded KSK to be rejected after rotation")
-	}
-
-	// The new KSK does.
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", newKSKPath,
-		"-add", "after-rotation." + zone + " 300 IN A 203.0.113.30",
-		"-target", addr,
-	}); err != nil {
-		t.Fatalf("push-update with the new KSK after rotation: %v", err)
+	// The ZSK publish-trust registered still authenticates content
+	// pushes after the KSK rolls over.
+	afterRotation := writeZoneFileWithRecords(t, zone, 1,
+		"www."+zone+" 300 IN A 203.0.113.10",
+		"mail."+zone+" 300 IN A 203.0.113.20",
+		"after-rotation."+zone+" 300 IN A 203.0.113.30",
+	)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", afterRotation, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone after KSK rotation: %v", err)
 	}
 	if answer := queryA(t, addr, "after-rotation."+zone); len(answer) != 1 {
 		t.Fatalf("expected the post-rotation push's content to be servable, got %d answers", len(answer))
 	}
 }
 
-// TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC exercises push-zone's
+// TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC exercises publish-zone's
 // -nsec3/-nsec3-salt/-nsec3-opt-out flags end to end through the actual
 // CLI entry point: proves the flag genuinely changes what the server
 // ends up serving (RFC 5155 NSEC3, not plain NSEC), not just that
-// runPushZone accepts it without erroring. plugin/sazu/nsec3_test.go
+// runPublishZone accepts it without erroring. plugin/sazu/nsec3_test.go
 // already covers RRSIG validity and closest-encloser/next-closer proof
 // structure at the plugin-package level; this is the CLI's own
 // black-box wiring, mirroring startTestServer/queryA's own level for
@@ -194,14 +215,18 @@ func TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC(t *testing.T) {
 	zone := "e2e-nsec3.example."
 	dir := t.TempDir()
 	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
 	zoneFile := writeTestZoneFile(t, zone)
 
-	if err := runPushZone([]string{
-		"-zone", zone, "-key", kskPath, "-zonefile", zoneFile,
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+	if err := runPublishZone([]string{
+		"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile,
 		"-nsec3", "-nsec3-salt", "AABBCCDD", "-nsec3-opt-out",
 		"-target", addr,
 	}); err != nil {
-		t.Fatalf("push-zone -nsec3: %v", err)
+		t.Fatalf("publish-zone -nsec3: %v", err)
 	}
 
 	m := new(dns.Msg)
@@ -234,108 +259,33 @@ func TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC(t *testing.T) {
 	}
 }
 
-// TestE2EPushUpdateIncrementalChainMaintenance exercises the full local
-// chain-cache mechanism end to end through the actual CLI: push-zone
-// (-nsec3) writes a cache (see nseccache.go) after onboarding, then
-// push-update adds a brand-new name and, because that cache exists,
-// patches the existing chain incrementally (sazu.ComputeChainPatch)
-// instead of the server discarding it until the next full push -- proven
-// by the chain still producing a valid NSEC3 proof covering both the
-// original and the newly added name right afterward, with no gap.
-func TestE2EPushUpdateIncrementalChainMaintenance(t *testing.T) {
-	addr := startTestServer(t)
-	zone := "e2e-chain-cache.example."
-	dir := t.TempDir()
-	kskPath := filepath.Join(dir, "ksk.private")
-	zoneFile := writeTestZoneFile(t, zone)
-
-	if err := runPushZone([]string{
-		"-zone", zone, "-key", kskPath, "-zonefile", zoneFile,
-		"-nsec3", "-target", addr,
-	}); err != nil {
-		t.Fatalf("push-zone -nsec3: %v", err)
-	}
-	if _, err := os.Stat(chainCachePath(zone)); err != nil {
-		t.Fatalf("expected push-zone to write a local chain cache: %v", err)
-	}
-
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", kskPath,
-		"-add", "mail." + zone + " 300 IN A 203.0.113.20",
-		"-target", addr,
-	}); err != nil {
-		t.Fatalf("push-update: %v", err)
-	}
-	if answer := queryA(t, addr, "mail."+zone); len(answer) != 1 {
-		t.Fatalf("expected the incrementally-pushed name to be servable, got %d answers", len(answer))
-	}
-
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn("nope."+zone), dns.TypeA)
-	m.SetEdns0(4096, true)
-	resp, _, err := new(dns.Client).Exchange(m, addr)
-	if err != nil {
-		t.Fatalf("query: %v", err)
-	}
-	if resp.Rcode != dns.RcodeNameError {
-		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
-	}
-	var sawNSEC3 bool
-	for _, rr := range resp.Ns {
-		if _, ok := rr.(*dns.NSEC3); ok {
-			sawNSEC3 = true
-		}
-	}
-	if !sawNSEC3 {
-		t.Fatalf("expected the chain to still produce an NSEC3 proof after an incremental push-update (not purged), got %+v", resp.Ns)
-	}
-}
-
 // TestE2EZSKFullLifecycle exercises the ZSK use case end to end through
-// the actual sazuctl CLI entry points: onboarding a KSK, registering a
-// ZSK (add-zsk), authenticating a routine push with the ZSK alone,
-// signing content with the ZSK while the KSK authenticates
-// (push-update -zsk-key), and finally retiring it (retire-zsk) -- with
-// the retired ZSK confirmed to no longer authenticate anything.
+// the actual sazuctl CLI entry points: publish-trust onboarding
+// (generating a KSK and ZSK together), a routine content push
+// authenticated and signed by the ZSK alone (publish-zone never touches
+// the KSK at all), retiring that ZSK (retire-zsk) and confirming it no
+// longer authenticates anything, then registering a fresh replacement
+// (add-zsk) and confirming publish-zone works again with it.
 func TestE2EZSKFullLifecycle(t *testing.T) {
 	addr := startTestServer(t)
 	zone := "e2e-zsk.example."
 	dir := t.TempDir()
 	kskPath := filepath.Join(dir, "ksk.private")
 	zskPath := filepath.Join(dir, "zsk.private")
+	newZSKPath := filepath.Join(dir, "new-zsk.private")
 
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+
+	// The ZSK authenticates and signs a routine push entirely on its
+	// own -- publish-zone never even accepts a KSK.
 	zoneFile := writeTestZoneFile(t, zone)
-	if err := runPushZone([]string{"-zone", zone, "-key", kskPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
-		t.Fatalf("push-zone (onboarding): %v", err)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone authenticated by the ZSK: %v", err)
 	}
-
-	if err := runAddZSK([]string{"-zone", zone, "-ksk-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
-		t.Fatalf("add-zsk: %v", err)
-	}
-
-	// The ZSK authenticates a routine push entirely on its own.
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", zskPath,
-		"-add", "zsk-authenticated." + zone + " 300 IN A 203.0.113.40",
-		"-target", addr,
-	}); err != nil {
-		t.Fatalf("push-update authenticated by the ZSK: %v", err)
-	}
-	if answer := queryA(t, addr, "zsk-authenticated."+zone); len(answer) != 1 {
+	if answer := queryA(t, addr, "www."+zone); len(answer) != 1 {
 		t.Fatalf("expected the ZSK-authenticated push's content to be servable, got %d answers", len(answer))
-	}
-
-	// The KSK authenticates the transaction while the ZSK signs the
-	// content (-zsk-key on push-update).
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", kskPath, "-zsk-key", zskPath,
-		"-add", "zsk-signed." + zone + " 300 IN A 203.0.113.50",
-		"-target", addr,
-	}); err != nil {
-		t.Fatalf("push-update with -zsk-key: %v", err)
-	}
-	if answer := queryA(t, addr, "zsk-signed."+zone); len(answer) != 1 {
-		t.Fatalf("expected the ZSK-signed push's content to be servable, got %d answers", len(answer))
 	}
 
 	if err := runRetireZSK([]string{"-zone", zone, "-ksk-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
@@ -343,21 +293,27 @@ func TestE2EZSKFullLifecycle(t *testing.T) {
 	}
 
 	// The retired ZSK no longer authenticates anything.
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", zskPath,
-		"-add", "after-retirement." + zone + " 300 IN A 198.51.100.2",
-		"-target", addr,
-	}); err == nil {
+	withAfterRetirement := writeZoneFileWithRecords(t, zone, 1,
+		"www."+zone+" 300 IN A 203.0.113.10",
+		"after-retirement."+zone+" 300 IN A 198.51.100.2",
+	)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", withAfterRetirement, "-target", addr}); err == nil {
 		t.Fatalf("expected a push authenticated by a retired ZSK to be rejected")
 	}
 
-	// The KSK still works normally.
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", kskPath,
-		"-add", "still-fine." + zone + " 300 IN A 203.0.113.60",
-		"-target", addr,
-	}); err != nil {
-		t.Fatalf("push-update with the KSK after ZSK retirement: %v", err)
+	// A freshly registered ZSK works again.
+	if err := runAddZSK([]string{"-zone", zone, "-ksk-key", kskPath, "-zsk-key", newZSKPath, "-target", addr}); err != nil {
+		t.Fatalf("add-zsk (replacement): %v", err)
+	}
+	stillFine := writeZoneFileWithRecords(t, zone, 1,
+		"www."+zone+" 300 IN A 203.0.113.10",
+		"still-fine."+zone+" 300 IN A 203.0.113.60",
+	)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", newZSKPath, "-zonefile", stillFine, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone with the replacement ZSK: %v", err)
+	}
+	if answer := queryA(t, addr, "still-fine."+zone); len(answer) != 1 {
+		t.Fatalf("expected the replacement ZSK's push to be servable, got %d answers", len(answer))
 	}
 }
 
@@ -373,12 +329,12 @@ func TestE2ERotateKeyZSKRoleRegistersThenRetires(t *testing.T) {
 	oldZSKPath := filepath.Join(dir, "old-zsk.private")
 	newZSKPath := filepath.Join(dir, "new-zsk.private")
 
-	zoneFile := writeTestZoneFile(t, zone)
-	if err := runPushZone([]string{"-zone", zone, "-key", kskPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
-		t.Fatalf("push-zone (onboarding): %v", err)
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", oldZSKPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
 	}
-	if err := runAddZSK([]string{"-zone", zone, "-ksk-key", kskPath, "-zsk-key", oldZSKPath, "-target", addr}); err != nil {
-		t.Fatalf("add-zsk (initial): %v", err)
+	zoneFile := writeTestZoneFile(t, zone)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", oldZSKPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone (onboarding content): %v", err)
 	}
 
 	if err := runRotateKey([]string{
@@ -389,20 +345,20 @@ func TestE2ERotateKeyZSKRoleRegistersThenRetires(t *testing.T) {
 		t.Fatalf("rotate-key -role zsk: %v", err)
 	}
 
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", oldZSKPath,
-		"-add", "should-fail." + zone + " 300 IN A 198.51.100.3",
-		"-target", addr,
-	}); err == nil {
+	shouldFail := writeZoneFileWithRecords(t, zone, 1,
+		"www."+zone+" 300 IN A 203.0.113.10",
+		"should-fail."+zone+" 300 IN A 198.51.100.3",
+	)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", oldZSKPath, "-zonefile", shouldFail, "-target", addr}); err == nil {
 		t.Fatalf("expected the old ZSK to no longer authenticate after rotate-key -role zsk")
 	}
 
-	if err := runPushUpdate([]string{
-		"-zone", zone, "-key", newZSKPath,
-		"-add", "should-succeed." + zone + " 300 IN A 203.0.113.70",
-		"-target", addr,
-	}); err != nil {
-		t.Fatalf("push-update with the new ZSK after rotation: %v", err)
+	shouldSucceed := writeZoneFileWithRecords(t, zone, 1,
+		"www."+zone+" 300 IN A 203.0.113.10",
+		"should-succeed."+zone+" 300 IN A 203.0.113.70",
+	)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", newZSKPath, "-zonefile", shouldSucceed, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone with the new ZSK after rotation: %v", err)
 	}
 	if answer := queryA(t, addr, "should-succeed."+zone); len(answer) != 1 {
 		t.Fatalf("expected the new ZSK's push to be servable, got %d answers", len(answer))
@@ -411,7 +367,7 @@ func TestE2ERotateKeyZSKRoleRegistersThenRetires(t *testing.T) {
 
 // TestE2EInitZoneThenPushZoneWithYAML exercises the "how do I even get
 // a zone file to push" onboarding path end to end: init-zone writes a
-// starter YAML zone definition, and push-zone accepts it directly as
+// starter YAML zone definition, and publish-zone accepts it directly as
 // -zonefile (no separate conversion step) -- proving the YAML front end
 // (zoneyaml.go) produces real, servable zone content through the actual
 // CLI commands a customer would run.
@@ -421,6 +377,7 @@ func TestE2EInitZoneThenPushZoneWithYAML(t *testing.T) {
 	dir := t.TempDir()
 	yamlPath := filepath.Join(dir, "zone.yaml")
 	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
 
 	if err := runInitZone([]string{"-zone", zone, "-out", yamlPath}); err != nil {
 		t.Fatalf("init-zone: %v", err)
@@ -429,8 +386,11 @@ func TestE2EInitZoneThenPushZoneWithYAML(t *testing.T) {
 		t.Fatalf("expected init-zone to create %s: %v", yamlPath, err)
 	}
 
-	if err := runPushZone([]string{"-zone", zone, "-key", kskPath, "-zonefile", yamlPath, "-target", addr}); err != nil {
-		t.Fatalf("push-zone with a YAML zonefile: %v", err)
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", yamlPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone with a YAML zonefile: %v", err)
 	}
 
 	// The starter template's own example records (www and mail) should
@@ -462,7 +422,7 @@ func TestE2EInitZoneRefusesToOverwriteExistingFile(t *testing.T) {
 }
 
 // TestE2EZoneConvertProducesAPushableZoneFile proves zone-convert's
-// output isn't just plausible-looking text -- push-zone can load and
+// output isn't just plausible-looking text -- publish-zone can load and
 // push the exact BIND-format file it produces from a YAML source.
 func TestE2EZoneConvertProducesAPushableZoneFile(t *testing.T) {
 	addr := startTestServer(t)
@@ -471,6 +431,7 @@ func TestE2EZoneConvertProducesAPushableZoneFile(t *testing.T) {
 	yamlPath := filepath.Join(dir, "zone.yaml")
 	zonePath := filepath.Join(dir, "zone.zone")
 	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
 
 	if err := runInitZone([]string{"-zone", zone, "-out", yamlPath}); err != nil {
 		t.Fatalf("init-zone: %v", err)
@@ -479,8 +440,11 @@ func TestE2EZoneConvertProducesAPushableZoneFile(t *testing.T) {
 		t.Fatalf("zone-convert: %v", err)
 	}
 
-	if err := runPushZone([]string{"-zone", zone, "-key", kskPath, "-zonefile", zonePath, "-target", addr}); err != nil {
-		t.Fatalf("push-zone with the converted BIND zone file: %v", err)
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zonePath, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone with the converted BIND zone file: %v", err)
 	}
 	if answer := queryA(t, addr, "www."+zone); len(answer) != 1 {
 		t.Fatalf("expected the converted zone file's www record to be servable, got %d answers", len(answer))

@@ -336,9 +336,13 @@ func TestPartialPushInvalidatesNSEC3UntilNextFullPush(t *testing.T) {
 	}
 
 	now := time.Now()
+	signedMail, err := SignZoneContent([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	update := new(dns.Msg)
 	update.SetUpdate("example.org.")
-	update.Insert([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))})
+	update.Insert(signedMail)
 	wire, err := SignUpdate(update, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing partial update: %v", err)

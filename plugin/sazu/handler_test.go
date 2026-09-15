@@ -228,10 +228,11 @@ func TestOnboardedZoneServesRRSIGsWithDOBit(t *testing.T) {
 // buildUnsignedFirstContactPush builds a first-contact UPDATE that
 // establishes candidate/SOA/content exactly like a real onboarding push,
 // but with none of it carrying an RRSIG -- only the SIG(0) transaction
-// signature over the whole message is genuine. It exists to distinguish
-// "Level 0: trust the pipe" (SIG(0) alone) from "Level 2: full
-// verification" (the content itself must be validly signed), which is
-// exactly what RequireValidRRSIGs toggles between.
+// signature over the whole message is genuine. SIG(0) alone proves who
+// sent a push, never that the zone content it carries would actually
+// validate for a real DNSSEC resolver once served -- which is exactly
+// what content-signature verification (mandatory, unconditionally) also
+// checks.
 func buildUnsignedFirstContactPush(t *testing.T, zone string, key *dns.DNSKEY, priv ed25519.PrivateKey) []byte {
 	t.Helper()
 	m := new(dns.Msg)
@@ -248,13 +249,12 @@ func buildUnsignedFirstContactPush(t *testing.T, zone string, key *dns.DNSKEY, p
 	return wire
 }
 
-// TestRequireValidRRSIGsRejectsUnsignedContent proves the opt-in Level 2
-// check actually gates on it: a push whose transaction is genuinely
-// SIG(0)-signed but whose content carries no RRSIGs at all must be
-// rejected once RequireValidRRSIGs is on.
+// TestRequireValidRRSIGsRejectsUnsignedContent proves content-signature
+// verification actually gates every push: one whose transaction is
+// genuinely SIG(0)-signed but whose content carries no RRSIGs at all
+// must be rejected.
 func TestRequireValidRRSIGsRejectsUnsignedContent(t *testing.T) {
 	s := newTestSazu("example.org.")
-	s.RequireValidRRSIGs = true
 	addr := serveThroughRealServer(t, s)
 
 	key, priv, err := GenerateEd25519Key("example.org.", true)
@@ -276,16 +276,16 @@ func TestRequireValidRRSIGsRejectsUnsignedContent(t *testing.T) {
 }
 
 // TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic
-// proves the more specific of the two RequireValidRRSIGs diagnostics: a
-// push whose content RRSIGs are otherwise completely legitimate (right
-// key, right RRset, cryptographically valid) but simply outside their
-// own inception/expiration window gets ERR_EXPIRED_SIGNATURE, not the
-// generic ERR_SIG_INVALID the previous test exercises for content with
-// no valid signature at all. The transaction's own SIG(0) is fresh
-// throughout -- only the zone content's RRSIGs are expired.
+// proves the more specific of content-signature verification's two
+// diagnostics: a push whose content RRSIGs are otherwise completely
+// legitimate (right key, right RRset, cryptographically valid) but
+// simply outside their own inception/expiration window gets
+// ERR_EXPIRED_SIGNATURE, not the generic ERR_SIG_INVALID the previous
+// test exercises for content with no valid signature at all. The
+// transaction's own SIG(0) is fresh throughout -- only the zone
+// content's RRSIGs are expired.
 func TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic(t *testing.T) {
 	s := newTestSazu("example.org.")
-	s.RequireValidRRSIGs = true
 	addr := serveThroughRealServer(t, s)
 
 	key, priv, err := GenerateEd25519Key("example.org.", true)
@@ -322,29 +322,6 @@ func TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic(t *testin
 	}
 	if _, ok := s.Keys.Get("example.org."); ok {
 		t.Fatalf("a rejected push must not pin a key")
-	}
-}
-
-// TestRequireValidRRSIGsOffAcceptsUnsignedContent proves the flag is
-// genuinely opt-in: with it left at its default (false), the exact same
-// unsigned-content push that the previous test rejects is accepted --
-// "Level 0, trust the pipe" is still a supported mode.
-func TestRequireValidRRSIGsOffAcceptsUnsignedContent(t *testing.T) {
-	s := newTestSazu("example.org.")
-	addr := serveThroughRealServer(t, s)
-
-	key, priv, err := GenerateEd25519Key("example.org.", true)
-	if err != nil {
-		t.Fatalf("generating key: %v", err)
-	}
-	wire := buildUnsignedFirstContactPush(t, "example.org.", key, priv)
-
-	resp := sendRaw(t, addr, wire)
-	if resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
-	}
-	if _, ok := s.Keys.Get("example.org."); !ok {
-		t.Fatalf("expected the candidate key to be pinned after a successful first-contact push")
 	}
 }
 
@@ -566,9 +543,13 @@ func TestPartialPushInvalidatesNSECUntilNextFullPush(t *testing.T) {
 	}
 
 	now := time.Now()
+	signedMail, err := SignZoneContent([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	update := new(dns.Msg)
 	update.SetUpdate("example.org.")
-	update.Insert([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))})
+	update.Insert(signedMail)
 	wire, err := SignUpdate(update, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing partial update: %v", err)
@@ -648,11 +629,15 @@ func soaFromAuthority(t *testing.T, resp *dns.Msg) *dns.SOA {
 	return nil
 }
 
-// TestOnboardWithoutSOAIsRejected proves the "first contact must
-// establish a real SOA" guard: a push with a candidate DNSKEY but no SOA
-// content must be refused, and must not pin a key for a zone with
-// nothing behind it.
-func TestOnboardWithoutSOAIsRejected(t *testing.T) {
+// TestOnboardWithoutSOAIsAccepted proves first contact no longer
+// requires establishing a real SOA in the same push: sazuctl
+// publish-trust deliberately sends a KSK+ZSK-only, content-free first
+// contact (see BuildTrustPush), so the server must accept and pin a KSK
+// candidate regardless of what content, if any, rides along with it. A
+// zone left with no SOA is simply not servable yet -- see serveQuery --
+// until a later publish-zone push supplies one; that degraded-but-safe
+// state is preferable to rejecting a legitimate trust-only push.
+func TestOnboardWithoutSOAIsAccepted(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
 
@@ -660,26 +645,30 @@ func TestOnboardWithoutSOAIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating key: %v", err)
 	}
+	dnskeyRR := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: key.Flags, Protocol: key.Protocol, Algorithm: key.Algorithm, PublicKey: key.PublicKey}
+	now := time.Now()
+	signed, err := SignZoneContent([]dns.RR{dnskeyRR, testA("www.example.org.", net.IPv4(203, 0, 113, 10))},
+		dnskeyRR, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	m := new(dns.Msg)
 	m.SetQuestion("example.org.", dns.TypeSOA)
 	m.Opcode = dns.OpcodeUpdate
-	m.Insert([]dns.RR{
-		&dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-			Flags: key.Flags, Protocol: key.Protocol, Algorithm: key.Algorithm, PublicKey: key.PublicKey},
-		testA("www.example.org.", net.IPv4(203, 0, 113, 10)),
-	})
-	now := time.Now()
+	m.Insert(signed)
 	wire, err := SignUpdate(m, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing: %v", err)
 	}
 
 	resp := sendRaw(t, addr, wire)
-	if resp.Rcode == dns.RcodeSuccess {
-		t.Fatalf("expected a first-contact push with no SOA to be rejected")
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("expected a first-contact push with no SOA to be accepted, got %s", dns.RcodeToString[resp.Rcode])
 	}
-	if _, ok := s.Keys.Get("example.org."); ok {
-		t.Fatalf("expected no key to be pinned for a rejected first-contact push")
+	zk, ok := s.Keys.Get("example.org.")
+	if !ok || zk.KSK.KeyTag() != key.KeyTag() {
+		t.Fatalf("expected the candidate key to be pinned")
 	}
 }
 
@@ -733,10 +722,10 @@ func TestOnboardWithWeakAlgorithmKeyIsRejected(t *testing.T) {
 
 // TestRateLimiterExceededRejectsFurtherDifferentialPushes proves §12's
 // quota is actually wired into serveUpdate: once a zone's differential
-// push quota for the rolling window is used up, a further otherwise
-// perfectly valid push-update is refused with ERR_QUOTA_EXCEEDED and
-// leaves the zone's content untouched, while the full-zone quota (tracked
-// independently) is unaffected.
+// (non-full-content) push quota for the rolling window is used up, a
+// further otherwise perfectly valid non-full-content update is refused
+// with ERR_QUOTA_EXCEEDED and leaves the zone's content untouched, while
+// the full-zone quota (tracked independently) is unaffected.
 func TestRateLimiterExceededRejectsFurtherDifferentialPushes(t *testing.T) {
 	s := newTestSazu("example.org.")
 	s.RateLimiter = NewRateLimiter(DefaultFullPushesPerDay, 1)
@@ -761,10 +750,15 @@ func TestRateLimiterExceededRejectsFurtherDifferentialPushes(t *testing.T) {
 	}
 
 	partial := func(rr dns.RR) *dns.Msg {
+		t.Helper()
+		signedRR, err := SignZoneContent([]dns.RR{rr}, key, priv, time.Now().Add(-DefaultSignatureInceptionSkew), time.Now().Add(DefaultSignatureValidity))
+		if err != nil {
+			t.Fatalf("SignZoneContent: %v", err)
+		}
 		m := new(dns.Msg)
 		m.SetQuestion("example.org.", dns.TypeSOA)
 		m.Opcode = dns.OpcodeUpdate
-		m.Insert([]dns.RR{rr})
+		m.Insert(signedRR)
 		return m
 	}
 
@@ -905,16 +899,18 @@ func TestIPRateLimiterCountsEveryUpdateAttemptNotJustFirstContact(t *testing.T) 
 // TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions
 // proves §12's audit trail actually captures both outcomes an operator
 // would want to investigate later: a successful onboarding, and a
-// rejected first-contact attempt (no SOA) that never got far enough to
-// even create a zones row -- exactly the case audit_log's schema is
-// deliberately not foreign-keyed against zones(origin) to still capture.
+// rejected first-contact attempt (a non-SEP-flagged, ZSK-shaped
+// candidate -- first contact can only ever establish a KSK) that never
+// got far enough to even create a zones row -- exactly the case
+// audit_log's schema is deliberately not foreign-keyed against
+// zones(origin) to still capture.
 func TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions(t *testing.T) {
 	s := newTestSazu("example.org.")
 	s.DB = openTestDB(t)
 	addr := serveThroughRealServer(t, s)
 
-	// A rejected attempt: a candidate DNSKEY but no SOA.
-	badKey, badPriv, err := GenerateEd25519Key("example.org.", true)
+	// A rejected attempt: a candidate DNSKEY that isn't SEP-flagged.
+	badKey, badPriv, err := GenerateEd25519Key("example.org.", false)
 	if err != nil {
 		t.Fatalf("generating key: %v", err)
 	}
@@ -931,7 +927,7 @@ func TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions(t *testi
 		t.Fatalf("signing: %v", err)
 	}
 	if resp := sendRaw(t, addr, badWire); resp.Rcode == dns.RcodeSuccess {
-		t.Fatalf("expected the no-SOA push to be rejected")
+		t.Fatalf("expected the non-SEP-flagged candidate to be rejected")
 	}
 
 	// A successful onboarding.
@@ -986,13 +982,17 @@ func TestOrdinaryPartialPushAfterOnboarding(t *testing.T) {
 
 	// Now a partial push: add a second record, remove the first -- no
 	// DNSKEY, signed with the same key the server already pinned.
+	now = time.Now()
+	signedMail, err := SignZoneContent([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	partial := new(dns.Msg)
 	partial.SetQuestion("example.org.", dns.TypeSOA)
 	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))})
+	partial.Insert(signedMail)
 	partial.Remove([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))})
 
-	now = time.Now()
 	partialWire, err := SignUpdate(partial, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing partial push: %v", err)
@@ -1214,14 +1214,17 @@ func TestKeyRolloverSwitchesToNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating new key: %v", err)
 	}
+	newKeyRR := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: newKey.Flags, Protocol: newKey.Protocol, Algorithm: newKey.Algorithm, PublicKey: newKey.PublicKey}
+	now = time.Now()
+	signedNewKey, err := SignZoneContent([]dns.RR{newKeyRR}, newKey, newPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	rollover := new(dns.Msg)
 	rollover.SetQuestion("example.org.", dns.TypeSOA)
 	rollover.Opcode = dns.OpcodeUpdate
-	rollover.Insert([]dns.RR{
-		&dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-			Flags: newKey.Flags, Protocol: newKey.Protocol, Algorithm: newKey.Algorithm, PublicKey: newKey.PublicKey},
-	})
-	now = time.Now()
+	rollover.Insert(signedNewKey)
 	rolloverWire, err := SignUpdate(rollover, newKey, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing rollover push: %v", err)
@@ -1251,11 +1254,15 @@ func TestKeyRolloverSwitchesToNewKey(t *testing.T) {
 	}
 
 	// The new key does.
+	now = time.Now()
+	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 20))}, newKey, newPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	newSignedPartial := new(dns.Msg)
 	newSignedPartial.SetQuestion("example.org.", dns.TypeSOA)
 	newSignedPartial.Opcode = dns.OpcodeUpdate
-	newSignedPartial.Insert([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 20))})
-	now = time.Now()
+	newSignedPartial.Insert(signedA)
 	newWire, err := SignUpdate(newSignedPartial, newKey, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing: %v", err)

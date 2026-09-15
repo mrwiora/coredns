@@ -20,14 +20,17 @@ of concept for testing the mechanism, not a production-ready deployment.
 ## Description
 
 *sazu* accepts RFC 2136 dynamic UPDATE messages for the zones it's configured
-for. The **first** UPDATE for a zone establishes trust: it must carry a
-DNSKEY record at the zone apex and a SOA record, be signed with SIG(0) using
-that same key, and — unless chain validation is disabled for local testing —
-the key must match a DS record published for that zone by its real parent
-zone (walked all the way from the DNS root). Once that succeeds, the key is
-*pinned*: every later UPDATE for that zone must be signed by the same key,
-checked by cryptographic signature alone, with no re-check against the
-parent chain on each push.
+for. A zone's first contact with this server is `sazuctl publish-trust`: it
+generates a KSK and a ZSK together (or loads them if they already exist) and
+presents both as a DNSKEY RRset — no zone content at all — signed with
+SIG(0) using the KSK. Unless chain validation is disabled for local testing,
+the KSK must match a DS record published for that zone by its real parent
+zone (walked all the way from the DNS root). Once that succeeds, the KSK is
+*pinned* and the ZSK is registered alongside it. From then on, every
+routine content push (`sazuctl publish-zone`) is authenticated and signed
+entirely by that ZSK, checked by cryptographic signature alone, with no
+re-check against the parent chain on each push and no need to ever touch
+the KSK again — unless it's deliberately rolled over.
 
 *sazu* also answers ordinary queries for the zones it has onboarded, directly
 from the content it has accepted.
@@ -65,8 +68,12 @@ sazu ZONES... {
   anything you want to survive a redeploy.
 * `rate_limit FULL_PER_DAY DIFFERENTIAL_PER_DAY` overrides §12's per-zone
   push quotas, each enforced over a rolling 24h window: FULL_PER_DAY for a
-  full-zone push (`push-zone`, or first contact) and DIFFERENTIAL_PER_DAY
-  for an ordinary partial one (`push-update`), tracked independently.
+  push that actually changes zone content (`publish-zone` — always a
+  complete replacement; see "Considered approaches for differential
+  updates" below for why there's no smaller alternative) and
+  DIFFERENTIAL_PER_DAY for a push that only changes key state
+  (`publish-trust`, `add-zsk`, `retire-zsk`, `rotate-key`), which costs
+  this server far less to process, tracked independently.
   Defaults to `5 50` if omitted. An exceeded quota is refused with the
   `ERR_QUOTA_EXCEEDED` diagnostic. Not persisted across a restart.
 * `ip_rate_limit UPDATES_PER_MINUTE` overrides §12's global, per-source-IP
@@ -132,7 +139,7 @@ Subcommands:
 * `sazuctl zone-convert -in <path.yaml> -out <path.zone> [-zone <zone>]` —
   materialize a YAML zone definition as a real BIND-format zone file, for
   tracking both, or just inspecting what a YAML source actually expands to.
-  `push-zone` never needs this step itself — see below.
+  `publish-zone` never needs this step itself — see below.
 * `sazuctl keygen -out <path> [-zone <owner>] [-role ksk|zsk]` — generate a
   new Ed25519 key, saved in BIND9's private-key-file format. `-role`
   defaults to `ksk` — every zone needs exactly one, and this is what
@@ -140,34 +147,43 @@ Subcommands:
   generated, so omitting it changes nothing.
 * `sazuctl ds -zone <zone> -key <path>` — print the DS record for a key,
   ready to hand to a registrar. Generates the key first if it doesn't exist.
-* `sazuctl push-zone -zone <zone> -key <path> -zonefile <path> [-zsk-key <path>] [-previous-serial N] [-nsec3] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json]` —
-  build, sign, and (optionally) send a **full-zone** push: every record in a
-  BIND-format zone file, plus the signing key as a DNSKEY. This is what
-  onboards a zone (first contact) and what re-publishes a whole zone
-  afterward. `-previous-serial` adds the SOA-serial staleness guard for a
-  *re*-push against an already-onboarded zone; omit it for first contact.
-  `-zonefile` is required — either a BIND-format zone file, or a YAML zone
-  definition (`.yaml`/`.yml`, converted automatically, no separate step);
-  see `sazuctl init-zone` to create a starter one for a brand-new domain.
-  `-nsec3` builds an RFC 5155 NSEC3 chain instead of plain NSEC for
-  authenticated denial of existence, additionally hiding the zone's name
-  set from enumeration ("zone walking"); `-nsec3-iterations`/`-nsec3-salt`
-  default to RFC 9276's current guidance (0, none) if omitted, and
-  `-nsec3-opt-out` sets the Opt-Out flag. This is a push-time choice the
-  signer makes — the server just stores and serves whichever chain it was
-  given, same as for plain NSEC.
-* `sazuctl push-update -zone <zone> -key <path> [-zsk-key <path>] [-add "rr"]... [-del "rr"]... [-del-rrset "name TYPE"]... [-target host:port|url] [-json]` —
-  build, sign, and (optionally) send a **partial** push: individual
-  add/delete operations against an already-onboarded zone. No DNSKEY is
-  included — the server verifies against a key it already trusts. If
-  `push-zone` has already written a local chain cache for this zone (see
-  "Known limitations" below), this also patches the NSEC/NSEC3 chain
-  incrementally and updates the cache on success — no separate flag
-  needed, it happens automatically whenever it safely can.
+* `sazuctl publish-trust -zone <zone> -key <path> -zsk-key <path> [-target host:port|url] [-json]` —
+  establish (or re-establish) a zone's KSK/ZSK trust relationship:
+  generates a KSK and a ZSK together (created together, always — see
+  **KSK, and the ZSK it's always paired with** below), or loads them if
+  they already exist, and presents both as a DNSKEY RRset signed by the
+  KSK. Carries **no zone content at all**. This is what onboards a zone
+  (first contact); unless chain validation is disabled, the KSK must
+  match a DS record at the real parent zone. Once this succeeds, the ZSK
+  it registered is what every subsequent `publish-zone` push
+  authenticates and signs with — the KSK isn't needed again unless it's
+  rolled over (`sazuctl rotate-key -role ksk`).
+* `sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-nsec3] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json]` —
+  build, sign, and (optionally) send a zone's **complete, authoritative
+  content**: every record in a BIND-format zone file. Authenticated and
+  signed entirely by `-zsk-key` (registered first via `publish-trust`) —
+  there is no `-key`/KSK flag on this command at all, and no DNSKEY of
+  any kind rides along with it, since trust is already an established,
+  separate fact by the time this runs. `-previous-serial` adds the
+  SOA-serial staleness guard for a *re*-push; omit it (0) for a zone's
+  first content push. `-zonefile` is required — either a BIND-format zone
+  file, or a YAML zone definition (`.yaml`/`.yml`, converted
+  automatically, no separate step); see `sazuctl init-zone` to create a
+  starter one for a brand-new domain. `-nsec3` builds an RFC 5155 NSEC3
+  chain instead of plain NSEC for authenticated denial of existence,
+  additionally hiding the zone's name set from enumeration ("zone
+  walking"); `-nsec3-iterations`/`-nsec3-salt` default to RFC 9276's
+  current guidance (0, none) if omitted, and `-nsec3-opt-out` sets the
+  Opt-Out flag. This is a push-time choice the signer makes — the server
+  just stores and serves whichever chain it was given, same as for plain
+  NSEC. Every push is a fresh, full replacement of the zone's entire
+  content — there is no partial/differential update command; see
+  "Considered approaches for differential updates" below for why.
 * `sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-target host:port|url] [-json]` —
   the original minimal single-record demo, kept for quick protocol
   smoke-testing. It does **not** include a SOA, so it cannot by itself
-  onboard a zone against this server (see `push-zone` for that).
+  onboard a zone against this server (see `publish-trust`/`publish-zone`
+  for that).
 * `sazuctl contact -zone <zone> -key <path> [-address mailto:you@example.org]... [-clear] [-target host:port|url] [-json]` —
   register (or, with `-clear`, remove) the zone's §10.6 contact address(es):
   where `sazu-watchd`'s (§11) delegation-change alerts get sent.
@@ -176,11 +192,13 @@ Subcommands:
   name (`_sazu-contact.<zone>`) — it is never itself DNSSEC-signed or
   servable DNS content, just metadata carried alongside a real update.
 * `sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-target host:port|url] [-json]` —
-  register a new, **optional** ZSK on top of a zone's existing KSK: an
+  register an additional ZSK on top of a zone's existing KSK: an
   ordinary push, authenticated by `-ksk-key`, that adds `-zsk-key`'s DNSKEY
   record. Generates `-zsk-key` if it doesn't exist yet. No chain-of-trust
-  network walk and no registrar step — see **KSK, and the optional ZSK
-  split** below for what this is for.
+  network walk and no registrar step. `publish-trust` already creates a
+  zone's first ZSK automatically at onboarding — reach for this to add a
+  second one, or to register a replacement after `retire-zsk`; see **KSK,
+  and the ZSK it's always paired with** below for what this is for.
 * `sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-target host:port|url] [-json]` —
   the reverse: remove a previously registered ZSK. `-zsk-key` must already
   exist (never generated here).
@@ -201,7 +219,7 @@ self-verifies — safe to run with nothing listening yet.
 `-target` accepts either `host:port` (sent over TCP, always, by default —
 it works regardless of message size or path MTU, at the cost of one extra
 round trip; a `-udp` flag on the subcommands where a server can actually
-accept it — never `push`, `push-zone`, or `rotate-key -role ksk`, which are
+accept it — never `push`, `publish-trust`, or `rotate-key -role ksk`, which are
 always first-contact- or KSK-rollover-shaped and so always require a
 connection-oriented transport — opts back into UDP, falling back to TCP
 with a warning if the push is too large for one safe datagram) or an
@@ -231,7 +249,7 @@ root — see the next two sections for how to actually test that.
 
 #### Creating a new zone
 
-`push-zone` needs a zone file to push, and hand-writing a BIND-format one
+`publish-zone` needs a zone file to push, and hand-writing a BIND-format one
 from scratch means getting two things right that regularly trip people up:
 the SOA serial number (an opaque integer with a conventional-but-unenforced
 format) and the responsible-party mailbox (an email address written with
@@ -273,11 +291,13 @@ ordinary zone-file syntax for whatever comes after the type (an MX's is
 `"<priority> <target>"`, a TXT's is a quoted string, and so on), and a
 `name` without a trailing dot is relative to the zone the same way a real
 zone file already works, so this stays familiar to anyone who has written
-one by hand. `push-zone` accepts this file directly — no separate
-conversion step:
+one by hand. `publish-zone` accepts this file directly — no separate
+conversion step. Establish trust once, then push it:
 
 ```
-./sazuctl push-zone -zone yourdomain.example -key client.private \
+./sazuctl publish-trust -zone yourdomain.example -key client.private \
+    -zsk-key zsk.private -target 127.0.0.1:15353
+./sazuctl publish-zone -zone yourdomain.example -zsk-key zsk.private \
     -zonefile yourdomain.example.yaml -target 127.0.0.1:15353
 ```
 
@@ -356,14 +376,21 @@ sandbox to publish a DS record against.
    above -- any other domain would work against this same, unmodified
    Corefile and running server.)
 
-2. **Generate a key and check it.**
+2. **Generate a KSK and establish trust** — `publish-trust` generates both
+   the KSK and its paired ZSK together if they don't exist yet:
 
    ```
-   ./sazuctl keygen -out client.private -zone example.org
+   ./sazuctl publish-trust -zone example.org -key client.private \
+       -zsk-key zsk.private -target 127.0.0.1:15353
    ```
 
-3. **Write a small zone file and onboard it** (first contact — a full push,
-   no `-previous-serial`):
+   A `Self-verification: OK` line followed by a NOERROR response means the
+   KSK is pinned and the ZSK is registered — this zone carries no content
+   yet.
+
+3. **Write a small zone file and push its content**, authenticated and
+   signed entirely by the ZSK (no `-previous-serial` for this first
+   content push):
 
    ```
    cat > example.org.zone <<'EOF'
@@ -373,12 +400,12 @@ sandbox to publish a DS record against.
    www 300  IN A   203.0.113.10
    EOF
 
-   ./sazuctl push-zone -zone example.org -key client.private \
+   ./sazuctl publish-zone -zone example.org -zsk-key zsk.private \
        -zonefile example.org.zone -target 127.0.0.1:15353
    ```
 
-   A `Self-verification: OK` line followed by a 29-byte NOERROR response
-   means the zone is onboarded and the key is pinned.
+   A `Self-verification: OK` line followed by a NOERROR response means the
+   zone's content is now servable.
 
 4. **Verify with dig** (or any DNS client — the server is a real,
    standards-compliant authoritative responder at this point):
@@ -388,24 +415,34 @@ sandbox to publish a DS record against.
    dig @127.0.0.1 -p 15353 example.org SOA
    ```
 
-5. **Send a partial update** and confirm it took effect:
+5. **Edit the zone file and push it again**: add a record, then re-run
+   `publish-zone` with the same ZSK — every push resends the zone's
+   complete content, this new record included:
 
    ```
-   ./sazuctl push-update -zone example.org -key client.private \
-       -add "mail.example.org. 300 IN A 203.0.113.20" \
-       -target 127.0.0.1:15353
+   cat >> example.org.zone <<'EOF'
+   mail 300 IN A 203.0.113.20
+   EOF
+
+   ./sazuctl publish-zone -zone example.org -zsk-key zsk.private \
+       -zonefile example.org.zone -target 127.0.0.1:15353
 
    dig @127.0.0.1 -p 15353 mail.example.org A
    ```
 
 6. **Confirm impersonation is rejected**: generate a second, different key
-   and try to push with it against the same zone — it must be refused
-   (`NOTAUTH`), and the record must not appear:
+   and try to push with it against the same zone as if it were the
+   ZSK — it must be refused (`NOTAUTH`), and the record must not appear:
 
    ```
-   ./sazuctl push-update -zone example.org -key attacker.private \
-       -add "evil.example.org. 300 IN A 198.51.100.1" \
-       -target 127.0.0.1:15353
+   ./sazuctl keygen -out attacker.private -zone example.org -role zsk
+
+   cat >> example.org.zone <<'EOF'
+   evil 300 IN A 198.51.100.1
+   EOF
+
+   ./sazuctl publish-zone -zone example.org -zsk-key attacker.private \
+       -zonefile example.org.zone -target 127.0.0.1:15353
 
    dig @127.0.0.1 -p 15353 evil.example.org A   # should be NXDOMAIN
    ```
@@ -460,7 +497,7 @@ through its real nameservers throughout.
    `push.go`/`cmd/sazuctl`), since a real signed push routinely exceeds
    the path MTU and gets silently dropped as an IP fragment on UDP —
    found the hard way against a real security-group-restricted host. If
-   `push-zone` reports no response at all (not even a denial) against a
+   `publish-trust` reports no response at all (not even a denial) against a
    server you otherwise know is up, check that inbound TCP/53 specifically
    isn't blocked, separately from UDP/53.
 
@@ -473,15 +510,16 @@ through its real nameservers throughout.
    brand-new domain with no live traffic yet has none of this risk and can
    skip straight to the next step.
 
-3. **Just try onboarding it.** You don't need to generate a key or fetch a
-   DS record up front — `push-zone` does that for you and, on a domain
-   with no DS published yet, tells you exactly what to do next (including
-   the live-migration warning from the previous step, inline, if you skip
-   reading it up front):
+3. **Just try establishing trust.** You don't need to generate a key or
+   fetch a DS record up front — `publish-trust` does that for you and, on
+   a domain with no DS published yet, tells you exactly what to do next
+   (including the live-migration warning from the previous step, inline,
+   if you skip reading it up front). This step carries no zone content,
+   so nothing about your actual zone data is involved yet:
 
    ```
-   ./sazuctl push-zone -zone yourdomain.example -key client.private \
-       -zonefile yourdomain.example.zone -target 127.0.0.1:15353
+   ./sazuctl publish-trust -zone yourdomain.example -key client.private \
+       -zsk-key zsk.private -target 127.0.0.1:15353
    ```
 
    The first attempt against a real, not-yet-onboarded domain is *expected*
@@ -513,32 +551,33 @@ through its real nameservers throughout.
 
 5. **Wait for it to propagate**, then confirm with `dig DS yourdomain.example
    +short` as the message above says, and **re-run the exact same
-   `push-zone` command from step 3.** Once the DS is visible, the same
+   `publish-trust` command from step 3.** Once the DS is visible, the same
    command that was denied now succeeds:
 
    ```
-   Self-verification: OK (420 bytes)
-   Sent 420 bytes to 127.0.0.1:15353
+   Self-verification: OK (145 bytes)
+   Sent 145 bytes to 127.0.0.1:15353
    Accepted (NOERROR).
    ```
 
-   Your zone is now onboarded — verify with `dig @127.0.0.1 -p 15353 ...`
-   exactly as in the sandbox walkthrough.
+   Trust is now established and the ZSK is registered — the zone itself
+   still has no content yet.
 
-6. **Onboard your real zone content** and confirm the response is NOERROR,
-   not REFUSED:
+6. **Push your real zone content**, authenticated and signed entirely by
+   the ZSK, and confirm the response is NOERROR, not REFUSED:
 
    ```
-   ./sazuctl push-zone -zone yourdomain.example -key client.private \
+   ./sazuctl publish-zone -zone yourdomain.example -zsk-key zsk.private \
        -zonefile yourdomain.example.zone -target 127.0.0.1:15353
    ```
 
-   A REFUSED response here most likely means the DS isn't visible yet
-   (recheck step 4), or the digest doesn't match the key you generated
-   (recheck step 3).
+   A REFUSED response here means the ZSK isn't the one `publish-trust`
+   registered — recheck step 3/5; it has nothing to do with the DS/chain
+   of trust any more, since that's a separate, already-settled fact by
+   this point.
 
 7. **Verify and iterate** with `dig @127.0.0.1 -p 15353 ...` and
-   `sazuctl push-update` exactly as in the sandbox walkthrough.
+   `sazuctl publish-zone` exactly as in the sandbox walkthrough.
 
 At no point in this flow does your domain's real, currently-serving
 delegation change — this test server is never in the actual query path for
@@ -547,78 +586,169 @@ offline.
 
 ### Key rollover
 
-A zone's key isn't permanent once pinned: generate a new one, publish
-its DS record at your registrar alongside the existing one (most accept
-more than one, and both stay listed throughout — see
-`REGISTRARS.md`), wait for it to propagate, then push signed with the
-new key, introducing it the same way first contact does:
+A zone's KSK isn't permanent once pinned: `sazuctl rotate-key -role ksk`
+generates a new one, prints its DS record for your registrar, and pushes
+it for verification — the server checks the new key both signs this push
+and has a matching DS at the parent (the identical check `publish-trust`
+itself requires) before switching over:
 
 ```
-./sazuctl keygen -out new-client.private -zone yourdomain.example
-./sazuctl push-update -zone yourdomain.example -key new-client.private \
-    -add "yourdomain.example. 3600 IN DNSKEY ..." -target 127.0.0.1:15353
+./sazuctl rotate-key -zone yourdomain.example -role ksk \
+    -key client.private -new-key new-client.private \
+    -target 127.0.0.1:15353
 ```
 
-(`sazuctl push-zone -key new-client.private ...` also works, and is
-simpler if you're re-pushing full zone content at the same time — a
-DNSKEY at the apex is exactly what BuildFullZonePush already always
-includes.) The server verifies the new key both signs this push and has
-a matching DS at the parent — the identical check first contact itself
-requires — before switching over; until that succeeds, the old key keeps
-working normally. Once switched, remove the old DS at your registrar
-whenever you're ready; there's no rush, since a dangling extra DS
-alongside the real one is safe (see `REGISTRARS.md`).
+Publish the new DS record at your registrar alongside the existing one
+(most accept more than one, and both stay listed throughout — see
+`REGISTRARS.md`) and wait for it to propagate; until the push above
+succeeds, the old KSK keeps working normally. Once switched, remove the
+old DS whenever you're ready — there's no rush, since a dangling extra DS
+alongside the real one is safe. This always requires a new DS record and
+always requires waiting for it to propagate, because the KSK is the one
+and only key this server ever anchors to a parent DS. **The ZSK
+`publish-trust` registered alongside the old KSK is untouched by this** —
+it keeps authenticating and signing every `publish-zone` push exactly as
+before, with no registrar step of its own.
 
-This is a **KSK rollover**: the rotation above always requires a new DS
-record at your registrar and always requires waiting for it to
-propagate, because the key you're rotating is the one and only key this
-server ever anchors to a parent DS. There is no way around that step for
-this specific key — see the next section for the one alternative that
-exists.
+### KSK, and the ZSK it's always paired with
 
-### KSK, and the optional ZSK split
+Every zone has exactly one **KSK** (key-signing key) — the only key this
+server ever anchors to a parent DS record, and the one `rotate-key -role
+ksk` rotates. `sazuctl publish-trust` generates it together with a **ZSK**
+(zone-signing key) at onboarding, always, and that pairing is the whole
+point: the KSK proves the chain of trust once and is then set aside,
+while the ZSK is what authenticates and signs every routine
+`publish-zone` push from then on — an automation box running
+`publish-zone` on a schedule never needs to hold the KSK at all. Rolling
+the KSK over never invalidates an existing ZSK (see `KeyRegistry.PinKSK`),
+so the two rotate completely independently.
 
-Every zone has exactly one **KSK** (key-signing key) — the key rollover
-above rotates it, and it's what first contact pins in the first place.
-It is also, by default, the *only* key: §9.1's original design has one
-Ed25519 key doing both jobs (SIG(0) transaction authentication and
-DNSSEC content signing), so a zone that never runs any of the commands
-below behaves exactly as this plugin always has, with nothing new to
-configure or think about.
-
-The KSK's one unavoidable property: it's the only key ever anchored to a
-parent DS record, so rotating it always means a registrar step. If you
-want to re-sign zone content on your own schedule — more often than you
-want to touch your registrar, or from an automation box you'd rather not
-hand your KSK to at all — register an optional **ZSK** (zone-signing
-key) on top of it instead:
+Register an additional ZSK the same way `publish-trust` registered the
+first one, authenticated by the KSK:
 
 ```
 ./sazuctl add-zsk -zone yourdomain.example -ksk-key client.private \
+    -zsk-key second-zsk.private -target 127.0.0.1:15353
+```
+
+This is an ordinary push, authenticated by `-ksk-key` — **no
+chain-of-trust network walk, no registrar interaction at all**, since a
+ZSK is never DS-anchored; it's trusted purely because an already-trusted
+key vouched for it. Retire a ZSK the same way, in reverse (`sazuctl
+retire-zsk`) — useful after a suspected compromise, or just to replace
+one on your own schedule with no registrar step whatsoever:
+
+```
+./sazuctl retire-zsk -zone yourdomain.example -ksk-key client.private \
     -zsk-key zsk.private -target 127.0.0.1:15353
 ```
 
-This is an ordinary push, authenticated by the KSK, that adds the ZSK's
-DNSKEY record — **no chain-of-trust network walk, no registrar
-interaction at all**, since a ZSK is never DS-anchored; it's trusted
-purely because an already-trusted key vouched for it. Once registered, a
-ZSK's own SIG(0) can authenticate further pushes on its own:
+Not sure which key you actually want to rotate? `sazuctl rotate-key
+-zone yourdomain.example` (no `-role`) explains the tradeoff and tells
+you exactly which flags to add for whichever you pick (`-role zsk`
+registers a replacement and retires the old one in one command; `-role
+ksk` performs the rollover above).
 
-```
-./sazuctl push-update -zone yourdomain.example -key zsk.private \
-    -add "www.yourdomain.example. 300 IN A 203.0.113.20" -target 127.0.0.1:15353
-```
+### Keys and validity: quick reference
 
-— or, to keep authenticating with the KSK while only *signing content*
-with the ZSK, add `-zsk-key <path>` to `push-zone`/`push-update` instead
-of switching `-key`. Retire a ZSK the same way you registered it, in
-reverse (`sazuctl retire-zsk`); rolling the KSK over never invalidates
-an existing ZSK, so the two rotate completely independently.
+Everything about what each key is for, how long anything actually stays
+valid, and what's mandatory vs. configurable — in one place, so none of
+it has to be pieced back together from the sections above.
 
-Not sure which one you actually want to rotate? `sazuctl rotate-key
--zone yourdomain.example` (no `-role`) prints the tradeoff above and
-tells you exactly which flags to add for whichever you pick — see the
-subcommand list further up for both forms.
+| | **KSK** (key-signing key) | **ZSK** (zone-signing key) |
+|---|---|---|
+| **Use case** | Anchors the chain of trust: the only key ever matched against a DS record at your registrar. Authenticates `publish-trust` and a KSK rollover. | Routine, day-to-day key: authenticates and signs every `publish-zone` content push. An automation box running scheduled pushes only ever needs this one. |
+| **Created** | `sazuctl publish-trust` — always generated together with its paired ZSK, never on its own. | Same `publish-trust` call, paired with the KSK from the start. |
+| **Registrar interaction** | Required — a DS record at your registrar, every time this key changes (onboarding or rollover). | **Never** — a ZSK is trusted purely because an already-trusted key (the KSK) vouched for it; `add-zsk`/`retire-zsk`/`rotate-key -role zsk` involve no registrar step at all. |
+| **How it expires** | It doesn't, on its own. Rotate deliberately with `rotate-key -role ksk` (best-practice hygiene, or a suspected compromise) — there is no forced cadence. | Same — doesn't expire on its own. Retire/replace on your own schedule (`retire-zsk` + `add-zsk`, or `rotate-key -role zsk` for both in one command). |
+| **What invalidates it** | Nothing automatic. Rolling it over never invalidates any registered ZSK (`KeyRegistry.PinKSK`). | Nothing automatic. Rolling the KSK over never invalidates it either — the two rotate completely independently. |
+
+**Signature validity windows** (the one place an actual clock matters):
+
+| Signature | Covers | Validity | What happens if you let it lapse |
+|---|---|---|---|
+| RRSIG (zone content) | Every record in a `publish-zone` push — this is the one that determines whether your zone validates for real DNSSEC resolvers. | **30 days** (`DefaultSignatureValidity`), fixed regardless of which key signs it — using the KSK instead of the ZSK does not extend it. | Resolvers see an expired signature once their cache re-fetches past it — SERVFAIL for a validating resolver. **You must run `publish-zone` again at least this often**, even with zero content changes, purely to refresh signatures. |
+| SIG(0) (transaction) | The UPDATE message itself, for the ~1 hour around when `sazuctl` sends it. | ~1 hour, set fresh by `sazuctl` on every push. | Nothing to manage — this isn't a stored credential, just replay protection for one in-flight push. Never confuse this with the RRSIG window above; they protect different things on completely different timescales. |
+
+**What's mandatory vs. configurable:**
+
+- **Content-signature verification is mandatory, unconditionally, with no way to turn it off.** Every pushed RRset must carry a covering RRSIG that actually verifies, or the push is rejected (`NOTAUTH` / `ERR_SIG_INVALID`) before anything is applied. There is no "trust SIG(0) alone" mode — SIG(0) proves who sent a push, never that the content itself would validate for a real resolver.
+- **`insecure_skip_chain_validation`** is the one remaining opt-in toggle anywhere in this plugin, and it's exactly what its name says: disables the §10.2 DS cross-check at first contact, for local testing only where there's no real parent zone to check against. **Never set this in production** — see [Syntax](#syntax) above. Nothing else in this plugin is optional in a way that weakens what gets verified.
+
+## Considered approaches for differential updates
+
+`publish-zone` always sends a zone's complete, authoritative content —
+there is no partial/differential update command, and every change,
+however small, is a fresh full push of the whole thing. That's a
+deliberate simplification, not an oversight: this project tried three
+different differential-update designs across its development, each
+working and covered by tests at the time, before concluding none of them
+were worth the complexity given the actual size of the zones this
+protocol targets (a customer's own domain, typically dozens to a few
+hundred records — not a bulk DNS host's multi-million-record zones,
+where a full-resend's bandwidth would genuinely matter). All three are
+recorded here rather than just deleted from history, so the tradeoff is
+visible to anyone tempted to rebuild one of them later.
+
+1. **A local cache on the client**, keyed by zone, recording the last
+   pushed NSEC/NSEC3 chain state so `sazuctl` could compute an
+   incremental chain patch itself without querying the server first.
+   *Advantage:* no extra network round trip before a push. *Disadvantages:*
+   the cache is one more piece of state that can silently drift from
+   what the server actually has (a manual edit, a restore from backup, a
+   second `sazuctl` instance pushing the same zone) — and once it does,
+   the client has no way to notice before sending a patch computed
+   against a picture that's already wrong. Any of those makes the local
+   cache actively unreliable as a source of truth, not just occasionally
+   stale.
+2. **Live client-side discovery and reconciliation.** Instead of trusting
+   a cache, `sazuctl` would query `-target` directly before every push —
+   the current SOA, the NSEC/NSEC3 chain, and the actual content at every
+   name the zone file or the live chain mentions — diff that live picture
+   against the zone file, and send exactly the resulting patch (additions,
+   changed values, dropped names/types), guarded by an RFC 2136 §2.4.2
+   prerequisite asserting the prior value of everything the diff depended
+   on so a picture that went stale mid-computation would be rejected
+   outright rather than silently misapplied. *Advantage:* no local state
+   to drift; the zone file remained the single source of truth, checked
+   fresh every time. *Disadvantages:* real, structural ones, not just
+   implementation bugs — an NSEC3 chain only ever reveals hashed owner
+   names, so a hash that doesn't happen to match one of the zone file's
+   own candidate names can't be resolved back to "which real name should
+   be removed" (this is NSEC3's whole privacy property working as
+   designed, not a bug to fix); and a naive implementation of this
+   approach hit several real correctness bugs along the way — deleting a
+   name's content via the wrong RFC 2136 form left an orphaned RRSIG
+   behind, a type-level RRset delete swept up other types' unrelated
+   RRSIGs, and a §2.4.4 "name is in use" prerequisite sent through the
+   wrong builder method silently corrupted its own Class field — each
+   fixable individually, but their accumulation was itself a signal that
+   the approach carried more surface area for subtle mistakes than the
+   size of zone it was solving for justified.
+3. **Server-side diffing**, considered but never built: the server, not
+   the client, would compute what changed by comparing an incoming push
+   against its own current state, sparing the client the discovery round
+   trip entirely. *Advantage:* the client-side query-then-diff round trip
+   disappears. *Disadvantage:* it moves real computational trust onto the
+   server for something the signature scheme doesn't actually need it to
+   do — every record's own RRSIG plus the transaction's overall SIG(0)
+   already fully authenticate *content*, so having the server additionally
+   reconstruct *intent* (what should be added vs. changed vs. removed)
+   from a partial push adds a whole second class of logic to get right,
+   for a cost (server CPU comparing an incoming push against existing
+   state) that's negligible at this protocol's actual scale.
+
+The common thread: every approach above is solving a bandwidth/CPU
+problem that a full zone push barely has, at the price of real,
+recurring correctness risk (stale caches, hash-blind chains, subtle RFC
+2136 form mistakes) that a full push has none of. As long as every
+record's RRSIG and the transaction's overall SIG(0) are both valid,
+replacing the whole zone is exactly as safe as replacing one record, and
+categorically simpler to reason about, test, and audit. If a future
+deployment ever needs to push zones large enough that full-resend
+bandwidth becomes the actual bottleneck, revisit this section first —
+the trade only shifts once the zones being pushed are dramatically
+bigger than what this protocol was designed for.
 
 ## Known limitations
 
@@ -638,26 +768,15 @@ a real-world test isn't mistaken for a production trial run:
   bottleneck the per-zone locking above actually targets — but a
   deployment pushing very high concurrent write volume across many zones
   would eventually want WAL mode and/or more connections here too.
-* **A partial push (`push-update`) invalidates the zone's NSEC/NSEC3
-  chain until the next full push, unless `sazuctl` has a local chain
-  cache for the zone.** `push-zone` writes one automatically (a small
-  `<zone>.nsec-cache.json` file next to the `sazuctl` binary); when
-  present, `push-update` patches the existing chain incrementally
-  instead of the server discarding it (see SAZU-PLAN.md for how, and
-  `plugin/sazu/chainpatch.go` for the actual algorithm). This still
-  falls back to full invalidation in three cases: no cache exists yet
-  for the zone (run `push-zone` once to create one), the push includes a
-  bare `-del` (removing one RR from a possibly multi-value RRset --
-  whether that empties the RRset, which the chain needs to know, isn't
-  determinable from the cache alone; use `-del-rrset` instead where
-  possible), or the cache has drifted from the server's actual state
-  (the push is rejected outright with `ERR_STALE_CHAIN` and the server's
-  real current record, rather than silently applied against stale
-  assumptions -- run `push-zone` once to resynchronize). Negative
-  answers still work correctly whenever the chain is unavailable, they
-  just carry no DNSSEC denial-of-existence proof until it's restored.
+* **Onboarding is two round trips, not one.** `publish-trust` establishes
+  the KSK/ZSK trust relationship and `publish-zone` pushes content
+  separately — a zone is briefly "trusted but empty" in between, unable
+  to answer anything but NXDOMAIN. This is a deliberate consequence of
+  keeping trust establishment and content genuinely separate (see
+  keys.go's `KeyRole` doc comment); it's never a problem in practice
+  since nothing serves traffic in that window anyway.
 * **No independent per-instance authorized-pusher identities.** The
-  optional ZSK split (above) is about DNSSEC key *roles*, not about
+  KSK/ZSK split (above) is about DNSSEC key *roles*, not about
   authorizing several independent signer machines to push under their
   own separate identities for HA — a real but different problem,
   deliberately not addressed by it; see SAZU-PLAN.md's KSK/ZSK section.

@@ -125,10 +125,11 @@ func signOneRRset(rrset []dns.RR, dnskeyRR *dns.DNSKEY, signer crypto.Signer, in
 // VerifySignedRRsets checks that every non-RRSIG Add-shaped RRset among
 // ops has at least one covering RRSIG, also present in ops, that
 // verifies against any key in candidates and is within its validity
-// window at now. This is §4's "Level 2 -- full verification": SIG(0)
-// alone only proves who sent the update, not that the zone content it
-// carries is itself validly DNSSEC-signed data, which is what actually
-// determines whether the zone will validate for real resolvers once
+// window at now. Called unconditionally on every update (§4's full
+// content verification, mandatory): SIG(0) alone only proves who sent
+// the update, not that the zone content it carries is itself validly
+// DNSSEC-signed data, which is what actually determines whether the
+// zone will validate for real resolvers once
 // served.
 //
 // candidates is every key currently trusted to sign content for this

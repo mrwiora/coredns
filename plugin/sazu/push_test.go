@@ -195,8 +195,8 @@ func TestBuildFullZonePushFirstContactHasNoPrerequisite(t *testing.T) {
 // TestBuildFullZonePushAcceptsHandBuiltRecords proves BuildFullZonePush
 // itself has no dependency on the records having come from a real zone
 // file -- any caller-constructed SOA/RRs work the same way. sazuctl's
-// push-zone command requires a zone file (LoadZoneFile) regardless; this
-// only exercises the underlying library function.
+// publish-zone command requires a zone file (LoadZoneFile) regardless;
+// this only exercises the underlying library function.
 func TestBuildFullZonePushAcceptsHandBuiltRecords(t *testing.T) {
 	key, priv, err := GenerateEd25519Key("example.org.", true)
 	if err != nil {

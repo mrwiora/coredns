@@ -125,6 +125,101 @@ func BuildFullZonePushSplitNSEC3(zone string, soa *dns.SOA, rrs []dns.RR, ksk *d
 	})
 }
 
+// BuildTrustPush builds an RFC 2136 UPDATE message that establishes a
+// zone's KSK/ZSK trust relationship without touching any zone content at
+// all: the apex DNSKEY RRset, containing both ksk and zsk, signed by ksk
+// alone (RFC 4034's own convention -- the key-signing key signs the key
+// set; zsk's own private half is never needed here). This is sazuctl
+// publish-trust's whole job: generate the pair together, present them,
+// and never need the KSK again for anything but a future rollover -- see
+// BuildContentPush for the ZSK-only, DNSKEY-free routine push that
+// follows it.
+//
+// The transaction itself (SIG(0), via SignUpdate) must also be signed by
+// ksk -- first contact only ever trusts the SEP-flagged (KSK-shaped) key
+// among a push's candidates to authenticate it (see handler.go's
+// findCandidateKey).
+func BuildTrustPush(zone string, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY) (*dns.Msg, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
+	m.Opcode = dns.OpcodeUpdate
+
+	kskRR := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     ksk.Flags, Protocol: ksk.Protocol, Algorithm: ksk.Algorithm, PublicKey: ksk.PublicKey,
+	}
+	zskRR := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
+	}
+
+	now := time.Now()
+	signed, err := SignZoneContentSplit([]dns.RR{kskRR, zskRR}, kskRR, kskSigner, kskRR, kskSigner,
+		now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		return nil, err
+	}
+	m.Insert(signed)
+	return m, nil
+}
+
+// BuildContentPush builds an RFC 2136 UPDATE message for a routine,
+// ZSK-only zone-content push: the zone's complete content (soa, rrs, and
+// a freshly computed denial-of-existence chain), signed entirely by zsk
+// -- and carrying no DNSKEY record at all, since publish-trust (see
+// BuildTrustPush) already established this ZSK's DNSKEY server-side. The
+// transaction itself is also signed by zsk (via SignUpdate, by the
+// caller) -- this push never needs the KSK for anything.
+//
+// previousSOA behaves exactly as in BuildFullZonePush.
+//
+// Uses plain NSEC (BuildNSECChain). See BuildContentPushNSEC3 for the
+// RFC 5155 NSEC3 alternative.
+func BuildContentPush(zone string, soa *dns.SOA, rrs []dns.RR, zsk *dns.DNSKEY, zskSigner crypto.Signer, previousSOA *dns.SOA) (*dns.Msg, error) {
+	return buildContentPush(zone, soa, rrs, zsk, zskSigner, previousSOA, BuildNSECChain)
+}
+
+// BuildContentPushNSEC3 is BuildContentPush's RFC 5155 NSEC3 equivalent
+// -- see BuildNSEC3Chain and NSEC3Options.
+func BuildContentPushNSEC3(zone string, soa *dns.SOA, rrs []dns.RR, zsk *dns.DNSKEY, zskSigner crypto.Signer, previousSOA *dns.SOA, opts NSEC3Options) (*dns.Msg, error) {
+	return buildContentPush(zone, soa, rrs, zsk, zskSigner, previousSOA, func(soa *dns.SOA, adds []dns.RR) []dns.RR {
+		return BuildNSEC3Chain(soa, adds, opts)
+	})
+}
+
+func buildContentPush(zone string, soa *dns.SOA, rrs []dns.RR, zsk *dns.DNSKEY, zskSigner crypto.Signer, previousSOA *dns.SOA, denialChain func(*dns.SOA, []dns.RR) []dns.RR) (*dns.Msg, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
+	m.Opcode = dns.OpcodeUpdate
+
+	if previousSOA != nil {
+		m.Used([]dns.RR{previousSOA})
+	}
+
+	zskRR := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: soa.Hdr.Ttl},
+		Flags:     zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
+	}
+
+	adds := make([]dns.RR, 0, len(rrs)+2)
+	adds = append(adds, soa)
+	adds = append(adds, rrs...)
+	adds = append(adds, denialChain(soa, adds)...)
+
+	now := time.Now()
+	// zskRR is never inserted into adds -- it exists only so
+	// SignZoneContentSplit has a key tag/name/algorithm to sign with; the
+	// DNSKEY record itself isn't part of this push at all. The ksk/
+	// kskSigner slots are nil because adds never contains a DNSKEY group
+	// for them to apply to (see SignZoneContentSplit's doc comment).
+	signed, err := SignZoneContentSplit(adds, nil, nil, zskRR, zskSigner, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		return nil, err
+	}
+	m.Insert(signed)
+	return m, nil
+}
+
 func buildFullZonePushSplit(zone string, soa *dns.SOA, rrs []dns.RR, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY, zskSigner crypto.Signer, previousSOA *dns.SOA, denialChain func(*dns.SOA, []dns.RR) []dns.RR) (*dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)

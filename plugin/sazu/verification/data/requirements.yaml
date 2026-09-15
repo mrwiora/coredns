@@ -267,9 +267,9 @@ areas:
     source: RFC 2136 §2.4.2 &middot; §12
   - id: CONTENT-04
     text: |-
-      Under the opt-in content-verification level, an Add-shaped RRset with no covering,
-      cryptographically valid RRSIG SHALL be rejected (NOTAUTH, status <code
-      class="inline">ERR_SIG_INVALID</code>).
+      Content-signature verification SHALL be mandatory on every update, with no way to
+      disable it: an Add-shaped RRset with no covering, cryptographically valid RRSIG SHALL
+      be rejected (NOTAUTH, status <code class="inline">ERR_SIG_INVALID</code>).
     source: §4 &middot; §12
   - id: CONTENT-05
     text: |-
@@ -324,21 +324,22 @@ areas:
       matching record for NODATA, SHALL be served when the querier sets the DO bit, exactly
       as for plain NSEC.
     source: RFC 5155 &middot; §7.2
-  - id: CONTENT-14
-    text: |-
-      A partial (differential) push carrying a correctly-computed NSEC/NSEC3 chain patch,
-      accompanied by an RFC 2136 §2.4.2 value-dependent prerequisite asserting the prior
-      value of every neighbor record it touches, SHALL have that patch applied directly
-      (without invalidating the rest of the chain) if every asserted prerequisite still
-      holds, and SHALL be rejected outright, with the zone's actual current record attached
-      for the first prerequisite that does not, otherwise.
-    source: RFC 2136 &middot; §2.4.2 (engineering decision)
   - id: CONTENT-15
     text: |-
       A push that carries an apex DNSKEY but changes no other served content (a KSK/ZSK
       rollover, or a ZSK registration/retirement) SHALL NOT invalidate an existing
-      NSEC/NSEC3 chain -- only a push that actually changes zone content, with no valid
-      chain patch of its own, SHALL.
+      NSEC/NSEC3 chain, nor any other served content -- only a push that actually changes
+      zone content SHALL.
+    source: Engineering decision
+  - id: CONTENT-16
+    text: |-
+      The client's zone definition (YAML or BIND-format zone file) SHALL be the single
+      source of truth for a zone's content: a content push (<code class="inline">sazuctl
+      publish-zone</code>) SHALL always carry the zone's complete, authoritative content,
+      and SHALL replace it entirely -- a record present in an earlier push but absent from
+      a later one SHALL no longer be served afterward. There SHALL be no
+      partial/differential content-update mechanism. Key-management records (DNSKEY) SHALL
+      never be affected by a content push.
     source: Engineering decision
 - id: contact
   code: CONTACT

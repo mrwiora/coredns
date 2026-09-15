@@ -364,8 +364,8 @@ areas:
     verifies: CONTENT-06
   - id: TC-CONTENT-05
     objective: |-
-      Content-level (Level 2) verification accepts genuine signatures and rejects unsigned,
-      wrong-key, and expired content; delete-shaped ops need none.
+      Content verification accepts genuine signatures and rejects unsigned, wrong-key, and
+      expired content; delete-shaped ops need none.
     functions: |-
       TestVerifySignedRRsetsAcceptsGenuinelySignedContent,
       TestVerifySignedRRsetsRejectsUnsignedRRset,
@@ -376,12 +376,11 @@ areas:
     verifies: CONTENT-04, CONTENT-05
   - id: TC-CONTENT-06
     objective: |-
-      End-to-end: the opt-in verification gate rejects unsigned content, distinguishes an
-      expired-but-genuine signature, and (off by default) still accepts unsigned content.
+      End-to-end: the mandatory verification gate rejects unsigned content and distinguishes
+      an expired-but-genuine signature from the generic no-valid-signature case.
     functions: |-
       TestRequireValidRRSIGsRejectsUnsignedContent,
-      TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic,
-      TestRequireValidRRSIGsOffAcceptsUnsignedContent
+      TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic
     verifies: CONTENT-04, CONTENT-05
   - id: TC-CONTENT-07
     objective: |-
@@ -472,58 +471,28 @@ areas:
     verifies: CONTENT-13, CONTENT-08, CONTENT-09
   - id: TC-CONTENT-17
     objective: |-
-      cmd/sazuctl's "push-zone -nsec3" flag (plus -nsec3-salt/-nsec3-opt-out) genuinely
+      cmd/sazuctl's "publish-zone -nsec3" flag (plus -nsec3-salt/-nsec3-opt-out) genuinely
       changes what the server ends up serving for a real NXDOMAIN query -- NSEC3, with the
       Opt-Out flag set, and no plain NSEC alongside it.
     functions: TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC (cmd/sazuctl/e2e_test.go)
     verifies: CONTENT-13
-  - id: TC-CONTENT-18
-    objective: |-
-      ComputeChainPatch correctly computes an insertion (splitting the predecessor),
-      a full removal (merging the predecessor past the doomed name), a bitmap-only edit
-      (no topology change), and a no-op (a type already present) -- for both NSEC and
-      NSEC3 -- and, specifically, two new names landing in the same canonical/hash-order
-      gap in one push thread correctly rather than needing a separate hand-rolled case.
-      Also specifically covers a domain in the middle of a longer (five-name) chain, with
-      two ordinary domains as neighbors rather than the apex on one side the way a smaller
-      zone's other cases unavoidably have: both an update (bitmap-only) and a full removal
-      leave both neighbors completely untouched and thread the ring correctly around the
-      gap either way.
-    functions: |-
-      10 functions in chainpatch_test.go (TestComputeChainPatch*)
-    verifies: CONTENT-14
-  - id: TC-CONTENT-19
-    objective: |-
-      End-to-end, the server applies a well-formed incremental chain patch directly (the
-      chain keeps serving a valid proof covering old and new names alike, never purged),
-      and rejects a patch whose prerequisite no longer matches the server's actual current
-      record outright -- nothing partially applied -- returning that actual record so the
-      client can reconcile. Also specifically covers removing one domain out of several via
-      an incremental patch: the removed domain stops resolving, both of its former
-      neighbors keep resolving exactly as before (never touched by the patch), and the
-      chain still produces a valid, fully-linked proof over what remains.
-    functions: |-
-      TestServerAcceptsIncrementalChainPatchWithoutPurging,
-      TestServerRejectsStaleChainPatchAndReturnsCurrentValue,
-      TestServerRemovesInteriorDomainViaIncrementalPatch,
-      TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue (prereq_test.go)
-    verifies: CONTENT-14
   - id: TC-CONTENT-20
     objective: |-
       A KSK rollover -- which carries an apex DNSKEY, same as a full push, but changes no
-      served content and supplies no replacement chain -- leaves an existing NSEC3 chain
-      fully intact and still validly signed, rather than being purged on the mistaken
-      assumption that carrying an apex DNSKEY alone means "full push."
-    functions: TestKSKRolloverDoesNotPurgeExistingChain
+      served content and supplies no replacement chain -- leaves an existing zone's content
+      and its NSEC chain fully intact and still validly signed, rather than being purged on
+      the mistaken assumption that carrying an apex DNSKEY alone means "full push."
+    functions: TestKSKRolloverNeverPurgesContentOrChain
     verifies: CONTENT-15
-  - id: TC-CONTENT-21
+  - id: TC-CONTENT-22
     objective: |-
-      End-to-end through the actual sazuctl CLI: push-zone -nsec3 writes a local chain
-      cache, and a subsequent push-update adding a brand-new name uses it automatically
-      to patch the chain incrementally -- proven by the chain still producing a valid
-      NSEC3 proof covering both the original and the newly added name afterward.
-    functions: TestE2EPushUpdateIncrementalChainMaintenance (cmd/sazuctl/e2e_test.go)
-    verifies: CONTENT-14
+      A full content push (sazuctl publish-zone) replaces a zone's entire served content:
+      a record present in an earlier push but absent from a later one is confirmed gone
+      after the next push, while the apex DNSKEY RRset (key management, untouched by
+      content pushes) survives exactly as it was.
+    functions: |-
+      TestPublishZoneRemovesContentDroppedFromTheZoneFile
+    verifies: CONTENT-16
 - id: contact
   title: CONTACT
   cases:
@@ -940,7 +909,7 @@ areas:
       produces — apex/relative/absolute record names resolve correctly, a record's own TTL
       overrides the zone default, and required fields (SOA nameserver, mailbox source, record
       type/value) are enforced — round-tripping correctly through an actual file on disk, and
-      <code class="inline">push-zone</code>'s own loader dispatches to it purely by file
+      <code class="inline">publish-zone</code>'s own loader dispatches to it purely by file
       extension.
     functions: |-
       TestRecordOwnerNameResolvesApexRelativeAndAbsolute,
@@ -952,7 +921,7 @@ areas:
   - id: TC-CLIENT-10
     objective: |-
       End-to-end: <code class="inline">init-zone</code> writes a starter YAML definition <code
-      class="inline">push-zone</code> accepts directly (no conversion step) and which onboards
+      class="inline">publish-zone</code> accepts directly (no conversion step) and which onboards
       correctly; it refuses to overwrite an existing file; <code
       class="inline">zone-convert</code>'s generated BIND-format output is itself directly
       pushable.

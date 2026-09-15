@@ -31,20 +31,29 @@ func onboardWithKSK(t *testing.T, addr string, ksk *dns.DNSKEY, kskPriv ed25519.
 // addZSK sends an ordinary, already-authenticated push (signed by
 // authKey, the KSK or an already-authorized ZSK) that adds zsk's DNSKEY
 // record at the zone apex -- the cheap registration path, with no chain-
-// of-trust network walk, findNewZSKCandidate/AddZSK exist for.
+// of-trust network walk, findNewZSKCandidate/AddZSK exist for. The
+// DNSKEY insert itself is signed by authKey too (RFC 4034's convention:
+// whichever key is already trusted signs the DNSKEY RRset), since
+// content-signature verification is mandatory on every push, key
+// management included.
 func addZSK(t *testing.T, addr string, authKey *dns.DNSKEY, authPriv ed25519.PrivateKey, zsk *dns.DNSKEY) *dns.Msg {
 	t.Helper()
-	m := new(dns.Msg)
-	m.SetQuestion("example.org.", dns.TypeSOA)
-	m.Opcode = dns.OpcodeUpdate
-	m.Insert([]dns.RR{&dns.DNSKEY{
+	zskRR := &dns.DNSKEY{
 		Hdr:       dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
 		Flags:     zsk.Flags,
 		Protocol:  zsk.Protocol,
 		Algorithm: zsk.Algorithm,
 		PublicKey: zsk.PublicKey,
-	}})
+	}
 	now := time.Now()
+	signed, err := SignZoneContent([]dns.RR{zskRR}, authKey, authPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("signing ZSK DNSKEY content: %v", err)
+	}
+	m := new(dns.Msg)
+	m.SetQuestion("example.org.", dns.TypeSOA)
+	m.Opcode = dns.OpcodeUpdate
+	m.Insert(signed)
 	wire, err := SignUpdate(m, authKey, authPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing ZSK-add push: %v", err)
@@ -126,11 +135,15 @@ func TestRegisteringAZSKIsOptionalZoneBehaviorIsUnchangedWithoutOne(t *testing.T
 	}
 	onboardWithKSK(t, addr, ksk, kskPriv)
 
+	now := time.Now()
+	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, ksk, kskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	partial := new(dns.Msg)
 	partial.SetQuestion("example.org.", dns.TypeSOA)
 	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))})
-	now := time.Now()
+	partial.Insert(signedA)
 	wire, err := SignUpdate(partial, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing: %v", err)
@@ -167,11 +180,15 @@ func TestZSKAuthenticatesFurtherTransactionsOnceRegistered(t *testing.T) {
 	}
 
 	// A routine content push, authenticated by the ZSK alone.
+	now := time.Now()
+	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, zsk, zskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	partial := new(dns.Msg)
 	partial.SetQuestion("example.org.", dns.TypeSOA)
 	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))})
-	now := time.Now()
+	partial.Insert(signedA)
 	wire, err := SignUpdate(partial, zsk, zskPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing: %v", err)
@@ -188,10 +205,10 @@ func TestZSKAuthenticatesFurtherTransactionsOnceRegistered(t *testing.T) {
 }
 
 // TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs proves the ZSK is
-// a real content-signing key under §4's "Level 2" verification, not just
-// a transaction-authentication identity: content signed by the ZSK
-// (rather than the KSK) still verifies, because VerifySignedRRsets is
-// given the zone's whole current content-signer set, KSK and ZSK alike.
+// a real content-signing key, not just a transaction-authentication
+// identity: content signed by the ZSK (rather than the KSK) still
+// verifies, because VerifySignedRRsets is given the zone's whole current
+// content-signer set, KSK and ZSK alike.
 func TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
@@ -206,15 +223,9 @@ func TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating ZSK: %v", err)
 	}
-	// Registered before RequireValidRRSIGs is turned on below, so this
-	// unsigned-content DNSKEY-add push (Level 0 is all onboarding/ZSK
-	// registration in this package ever needs -- see AUTH-03's
-	// SIG(0)-is-the-authentication-layer design) isn't itself subject to
-	// the Level 2 content-signature check this test is actually about.
 	if resp := addZSK(t, addr, ksk, kskPriv, zsk); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("ZSK registration rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	s.RequireValidRRSIGs = true
 
 	rrs := []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}
 	now := time.Now()
@@ -311,14 +322,19 @@ func TestKSKRolloverPreservesExistingZSK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating new KSK: %v", err)
 	}
+	newKSKRR := &dns.DNSKEY{
+		Hdr:   dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: newKSK.Flags, Protocol: newKSK.Protocol, Algorithm: newKSK.Algorithm, PublicKey: newKSK.PublicKey,
+	}
+	now := time.Now()
+	signedKSK, err := SignZoneContent([]dns.RR{newKSKRR}, newKSK, newKSKPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	rollover := new(dns.Msg)
 	rollover.SetQuestion("example.org.", dns.TypeSOA)
 	rollover.Opcode = dns.OpcodeUpdate
-	rollover.Insert([]dns.RR{&dns.DNSKEY{
-		Hdr:   dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags: newKSK.Flags, Protocol: newKSK.Protocol, Algorithm: newKSK.Algorithm, PublicKey: newKSK.PublicKey,
-	}})
-	now := time.Now()
+	rollover.Insert(signedKSK)
 	rolloverWire, err := SignUpdate(rollover, newKSK, newKSKPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing rollover push: %v", err)
@@ -337,11 +353,15 @@ func TestKSKRolloverPreservesExistingZSK(t *testing.T) {
 
 	// The ZSK, registered under the now-superseded KSK, still
 	// authenticates a push on its own.
+	now = time.Now()
+	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, zsk, zskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		t.Fatalf("SignZoneContent: %v", err)
+	}
 	partial := new(dns.Msg)
 	partial.SetQuestion("example.org.", dns.TypeSOA)
 	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))})
-	now = time.Now()
+	partial.Insert(signedA)
 	wire, err := SignUpdate(partial, zsk, zskPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing: %v", err)

@@ -42,7 +42,6 @@ func setup(c *caddy.Controller) error {
 		Validator:                   NewValidator(),
 		Capture:                     capture,
 		InsecureSkipChainValidation: cfg.insecureSkipChainValidation,
-		RequireValidRRSIGs:          cfg.requireValidRRSIGs,
 		RateLimiter:                 NewRateLimiter(cfg.fullPushesPerDay, cfg.differentialPushesPerDay),
 		IPRateLimiter:               NewIPRateLimiter(cfg.ipUpdatesPerMinute),
 	}
@@ -79,7 +78,6 @@ func setup(c *caddy.Controller) error {
 type sazuConfig struct {
 	zones                       []string
 	insecureSkipChainValidation bool
-	requireValidRRSIGs          bool
 	dbPath                      string
 	fullPushesPerDay            int
 	differentialPushesPerDay    int
@@ -107,11 +105,6 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 					return sazuConfig{}, c.ArgErr()
 				}
 				cfg.insecureSkipChainValidation = true
-			case "require_valid_rrsigs":
-				if len(c.RemainingArgs()) != 0 {
-					return sazuConfig{}, c.ArgErr()
-				}
-				cfg.requireValidRRSIGs = true
 			case "db":
 				args := c.RemainingArgs()
 				if len(args) != 1 {

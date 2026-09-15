@@ -1,6 +1,7 @@
 package sazu
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
@@ -188,6 +189,10 @@ func replaceRRSIG(existing []dns.RR, sig *dns.RRSIG) []dns.RR {
 func (z *ZoneData) DeleteRRset(name string, rtype uint16) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	z.deleteRRsetLocked(name, rtype)
+}
+
+func (z *ZoneData) deleteRRsetLocked(name string, rtype uint16) {
 	name = strings.ToLower(name)
 	if rtype == dns.TypeSOA && name == z.Origin {
 		return // a zone's SOA is never removable this way, only replaced
@@ -203,6 +208,10 @@ func (z *ZoneData) DeleteRRset(name string, rtype uint16) {
 func (z *ZoneData) DeleteName(name string) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	z.deleteNameLocked(name)
+}
+
+func (z *ZoneData) deleteNameLocked(name string) {
 	name = strings.ToLower(name)
 	if name == z.Origin {
 		return
@@ -215,6 +224,10 @@ func (z *ZoneData) DeleteName(name string) {
 func (z *ZoneData) DeleteRR(rr dns.RR) {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	z.deleteRRLocked(rr)
+}
+
+func (z *ZoneData) deleteRRLocked(rr dns.RR) {
 	name := strings.ToLower(rr.Header().Name)
 	byType, ok := z.rrsets[name]
 	if !ok {
@@ -263,6 +276,114 @@ func (z *ZoneData) PurgeNSEC() {
 		}
 		byType[dns.TypeRRSIG] = kept
 	}
+}
+
+// PurgeContent removes every ordinary RRset at every name in the zone --
+// apex DNSKEY, and its own covering RRSIG, excepted, since key
+// management is independent of zone content and must never be touched
+// by a content-only operation (see keys.go's KeyRole doc comment).
+// Called before applying a full content push (containsAPEXSOA --
+// sazuctl publish-zone always sends one, as the zone's complete,
+// authoritative content): without this, a record dropped from the zone
+// file would simply linger on the server forever, since an ordinary RFC
+// 2136 add is never itself a deletion. This also clears any existing
+// NSEC/NSEC3(PARAM) chain and its covering RRSIGs, same as PurgeNSEC --
+// they're ordinary (non-DNSKEY) content -- so a full push never needs to
+// call both. The push's own content (SOA, every record, and a fresh
+// chain) repopulates the zone in the same update, immediately after --
+// see PurgeContentAndApply, which does both under one lock so a
+// concurrent query can never observe the zone in between.
+func (z *ZoneData) PurgeContent() {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.purgeContentLocked()
+}
+
+func (z *ZoneData) purgeContentLocked() {
+	for name, byType := range z.rrsets {
+		isApex := name == z.Origin
+		for rtype := range byType {
+			if isApex && rtype == dns.TypeDNSKEY {
+				continue
+			}
+			if isApex && rtype == dns.TypeRRSIG {
+				kept := byType[rtype][:0]
+				for _, rr := range byType[rtype] {
+					if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeDNSKEY {
+						kept = append(kept, rr)
+					}
+				}
+				byType[rtype] = kept
+				continue
+			}
+			delete(byType, rtype)
+		}
+		if len(byType) == 0 {
+			delete(z.rrsets, name)
+		}
+	}
+}
+
+// applyOpLocked applies one RFC 2136 §2.5 update op, assuming the caller
+// already holds z.mu -- the shared classification+dispatch ApplyUpdateOps
+// and PurgeContentAndApply both use, so the two never risk disagreeing
+// about which of the four forms a given op is.
+func (z *ZoneData) applyOpLocked(rr dns.RR, zclass uint16) error {
+	h := rr.Header()
+	switch {
+	case h.Class == zclass:
+		z.insertLocked(rr)
+	case h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY && h.Rdlength == 0:
+		z.deleteNameLocked(h.Name)
+	case h.Class == dns.ClassANY && h.Rdlength == 0:
+		z.deleteRRsetLocked(h.Name, h.Rrtype)
+	case h.Class == dns.ClassNONE:
+		z.deleteRRLocked(rr)
+	default:
+		return fmt.Errorf("malformed update op for %s", h.Name)
+	}
+	return nil
+}
+
+// ApplyOps applies every op in ops (RFC 2136 §2.5's four update forms),
+// all under one lock acquisition -- atomically, from the perspective of
+// any concurrent query, the same reasoning PurgeContentAndApply's own
+// doc comment explains in more detail. ApplyUpdateOps (prereq.go) is a
+// thin wrapper around this; the two names exist because most callers
+// think in terms of "apply this update," not "this zone's own method."
+func (z *ZoneData) ApplyOps(ops []dns.RR, zclass uint16) error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	for _, rr := range ops {
+		if err := z.applyOpLocked(rr, zclass); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// PurgeContentAndApply performs PurgeContent and then applies every op
+// in ops, all under one lock acquisition -- atomically, from the
+// perspective of any concurrent query (serveQuery's Lookup/NameExists
+// calls each take z.mu independently). Without this, a full content
+// push that purges first and then re-inserts one record at a time (each
+// insert its own separate lock/unlock) would leave a real window where
+// a concurrent query sees a record as gone that both existed a moment
+// before the push and will exist again a moment after it -- even though
+// nothing about that record actually changed. Used for the containsAPEXSOA
+// case in handler.go's serveUpdate; ApplyUpdateOps (used everywhere else)
+// makes the same atomicity guarantee for its own multi-op sequence, just
+// without the purge first.
+func (z *ZoneData) PurgeContentAndApply(ops []dns.RR, zclass uint16) error {
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.purgeContentLocked()
+	for _, rr := range ops {
+		if err := z.applyOpLocked(rr, zclass); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ownerNames returns every name z holds any RRset for, including the
