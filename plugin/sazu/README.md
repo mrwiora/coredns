@@ -158,7 +158,7 @@ Subcommands:
   it registered is what every subsequent `publish-zone` push
   authenticates and signs with — the KSK isn't needed again unless it's
   rolled over (`sazuctl rotate-key -role ksk`).
-* `sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-nsec3=false] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json]` —
+* `sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-denial-of-existence nsec3|nsec] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json]` —
   build, sign, and (optionally) send a zone's **complete, authoritative
   content**: every record in a BIND-format zone file. Authenticated and
   signed entirely by `-zsk-key` (registered first via `publish-trust`) —
@@ -169,18 +169,18 @@ Subcommands:
   first content push. `-zonefile` is required — either a BIND-format zone
   file, or a YAML zone definition (`.yaml`/`.yml`, converted
   automatically, no separate step); see `sazuctl init-zone` to create a
-  starter one for a brand-new domain. Authenticated denial of existence
-  defaults to an RFC 5155 NSEC3 chain, additionally hiding the zone's
-  name set from enumeration ("zone walking"); `-nsec3-iterations`/
-  `-nsec3-salt` default to RFC 9276's current guidance (0, none) if
-  omitted, and `-nsec3-opt-out` sets the Opt-Out flag. Pass
-  `-nsec3=false` to fall back to plain NSEC instead (the three NSEC3
-  flags above are ignored when you do). Either way this is a push-time
-  choice the signer makes — the server just stores and serves whichever
-  chain it was given. Every push is a fresh, full replacement of the
-  zone's entire content — there is no partial/differential update
-  command; see "Considered approaches for differential updates" below
-  for why.
+  starter one for a brand-new domain. `-denial-of-existence` picks the
+  authenticated denial-of-existence proof and defaults to `nsec3` (RFC
+  5155), additionally hiding the zone's name set from enumeration ("zone
+  walking"); `-nsec3-iterations`/`-nsec3-salt` default to RFC 9276's
+  current guidance (0, none) if omitted, and `-nsec3-opt-out` sets the
+  Opt-Out flag. Pass `-denial-of-existence nsec` to fall back to plain
+  RFC 4034 NSEC instead (the three NSEC3 flags above are ignored when you
+  do). Either way this is a push-time choice the signer makes — the
+  server just stores and serves whichever chain it was given. Every push
+  is a fresh, full replacement of the zone's entire content — there is
+  no partial/differential update command; see "Considered approaches for
+  differential updates" below for why.
 * `sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-target host:port|url] [-json]` —
   the original minimal single-record demo, kept for quick protocol
   smoke-testing. It does **not** include a SOA, so it cannot by itself

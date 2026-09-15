@@ -202,14 +202,14 @@ func TestE2EKSKFullLifecycle(t *testing.T) {
 }
 
 // TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC exercises publish-zone's
-// -nsec3/-nsec3-salt/-nsec3-opt-out flags end to end through the actual
-// CLI entry point: proves the flag genuinely changes what the server
-// ends up serving (RFC 5155 NSEC3, not plain NSEC), not just that
-// runPublishZone accepts it without erroring. plugin/sazu/nsec3_test.go
-// already covers RRSIG validity and closest-encloser/next-closer proof
-// structure at the plugin-package level; this is the CLI's own
-// black-box wiring, mirroring startTestServer/queryA's own level for
-// every other flag in this file.
+// -denial-of-existence=nsec3/-nsec3-salt/-nsec3-opt-out flags end to end
+// through the actual CLI entry point: proves the flag genuinely changes
+// what the server ends up serving (RFC 5155 NSEC3, not plain NSEC), not
+// just that runPublishZone accepts it without erroring.
+// plugin/sazu/nsec3_test.go already covers RRSIG validity and
+// closest-encloser/next-closer proof structure at the plugin-package
+// level; this is the CLI's own black-box wiring, mirroring
+// startTestServer/queryA's own level for every other flag in this file.
 func TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC(t *testing.T) {
 	addr := startTestServer(t)
 	zone := "e2e-nsec3.example."
@@ -223,7 +223,7 @@ func TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC(t *testing.T) {
 	}
 	if err := runPublishZone([]string{
 		"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile,
-		"-nsec3", "-nsec3-salt", "AABBCCDD", "-nsec3-opt-out",
+		"-denial-of-existence", "nsec3", "-nsec3-salt", "AABBCCDD", "-nsec3-opt-out",
 		"-target", addr,
 	}); err != nil {
 		t.Fatalf("publish-zone -nsec3: %v", err)
@@ -306,8 +306,9 @@ func TestE2EPushZoneDefaultServesNSEC3(t *testing.T) {
 	}
 }
 
-// TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC proves -nsec3=false is a
-// working escape hatch back to plain NSEC now that NSEC3 is the default.
+// TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC proves
+// -denial-of-existence=nsec is a working escape hatch back to plain
+// NSEC now that NSEC3 is the default.
 func TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC(t *testing.T) {
 	addr := startTestServer(t)
 	zone := "e2e-nsec3-fallback.example."
@@ -319,8 +320,8 @@ func TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC(t *testing.T) {
 	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
 		t.Fatalf("publish-trust: %v", err)
 	}
-	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile, "-nsec3=false", "-target", addr}); err != nil {
-		t.Fatalf("publish-zone -nsec3=false: %v", err)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile, "-denial-of-existence", "nsec", "-target", addr}); err != nil {
+		t.Fatalf("publish-zone -denial-of-existence=nsec: %v", err)
 	}
 
 	m := new(dns.Msg)
@@ -343,7 +344,7 @@ func TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC(t *testing.T) {
 		}
 	}
 	if !sawNSEC {
-		t.Fatalf("expected -nsec3=false to fall back to plain NSEC, got %+v", resp.Ns)
+		t.Fatalf("expected -denial-of-existence nsec to fall back to plain NSEC, got %+v", resp.Ns)
 	}
 	if sawNSEC3 {
 		t.Fatalf("expected no NSEC3 records alongside the plain-NSEC fallback, got %+v", resp.Ns)

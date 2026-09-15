@@ -475,11 +475,12 @@ areas:
     verifies: CONTENT-13, CONTENT-08, CONTENT-09
   - id: TC-CONTENT-17
     objective: |-
-      cmd/sazuctl's "publish-zone -nsec3" flag (plus -nsec3-salt/-nsec3-opt-out) genuinely
-      changes what the server ends up serving for a real NXDOMAIN query -- NSEC3, with the
-      Opt-Out flag set, and no plain NSEC alongside it; an ordinary invocation with no
-      NSEC-related flags at all defaults to NSEC3 the same way; -nsec3=false is a working
-      fallback back to plain NSEC, with no NSEC3 alongside it.
+      cmd/sazuctl's "publish-zone -denial-of-existence nsec3" flag (plus
+      -nsec3-salt/-nsec3-opt-out) genuinely changes what the server ends up serving for a
+      real NXDOMAIN query -- NSEC3, with the Opt-Out flag set, and no plain NSEC alongside
+      it; an ordinary invocation with no NSEC-related flags at all defaults to NSEC3 the
+      same way; -denial-of-existence nsec is a working fallback back to plain NSEC, with no
+      NSEC3 alongside it.
     functions: |-
       TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC, TestE2EPushZoneDefaultServesNSEC3,
       TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC (cmd/sazuctl/e2e_test.go)

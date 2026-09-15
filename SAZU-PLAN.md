@@ -275,12 +275,23 @@ for a manually verified real-binary walkthrough.
   a zone with its own delegations would need logic this package doesn't
   implement.
 
-  `sazuctl publish-zone`'s `-nsec3` flag has since flipped from opt-in
-  (default false) to opt-out (default true): NSEC3 -- with its
-  additional zone-walking privacy property and no real downside for the
-  zone sizes this protocol targets -- is now what a plain `publish-zone`
-  invocation with no NSEC-related flags at all produces, and `-nsec3=false`
-  is the explicit fallback to plain NSEC. Nothing at the protocol or
+  `sazuctl publish-zone`'s separate `-nsec3` boolean (default false) has
+  since been replaced by a single `-denial-of-existence nsec3|nsec` flag,
+  defaulting to `nsec3`: NSEC3 -- with its additional zone-walking
+  privacy property and no real downside for the zone sizes this protocol
+  targets -- is now what a plain `publish-zone` invocation with no
+  NSEC-related flags at all produces, and `-denial-of-existence nsec` is
+  the explicit fallback to plain NSEC. `-nsec3-iterations`/`-nsec3-salt`/
+  `-nsec3-opt-out` are unchanged, still meaningful only under
+  `-denial-of-existence=nsec3`. A single flag naming the choice directly,
+  rather than a boolean whose off-state silently meant "plain NSEC," was
+  picked specifically because "off" stops reading as a real answer once
+  a third value (a proof-free `none`) becomes conceivable -- not
+  implemented, and deliberately left out: every full push always
+  computes one proof or the other today (`push.go`), and skipping it
+  entirely would produce bogus negative answers for a validating
+  resolver against a zone that, by this protocol's own design, always
+  carries a DNSKEY and a registrar DS. Nothing at the protocol or
   server level changed: the server still just stores and serves whichever
   chain a given push carried, same as before -- only the CLI's own
   default choice moved.

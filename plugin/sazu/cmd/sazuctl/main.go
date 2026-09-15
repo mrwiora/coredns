@@ -186,7 +186,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sazuctl ds -zone <zone> -key <path> [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-ttl 300] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl publish-trust -zone <zone> -key <path> -zsk-key <path> [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-nsec3=false] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-denial-of-existence nsec3|nsec] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl contact -zone <zone> -key <path> [-address mailto:you@example.org]... [-clear] [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
@@ -195,7 +195,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "-key-passphrase-file encrypts/decrypts the key file at rest (§10.8); omit it for a plain BIND-format key file (the default).")
 	fmt.Fprintln(os.Stderr, "-target accepts an http(s):// URL to push over §7.3's HTTPS carrier instead of TCP; -json then sends a JSON wire envelope instead of raw bytes.")
 	fmt.Fprintln(os.Stderr, "TCP is the default and always used for push/publish-trust/publish-zone/rotate-key -role ksk (a compliant server refuses those over UDP regardless of size); -udp, where offered, opts other pushes back into UDP, falling back to TCP with a warning if the push is too large for one safe datagram.")
-	fmt.Fprintln(os.Stderr, "-nsec3 (publish-zone) is on by default, using RFC 5155 NSEC3 instead of plain NSEC for authenticated denial of existence, additionally hiding the zone's name set from enumeration; pass -nsec3=false to fall back to plain NSEC instead. -nsec3-iterations and -nsec3-salt (hex, e.g. AABBCCDD) default to RFC 9276's current guidance (0, none) if omitted, and -nsec3-opt-out sets the Opt-Out flag; all three are ignored when falling back to plain NSEC.")
+	fmt.Fprintln(os.Stderr, "-denial-of-existence (publish-zone) picks the authenticated denial-of-existence proof for this push: nsec3 (the default) additionally hides the zone's name set from enumeration; nsec falls back to plain RFC 4034 NSEC. -nsec3-iterations and -nsec3-salt (hex, e.g. AABBCCDD) default to RFC 9276's current guidance (0, none) if omitted, and -nsec3-opt-out sets the Opt-Out flag; all three are ignored under -denial-of-existence=nsec.")
 	fmt.Fprintln(os.Stderr, "-zonefile (publish-zone) accepts a YAML zone definition (.yaml/.yml) as a drop-in alternative to a raw zone file -- see 'sazuctl init-zone' to create a starter one.")
 	fmt.Fprintln(os.Stderr, "A zone's KSK and ZSK are generated together, once, by 'sazuctl publish-trust': the KSK anchors the chain of trust at your registrar (see 'sazuctl ds') and is never needed again except for a future rollover; the ZSK it registers alongside it authenticates and signs every routine 'sazuctl publish-zone' push from then on. See keys.go's KeyRole doc comment (plugin/sazu) for the reasoning.")
 	fmt.Fprintln(os.Stderr, "There is no partial/differential update command: publish-zone's zone file is the zone's complete, authoritative content, and every change -- however small -- is a fresh full push of the whole thing. See plugin/sazu/README.md's \"Considered approaches for differential updates\" for why.")
@@ -646,17 +646,20 @@ func runPublishZone(args []string) error {
 		"SOA serial you last saw published for this zone, to guard against a stale push (RFC 2136 §2.4.2). Omit (0) if this is the zone's first content push.")
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
-	useNSEC3 := fs.Bool("nsec3", true, "use RFC 5155 NSEC3 instead of plain NSEC for authenticated denial of existence (default; pass -nsec3=false to fall back to plain NSEC)")
-	nsec3Iterations := fs.Uint("nsec3-iterations", 0, "NSEC3 hash iterations (RFC 9276: 0 is current guidance; ignored if -nsec3=false)")
-	nsec3Salt := fs.String("nsec3-salt", "", "NSEC3 salt, hex-encoded (RFC 9276: none is current guidance; ignored if -nsec3=false)")
-	nsec3OptOut := fs.Bool("nsec3-opt-out", false, "set the NSEC3 Opt-Out flag (ignored if -nsec3=false)")
+	denialOfExistence := fs.String("denial-of-existence", "nsec3", "authenticated denial-of-existence proof to use for this push: nsec3 (default) or nsec")
+	nsec3Iterations := fs.Uint("nsec3-iterations", 0, "NSEC3 hash iterations (RFC 9276: 0 is current guidance; ignored unless -denial-of-existence=nsec3)")
+	nsec3Salt := fs.String("nsec3-salt", "", "NSEC3 salt, hex-encoded (RFC 9276: none is current guidance; ignored unless -denial-of-existence=nsec3)")
+	nsec3OptOut := fs.Bool("nsec3-opt-out", false, "set the NSEC3 Opt-Out flag (ignored unless -denial-of-existence=nsec3)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *zone == "" || *zskPath == "" || *zoneFile == "" {
 		return fmt.Errorf("-zone, -zsk-key, and -zonefile are required")
 	}
-	if _, err := hex.DecodeString(*nsec3Salt); *useNSEC3 && err != nil {
+	if *denialOfExistence != "nsec3" && *denialOfExistence != "nsec" {
+		return fmt.Errorf("-denial-of-existence must be nsec3 or nsec, got %q", *denialOfExistence)
+	}
+	if _, err := hex.DecodeString(*nsec3Salt); *denialOfExistence == "nsec3" && err != nil {
 		return fmt.Errorf("-nsec3-salt must be hex-encoded: %w", err)
 	}
 	zskPassphrase, err := readPassphraseFile(*zskPassphraseFile)
@@ -683,10 +686,11 @@ func runPublishZone(args []string) error {
 		previousSOA = &prev
 	}
 	var m *dns.Msg
-	if *useNSEC3 {
+	switch *denialOfExistence {
+	case "nsec3":
 		opts := sazu.NSEC3Options{Iterations: uint16(*nsec3Iterations), Salt: *nsec3Salt, OptOut: *nsec3OptOut}
 		m, err = sazu.BuildContentPushNSEC3(*zone, soa, rrs, zsk, zskPriv, previousSOA, opts)
-	} else {
+	case "nsec":
 		m, err = sazu.BuildContentPush(*zone, soa, rrs, zsk, zskPriv, previousSOA)
 	}
 	if err != nil {

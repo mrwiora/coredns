@@ -161,3 +161,21 @@ func TestChooseNetworkAllowUDPFallsBackToTCPWithWarningWhenTooLarge(t *testing.T
 		t.Fatalf("expected the warning to mention TCP and the actual size, got %q", warn)
 	}
 }
+
+// TestRunPublishZoneRejectsUnknownDenialOfExistenceValue proves an
+// unrecognized -denial-of-existence value is rejected up front, before
+// runPublishZone ever tries to load a key or zone file -- nsec3 and nsec
+// are the only two authenticated denial-of-existence proofs this package
+// knows how to build (see BuildContentPushNSEC3/BuildContentPush).
+func TestRunPublishZoneRejectsUnknownDenialOfExistenceValue(t *testing.T) {
+	err := runPublishZone([]string{
+		"-zone", "example.org.", "-zsk-key", "/nonexistent", "-zonefile", "/nonexistent",
+		"-denial-of-existence", "nsec5",
+	})
+	if err == nil {
+		t.Fatal("expected an error for an unrecognized -denial-of-existence value")
+	}
+	if !strings.Contains(err.Error(), "-denial-of-existence") {
+		t.Fatalf("expected the error to name -denial-of-existence, got %q", err)
+	}
+}
