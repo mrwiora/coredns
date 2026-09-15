@@ -469,7 +469,7 @@ pushes alike.
   changes key state (`publish-trust`, `add-zsk`, `retire-zsk`,
   `rotate-key`), defaulting to the design doc's starting numbers (5 and
   50) and overridable per-instance via the `rate_limit FULL_PER_DAY
-  DIFFERENTIAL_PER_DAY` Corefile directive. `ratelimit.go`'s
+  KEY_MANAGEMENT_PER_DAY` Corefile directive. `ratelimit.go`'s
   `RateLimiter` classifies a push as full-zone if it carries a real apex
   SOA (`containsAPEXSOA` -- true only of `publish-zone`, the only command
   that ever changes ordinary content, and always a complete replacement
@@ -760,12 +760,30 @@ pushes alike.
   justify: independent per-instance authorized-pusher identities for
   HA/multi-signer deployments (a genuinely different, authorization-not-
   DNSSEC-role problem -- see the KSK/ZSK design discussion this item
-  grew out of for why it shouldn't be conflated with this one), and a
-  `sazu-watchd` check for a ZSK's continued presence in a zone's served
-  DNSKEY RRset (WATCH's chain-of-trust re-check already covers the KSK,
-  which is the thing that actually breaks silently; a ZSK-presence check
-  would need new live-query infrastructure `sazu-watchd` doesn't have
-  today).
+  grew out of for why it shouldn't be conflated with this one).
+
+  A `sazu-watchd` check for a ZSK's continued presence in a zone's
+  served DNSKEY RRset -- named here as deferred at the time -- was later
+  built: `cmd/sazu_watchd/dnskey.go`'s `liveDNSKEYFetcher` queries a
+  zone's own current authoritative servers directly for its DNSKEY
+  RRset (an ordinary, ChainValidator-independent query -- no need for
+  the full root-to-parent walk that check does, since this isn't
+  re-establishing trust, just confirming a live answer matches what
+  `LoadZoneKeys` says should be registered), and `checkOnce` alerts on
+  a transition the same debounced way the chain-of-trust check already
+  does. Worth being precise about what this actually catches, since the
+  ZSK is never registrar-anchored (see keys.go's `KeyRole` doc
+  comment): unlike the chain-of-trust check, which watches for drift at
+  an external system entirely outside this server's control, a ZSK
+  never leaves this server's own database and served content, so this
+  is a low-cost canary against this server's own bugs or a corrupted
+  database, not a routine external-drift concern the way the KSK check
+  is. Also worth noting: the original justification for this item ("a
+  ZSK accidentally dropped by a customer's own full-zone re-push")
+  no longer applies to a normal push at all -- `publish-zone` never
+  carries a DNSKEY, and `ZoneData.PurgeContent` explicitly excludes
+  DNSKEY from ever being purged on a content push -- so what remains
+  is worth having, but is a narrower guarantee than originally framed.
 
 - **Key custody hardening (§10.8), client-side.** `sazuctl` writes a plain
   BIND-format key file by default, unchanged -- but every subcommand that
@@ -1022,7 +1040,7 @@ pushes alike.
   chain-of-trust walk for one zone does *not* delay an unrelated zone's
   ordinary push (a fake, delay-injecting `ChainValidator` stands in for
   the real network round trip), and one firing 20 concurrent
-  differential pushes at the *same* already-onboarded zone and
+  partial pushes at the *same* already-onboarded zone and
   confirming every one of them actually applied -- proving the switch to
   striped locking didn't quietly trade throughput for a lost-update race
   the original single mutex prevented by brute force. The full
@@ -1080,9 +1098,13 @@ pushes alike.
 
 Every item the architectural review that led to this document identified
 -- CoreDNS-plugin, client-side, and the one separate-server item -- is
-implemented; see **Done**, above. Two items were identified but
-deliberately not implemented in the optional-KSK/ZSK-split pass, each
-noted there with its own reasoning:
+implemented; see **Done**, above. One item was identified but
+deliberately not implemented in the optional-KSK/ZSK-split pass, noted
+there with its own reasoning (a `sazu-watchd` check for a ZSK's
+continued presence in a zone's served DNSKEY RRset, the other item
+originally listed here, was later built -- see **Done**, above, for
+what it actually catches and why that turned out narrower than first
+framed):
 
 - Independent per-instance authorized-pusher identities for HA/
   multi-signer deployments (each signer instance holding its own key,
@@ -1090,13 +1112,6 @@ noted there with its own reasoning:
   materially different problem (authorization, not a DNSSEC key role)
   from the KSK/ZSK split, worth its own pass rather than folding into
   this one.
-- A `sazu-watchd` check for a ZSK's continued presence in a zone's
-  served DNSKEY RRset -- WATCH's existing chain-of-trust re-check
-  already covers the KSK (the thing that actually breaks silently); a
-  ZSK-presence check would need new live-query infrastructure the daemon
-  doesn't have today, for a failure mode (a customer's own full-zone
-  re-push accidentally dropping a ZSK) that is far lower-stakes than
-  what the KSK check already guards.
 
 Six further, smaller gaps were found (not by design review this time,
 but by the Verification Dossier's own new cross-validation -- see

@@ -59,13 +59,28 @@ func (n *Notifier) Send(alert Alert) []error {
 // react.
 type webhookPayload struct {
 	Zone      string `json:"zone"`
+	Kind      string `json:"kind"`
 	Recovered bool   `json:"recovered"`
 	Error     string `json:"error,omitempty"`
+	KeyTag    uint16 `json:"key_tag,omitempty"`
 	At        string `json:"at"`
 }
 
+func alertKindName(k AlertKind) string {
+	if k == AlertZSKMissing {
+		return "zsk_missing"
+	}
+	return "chain_of_trust"
+}
+
 func (n *Notifier) sendWebhook(url string, alert Alert) error {
-	payload := webhookPayload{Zone: alert.Zone, Recovered: alert.Recovered, At: time.Now().UTC().Format(time.RFC3339)}
+	payload := webhookPayload{
+		Zone:      alert.Zone,
+		Kind:      alertKindName(alert.Kind),
+		Recovered: alert.Recovered,
+		KeyTag:    alert.KeyTag,
+		At:        time.Now().UTC().Format(time.RFC3339),
+	}
 	if alert.Err != nil {
 		payload.Error = alert.Err.Error()
 	}
@@ -96,13 +111,27 @@ func (n *Notifier) sendEmail(to string, alert Alert) error {
 		return fmt.Errorf("invalid email address: %w", err)
 	}
 
-	subject := fmt.Sprintf("SAZU: delegation change detected for %s", alert.Zone)
-	body := fmt.Sprintf("Zone: %s\n", alert.Zone)
-	if alert.Recovered {
-		subject = fmt.Sprintf("SAZU: %s delegation check recovered", alert.Zone)
-		body += "Chain-of-trust validation is passing again.\n"
-	} else {
-		body += fmt.Sprintf("Chain-of-trust validation failed: %v\n", alert.Err)
+	var subject, body string
+	body = fmt.Sprintf("Zone: %s\n", alert.Zone)
+	switch alert.Kind {
+	case AlertZSKMissing:
+		if alert.Recovered {
+			subject = fmt.Sprintf("SAZU: %s ZSK key tag %d is being served again", alert.Zone, alert.KeyTag)
+			body += fmt.Sprintf("ZSK key tag %d is present in the served DNSKEY RRset again.\n", alert.KeyTag)
+		} else {
+			subject = fmt.Sprintf("SAZU: %s is missing a registered ZSK", alert.Zone)
+			body += fmt.Sprintf("Registered ZSK key tag %d is missing from the zone's served DNSKEY RRset.\n"+
+				"Routine pushes authenticated by this key will be rejected until it's restored\n"+
+				"or replaced (sazuctl add-zsk / retire-zsk).\n", alert.KeyTag)
+		}
+	default:
+		if alert.Recovered {
+			subject = fmt.Sprintf("SAZU: %s delegation check recovered", alert.Zone)
+			body += "Chain-of-trust validation is passing again.\n"
+		} else {
+			subject = fmt.Sprintf("SAZU: delegation change detected for %s", alert.Zone)
+			body += fmt.Sprintf("Chain-of-trust validation failed: %v\n", alert.Err)
+		}
 	}
 	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", n.SMTPFrom, to, subject, body)
 

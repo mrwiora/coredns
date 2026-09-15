@@ -149,9 +149,9 @@ func TestParseSazuRateLimitDefaultsAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSazu: %v", err)
 	}
-	if cfg.fullPushesPerDay != DefaultFullPushesPerDay || cfg.differentialPushesPerDay != DefaultDifferentialPushesPerDay {
+	if cfg.fullPushesPerDay != DefaultFullPushesPerDay || cfg.keyManagementPushesPerDay != DefaultKeyManagementPushesPerDay {
 		t.Fatalf("expected default quotas (%d, %d) when rate_limit is omitted, got (%d, %d)",
-			DefaultFullPushesPerDay, DefaultDifferentialPushesPerDay, cfg.fullPushesPerDay, cfg.differentialPushesPerDay)
+			DefaultFullPushesPerDay, DefaultKeyManagementPushesPerDay, cfg.fullPushesPerDay, cfg.keyManagementPushesPerDay)
 	}
 
 	c = caddy.NewTestController("dns", `sazu example.org. {
@@ -161,8 +161,8 @@ func TestParseSazuRateLimitDefaultsAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseSazu: %v", err)
 	}
-	if cfg.fullPushesPerDay != 10 || cfg.differentialPushesPerDay != 100 {
-		t.Fatalf("expected overridden quotas (10, 100), got (%d, %d)", cfg.fullPushesPerDay, cfg.differentialPushesPerDay)
+	if cfg.fullPushesPerDay != 10 || cfg.keyManagementPushesPerDay != 100 {
+		t.Fatalf("expected overridden quotas (10, 100), got (%d, %d)", cfg.fullPushesPerDay, cfg.keyManagementPushesPerDay)
 	}
 }
 

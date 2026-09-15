@@ -42,7 +42,7 @@ func setup(c *caddy.Controller) error {
 		Validator:                   NewValidator(),
 		Capture:                     capture,
 		InsecureSkipChainValidation: cfg.insecureSkipChainValidation,
-		RateLimiter:                 NewRateLimiter(cfg.fullPushesPerDay, cfg.differentialPushesPerDay),
+		RateLimiter:                 NewRateLimiter(cfg.fullPushesPerDay, cfg.keyManagementPushesPerDay),
 		IPRateLimiter:               NewIPRateLimiter(cfg.ipUpdatesPerMinute),
 	}
 
@@ -80,15 +80,15 @@ type sazuConfig struct {
 	insecureSkipChainValidation bool
 	dbPath                      string
 	fullPushesPerDay            int
-	differentialPushesPerDay    int
+	keyManagementPushesPerDay   int
 	ipUpdatesPerMinute          int
 }
 
 func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 	cfg := sazuConfig{
-		fullPushesPerDay:         DefaultFullPushesPerDay,
-		differentialPushesPerDay: DefaultDifferentialPushesPerDay,
-		ipUpdatesPerMinute:       DefaultIPUpdatesPerMinute,
+		fullPushesPerDay:          DefaultFullPushesPerDay,
+		keyManagementPushesPerDay: DefaultKeyManagementPushesPerDay,
+		ipUpdatesPerMinute:        DefaultIPUpdatesPerMinute,
 	}
 	for c.Next() {
 		args := c.RemainingArgs()
@@ -112,7 +112,7 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 				}
 				cfg.dbPath = args[0]
 			case "rate_limit":
-				// §12: <full-pushes-per-day> <differential-pushes-per-day>,
+				// §12: <full-pushes-per-day> <key-management-pushes-per-day>,
 				// both over a rolling 24h window -- see ratelimit.go.
 				// Defaults (5/50) apply if this directive is omitted
 				// entirely.
@@ -124,12 +124,12 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 				if err != nil || full < 0 {
 					return sazuConfig{}, c.Errf("rate_limit: invalid full-pushes-per-day %q", args[0])
 				}
-				diff, err := strconv.Atoi(args[1])
-				if err != nil || diff < 0 {
-					return sazuConfig{}, c.Errf("rate_limit: invalid differential-pushes-per-day %q", args[1])
+				keyMgmt, err := strconv.Atoi(args[1])
+				if err != nil || keyMgmt < 0 {
+					return sazuConfig{}, c.Errf("rate_limit: invalid key-management-pushes-per-day %q", args[1])
 				}
 				cfg.fullPushesPerDay = full
-				cfg.differentialPushesPerDay = diff
+				cfg.keyManagementPushesPerDay = keyMgmt
 			case "ip_rate_limit":
 				// §12: <updates-per-minute>, the global, per-source-IP
 				// flood/scan throttle -- see ipratelimit.go. Default (30)

@@ -60,6 +60,7 @@ func main() {
 	defer db.Close()
 
 	validator := sazu.NewValidator()
+	dnskeys := liveDNSKEYFetcher{Timeout: 5 * time.Second}
 	notifier := &Notifier{
 		SMTPAddr:     *smtpAddr,
 		SMTPFrom:     *smtpFrom,
@@ -70,7 +71,7 @@ func main() {
 	state := make(map[string]*zoneState)
 
 	for {
-		runOnce(db, validator, notifier, state)
+		runOnce(db, validator, dnskeys, notifier, state)
 		if *once {
 			return
 		}
@@ -82,17 +83,26 @@ func main() {
 // returns, logging along the way -- separated from checkOnce itself so
 // the state-transition decision logic stays unit-testable without any
 // real network or SMTP/HTTP I/O (see watch_test.go).
-func runOnce(db *sazu.DB, validator sazu.ChainValidator, notifier *Notifier, state map[string]*zoneState) {
-	alerts, err := checkOnce(db, validator, state)
+func runOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher, notifier *Notifier, state map[string]*zoneState) {
+	alerts, err := checkOnce(db, validator, dnskeys, state)
 	if err != nil {
 		log.Printf("sazu-watchd: check pass failed: %v", err)
 		return
 	}
 	for _, alert := range alerts {
-		if alert.Recovered {
-			log.Printf("sazu-watchd: %s: chain-of-trust check recovered", alert.Zone)
-		} else {
-			log.Printf("sazu-watchd: %s: chain-of-trust check failed: %v", alert.Zone, alert.Err)
+		switch alert.Kind {
+		case AlertZSKMissing:
+			if alert.Recovered {
+				log.Printf("sazu-watchd: %s: ZSK key tag %d is being served again", alert.Zone, alert.KeyTag)
+			} else {
+				log.Printf("sazu-watchd: %s: registered ZSK key tag %d is missing from the served DNSKEY RRset", alert.Zone, alert.KeyTag)
+			}
+		default:
+			if alert.Recovered {
+				log.Printf("sazu-watchd: %s: chain-of-trust check recovered", alert.Zone)
+			} else {
+				log.Printf("sazu-watchd: %s: chain-of-trust check failed: %v", alert.Zone, alert.Err)
+			}
 		}
 		if len(alert.Addresses) == 0 {
 			log.Printf("sazu-watchd: %s: no contact registered, nothing to notify (see `sazuctl contact`)", alert.Zone)

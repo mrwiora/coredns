@@ -158,7 +158,7 @@ func TestConcurrentUpdatesToDifferentZonesDoNotSerialize(t *testing.T) {
 	time.Sleep(slowDelay / 4)
 
 	// While slow.example.'s onboarding is still in flight, push an
-	// ordinary differential update to the already-onboarded
+	// ordinary partial update to the already-onboarded
 	// fast.example. -- this must complete quickly, not wait for
 	// slow.example.'s chain walk to finish.
 	now = time.Now()
@@ -201,7 +201,7 @@ func TestConcurrentUpdatesToDifferentZonesDoNotSerialize(t *testing.T) {
 // TestConcurrentUpdatesToSameZoneStillSerializeCorrectly proves the
 // other half of the property that matters: switching from one global
 // lock to per-zone stripes must not weaken correctness for updates
-// against the *same* zone. A burst of concurrent differential pushes,
+// against the *same* zone. A burst of concurrent partial pushes,
 // each adding one distinct record, must all still apply -- no update
 // silently lost to a race the old single mutex would have prevented by
 // brute force.

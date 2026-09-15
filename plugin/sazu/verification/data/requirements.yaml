@@ -301,7 +301,7 @@ areas:
     source: RFC 2308 §3
   - id: CONTENT-09
     text: |-
-      A partial (differential) push carrying no valid patch of its own to an existing
+      A partial push carrying no valid patch of its own to an existing
       NSEC/NSEC3 chain SHALL invalidate that chain until the next full push recomputes it,
       rather than serve a proof that may now be incorrect.
     source: Engineering decision
@@ -454,7 +454,7 @@ areas:
     source: §12
   - id: SEC-03
     text: |-
-      A per-zone daily quota on full-zone and differential pushes SHALL be enforced
+      A per-zone daily quota on full-zone and key-management pushes SHALL be enforced
       independently over a rolling 24-hour window; an excess SHALL be refused (status <code
       class="inline">ERR_QUOTA_EXCEEDED</code>).
     source: §12
@@ -495,7 +495,7 @@ areas:
   - id: OPS-05
     text: |-
       Every configurable quota/limit SHALL default to a documented value when unset (5
-      full/day, 50 differential/day, 30 updates/minute per address).
+      full/day, 50 key-management/day, 30 updates/minute per address).
     source: §12
 - id: watch
   code: WATCH
@@ -564,8 +564,9 @@ areas:
   - id: CLIENT-01
     text: |-
       The client SHALL provide subcommands to generate a key, print a registrar-ready DS
-      record, push a full zone, push a differential update, and register/clear a zone's
-      contact address.
+      record, publish a zone's complete content, manage KSK/ZSK key state (first-contact
+      trust establishment, ZSK registration/retirement, key rotation), and register/clear a
+      zone's contact address.
     source: §10 (client tooling)
   - id: CLIENT-02
     text: |-

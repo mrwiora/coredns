@@ -41,7 +41,7 @@ from the content it has accepted.
 sazu ZONES... {
     insecure_skip_chain_validation
     db PATH
-    rate_limit FULL_PER_DAY DIFFERENTIAL_PER_DAY
+    rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY
     ip_rate_limit UPDATES_PER_MINUTE
 }
 ```
@@ -66,12 +66,12 @@ sazu ZONES... {
   forget them. **Omit this and everything is purely in-memory** — lost on
   every restart, which is fine for a quick one-off test but not for
   anything you want to survive a redeploy.
-* `rate_limit FULL_PER_DAY DIFFERENTIAL_PER_DAY` overrides §12's per-zone
+* `rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY` overrides §12's per-zone
   push quotas, each enforced over a rolling 24h window: FULL_PER_DAY for a
   push that actually changes zone content (`publish-zone` — always a
   complete replacement; see "Considered approaches for differential
   updates" below for why there's no smaller alternative) and
-  DIFFERENTIAL_PER_DAY for a push that only changes key state
+  KEY_MANAGEMENT_PER_DAY for a push that only changes key state
   (`publish-trust`, `add-zsk`, `retire-zsk`, `rotate-key`), which costs
   this server far less to process, tracked independently.
   Defaults to `5 50` if omitted. An exceeded quota is refused with the
@@ -313,13 +313,31 @@ expands to before pushing it).
 ### sazu-watchd: §11 delegation-change monitoring
 
 `plugin/sazu/cmd/sazu_watchd` is a separate, standalone daemon -- never runs
-inside CoreDNS -- that periodically re-checks every onboarded zone's chain
-of trust (the same "does a DS matching this zone's pinned key exist at the
-parent" check first contact and a key rollover already perform) and alerts
-the zone's registered contact (`sazuctl contact`) when that check's outcome
-changes: a pinned key's DS silently disappearing or changing at the
-registrar, without anyone re-pushing anything to this server, is exactly
-the kind of drift nothing else here would ever notice.
+inside CoreDNS -- that periodically runs two independent checks per
+onboarded zone and alerts the zone's registered contact (`sazuctl contact`)
+when either one's outcome changes:
+
+* **Chain of trust** -- the same "does a DS matching this zone's pinned
+  KSK exist at the parent" check first contact and a key rollover already
+  perform. A pinned KSK's DS silently disappearing or changing at the
+  registrar, without anyone re-pushing anything to this server, is exactly
+  the kind of drift nothing else here would ever notice -- the registrar
+  is outside this system entirely, so nothing short of asking it
+  periodically can catch a change made there.
+* **ZSK presence** -- for each zone with at least one registered ZSK, an
+  ordinary DNS query confirms it's still actually present in what the zone
+  is currently serving, compared against what this server's own database
+  says should be registered. Unlike the chain-of-trust check, this isn't
+  watching for drift at some external system (a ZSK is never registrar-
+  anchored, never leaves this server's own database and served content;
+  see keys.go's `KeyRole` doc comment) -- it's a low-cost canary against
+  this server's own bugs or a corrupted database, not a routine concern.
+
+Both checks share the same debounce discipline: a single failing/missing
+pass doesn't alert on its own (two consecutive checks, 10 minutes apart at
+the default interval, do), and a transient failure to even reach a zone's
+own servers for the ZSK check is treated as inconclusive, never as
+evidence the key was dropped.
 
 ```
 go build -o sazu-watchd ./plugin/sazu/cmd/sazu_watchd
@@ -780,7 +798,3 @@ a real-world test isn't mistaken for a production trial run:
   authorizing several independent signer machines to push under their
   own separate identities for HA — a real but different problem,
   deliberately not addressed by it; see SAZU-PLAN.md's KSK/ZSK section.
-* **`sazu-watchd` doesn't check a ZSK's continued presence** in a zone's
-  served DNSKEY RRset — only the KSK's chain of trust, which is the
-  thing that actually breaks silently. A ZSK accidentally dropped by a
-  customer's own full-zone re-push goes unremarked by the watch daemon.

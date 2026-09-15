@@ -720,13 +720,13 @@ func TestOnboardWithWeakAlgorithmKeyIsRejected(t *testing.T) {
 	}
 }
 
-// TestRateLimiterExceededRejectsFurtherDifferentialPushes proves §12's
-// quota is actually wired into serveUpdate: once a zone's differential
+// TestRateLimiterExceededRejectsFurtherKeyManagementPushes proves §12's
+// quota is actually wired into serveUpdate: once a zone's key-management
 // (non-full-content) push quota for the rolling window is used up, a
 // further otherwise perfectly valid non-full-content update is refused
 // with ERR_QUOTA_EXCEEDED and leaves the zone's content untouched, while
 // the full-zone quota (tracked independently) is unaffected.
-func TestRateLimiterExceededRejectsFurtherDifferentialPushes(t *testing.T) {
+func TestRateLimiterExceededRejectsFurtherKeyManagementPushes(t *testing.T) {
 	s := newTestSazu("example.org.")
 	s.RateLimiter = NewRateLimiter(DefaultFullPushesPerDay, 1)
 	addr := serveThroughRealServer(t, s)

@@ -200,7 +200,7 @@ areas:
     verifies: KEY-02
   - id: TC-KEY-03
     objective: |-
-      An ordinary differential push after onboarding succeeds against the pinned key.
+      An ordinary partial push after onboarding succeeds against the pinned key.
     functions: TestOrdinaryPartialPushAfterOnboarding
     verifies: KEY-01
   - id: TC-KEY-04
@@ -647,7 +647,7 @@ areas:
       CARRIER-02, CARRIER-03, CARRIER-04, CARRIER-05, AUTH-03
   - id: TC-CARRIER-07
     objective: |-
-      The plugin onboards a zone and pushes a differential update over a real HTTPS round
+      The plugin onboards a zone and pushes a partial update over a real HTTPS round
       trip, both as raw bytes and as the JSON envelope.
     functions: |-
       TestOnboardOverHTTPSRawWireBytes, TestOnboardOverHTTPSJSONWireEnvelope,
@@ -685,20 +685,20 @@ areas:
     verifies: SEC-01
   - id: TC-SEC-03
     objective: |-
-      The per-zone quota enforces its limit, tracks full/differential and distinct zones
+      The per-zone quota enforces its limit, tracks full/key-management and distinct zones
       independently, slides its window, and is case-insensitive on zone name.
     functions: |-
       TestRateLimiterAllowsUpToTheLimitThenRefuses,
-      TestRateLimiterTracksFullAndDifferentialIndependently,
+      TestRateLimiterTracksFullAndKeyManagementIndependently,
       TestRateLimiterTracksZonesIndependently, TestRateLimiterSlidesTheWindow,
       TestRateLimiterIsCaseInsensitiveOnZoneName
     verifies: SEC-03
   - id: TC-SEC-04
     objective: |-
-      An exhausted per-zone quota rejects a further differential push end to end and never
+      An exhausted per-zone quota rejects a further key-management push end to end and never
       applies its content.
     functions: |-
-      TestRateLimiterExceededRejectsFurtherDifferentialPushes
+      TestRateLimiterExceededRejectsFurtherKeyManagementPushes
     verifies: SEC-03
   - id: TC-SEC-05
     objective: |-
@@ -969,7 +969,7 @@ areas:
   - id: TC-NFR-03
     objective: |-
       Switching from one global lock to per-zone stripes does not weaken correctness for the
-      *same* zone: 20 concurrent differential pushes to one already-onboarded zone all still
+      *same* zone: 20 concurrent partial pushes to one already-onboarded zone all still
       apply, with none silently lost to a race.
     functions: |-
       TestConcurrentUpdatesToSameZoneStillSerializeCorrectly

@@ -17,19 +17,19 @@ func TestRateLimiterAllowsUpToTheLimitThenRefuses(t *testing.T) {
 	}
 }
 
-func TestRateLimiterTracksFullAndDifferentialIndependently(t *testing.T) {
+func TestRateLimiterTracksFullAndKeyManagementIndependently(t *testing.T) {
 	r := NewRateLimiter(1, 1)
 	if !r.Allow("example.org.", true) {
 		t.Fatalf("expected the first full push within quota")
 	}
 	if !r.Allow("example.org.", false) {
-		t.Fatalf("expected a differential push to have its own, independent quota")
+		t.Fatalf("expected a key-management push to have its own, independent quota")
 	}
 	if r.Allow("example.org.", true) {
 		t.Fatalf("expected the full quota to already be exhausted")
 	}
 	if r.Allow("example.org.", false) {
-		t.Fatalf("expected the differential quota to already be exhausted")
+		t.Fatalf("expected the key-management quota to already be exhausted")
 	}
 }
 

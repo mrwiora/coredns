@@ -348,8 +348,11 @@ confirm at least one parent-published DS matches the candidate key.</td><td clas
 class="inline">ERR_NO_DS_PUBLISHED</code>) if the parent publishes no DS for the zone at
 all.</td><td class="src">§12</td></tr>    <tr><td class="reqid">CHAIN-05</td><td>First contact SHALL be refused (REFUSED, status <code
 class="inline">ERR_UNKNOWN_SIGNER</code>) if a DS is published but none matches the
-candidate key.</td><td class="src">§12</td></tr>    <tr><td class="reqid">CHAIN-06</td><td>A first-contact UPDATE that does not also establish a real SOA at the apex SHALL be
-rejected (FORMERR) without pinning any key.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CHAIN-07</td><td>The chain-of-trust check MAY be disabled per instance (<code
+candidate key.</td><td class="src">§12</td></tr>    <tr><td class="reqid">CHAIN-06</td><td>A first-contact UPDATE SHALL be accepted, and its candidate key pinned, whether or not
+it also establishes a real SOA at the apex: <code class="inline">sazuctl
+publish-trust</code> deliberately sends none, establishing the KSK/ZSK trust
+relationship as a step separate from any zone content, which a subsequent <code
+class="inline">publish-zone</code> push supplies.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CHAIN-07</td><td>The chain-of-trust check MAY be disabled per instance (<code
 class="inline">insecure_skip_chain_validation</code>) for non-production testing only.</td><td class="src">Operational</td></tr>  </table></div>
   <h3 class="subhead" id="req-key"><span class="secno">3.3</span> KEY &mdash; Key pinning &amp; rollover</h3>
   <div class="wrap"><table class="spec">
@@ -361,17 +364,20 @@ server SHALL attempt a KSK rollover by subjecting that candidate to the identica
 chain-of-trust check first contact requires (CHAIN-03..05).</td><td class="src">§10.4</td></tr>    <tr><td class="reqid">KEY-04</td><td>A KSK rollover UPDATE SHALL NOT be required to carry an apex SOA.</td><td class="src">§10.4</td></tr>    <tr><td class="reqid">KEY-05</td><td>On successful KSK rollover, the server SHALL replace the pinned KSK; the superseded KSK
 SHALL cease to authenticate further UPDATEs; any already-registered ZSK SHALL remain
 valid, unaffected by the rollover.</td><td class="src">§10.4</td></tr>    <tr><td class="reqid">KEY-06</td><td>Every onboarded zone SHALL have exactly one KSK, established at first contact and
-anchored to a parent DS record (CHAIN-03); a zone MAY additionally register zero or more
-optional ZSKs on top of it. The single-key model (one Ed25519 key doing both SIG(0)
-authentication and DNSSEC signing) remains fully supported as the default for a zone
-that never registers a ZSK.</td><td class="src">§9.1 (design decision, extended)</td></tr>    <tr><td class="reqid">KEY-07</td><td>A first-contact candidate key SHALL carry the SEP (KSK) flag; a candidate presented
+anchored to a parent DS record (CHAIN-03). <code class="inline">sazuctl
+publish-trust</code> SHALL always generate and present a ZSK together with the KSK at
+first contact, so a zone MAY additionally register further ZSKs on top of that first
+one. The single-key model (one Ed25519 key doing both SIG(0) authentication and DNSSEC
+signing) remains a valid state at the <code class="inline">KeyRegistry</code> level for
+a zone with no ZSK, but is no longer what any onboarding path <code
+class="inline">sazuctl</code> offers produces by default.</td><td class="src">§9.1 (design decision, extended)</td></tr>    <tr><td class="reqid">KEY-07</td><td>A first-contact candidate key SHALL carry the SEP (KSK) flag; a candidate presented
 without it SHALL be refused (REFUSED, status <code
 class="inline">ERR_FIRST_CONTACT_REQUIRES_KSK</code>) without pinning anything.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">KEY-08</td><td>A ZSK SHALL be registered via an ordinary, already-authenticated push that adds a
 non-SEP-flagged DNSKEY at the zone apex, checked against the same algorithm floor (ALGO)
 as any other candidate key, with no chain-of-trust network walk.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">KEY-09</td><td>A ZSK SHALL be retirable via an RFC 2136 §2.5.4 "delete one RR" DNSKEY op naming its key
 tag; an RFC 2136 §2.5.2 "delete RRset" op SHALL NOT be treated as ZSK retirement (it
 would remove the KSK too).</td><td class="src">RFC 2136 §2.5.2/§2.5.4 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-10</td><td>Content signed by any key currently valid for the zone — the KSK or any registered ZSK —
-SHALL verify under §4's Level-2 content-signature check.</td><td class="src">CONTENT-04/05 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-11</td><td>A ZSK MAY be granted the ability to authenticate transactions on its own, independent of
+SHALL verify under §4's mandatory content-signature check.</td><td class="src">CONTENT-04/05 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-11</td><td>A ZSK MAY be granted the ability to authenticate transactions on its own, independent of
 the KSK; every ZSK registered via an ordinary push SHALL default to this, since the
 DNSKEY wire format (RFC 4034 §2.1.1) has no reserved bit to request otherwise.</td><td class="src">RFC 4034 §2.1.1 &middot; Engineering decision</td></tr>  </table></div>
   <h3 class="subhead" id="req-algo"><span class="secno">3.4</span> ALGO &mdash; Minimum algorithm floor</h3>
@@ -386,15 +392,15 @@ chain-of-trust network activity for the candidate.</td><td class="src">Engineeri
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CONTENT-01</td><td>All five RFC 2136 §2.4 prerequisite forms SHALL be evaluated correctly, returning the
 §2.6 RCODE (NXRRSET/YXRRSET/NXDOMAIN/YXDOMAIN) on failure.</td><td class="src">RFC 2136 §2.4/§2.6</td></tr>    <tr><td class="reqid">CONTENT-02</td><td>All four RFC 2136 §2.5 update forms (add to RRset; delete RRset; delete all RRsets from
 name; delete one RR) SHALL be applied correctly.</td><td class="src">RFC 2136 §2.5</td></tr>    <tr><td class="reqid">CONTENT-03</td><td>A full-zone push MAY carry an RFC 2136 §2.4.2 SOA-serial staleness guard; a stale push
-SHALL be rejected (NXRRSET, status <code class="inline">ERR_STALE_SERIAL</code>).</td><td class="src">RFC 2136 §2.4.2 &middot; §12</td></tr>    <tr><td class="reqid">CONTENT-04</td><td>Under the opt-in content-verification level, an Add-shaped RRset with no covering,
-cryptographically valid RRSIG SHALL be rejected (NOTAUTH, status <code
-class="inline">ERR_SIG_INVALID</code>).</td><td class="src">§4 &middot; §12</td></tr>    <tr><td class="reqid">CONTENT-05</td><td>A covering RRSIG that is cryptographically valid but outside its validity window SHALL
+SHALL be rejected (NXRRSET, status <code class="inline">ERR_STALE_SERIAL</code>).</td><td class="src">RFC 2136 §2.4.2 &middot; §12</td></tr>    <tr><td class="reqid">CONTENT-04</td><td>Content-signature verification SHALL be mandatory on every update, with no way to
+disable it: an Add-shaped RRset with no covering, cryptographically valid RRSIG SHALL
+be rejected (NOTAUTH, status <code class="inline">ERR_SIG_INVALID</code>).</td><td class="src">§4 &middot; §12</td></tr>    <tr><td class="reqid">CONTENT-05</td><td>A covering RRSIG that is cryptographically valid but outside its validity window SHALL
 be reported distinctly (status <code class="inline">ERR_EXPIRED_SIGNATURE</code>) rather
 than as CONTENT-04's generic case.</td><td class="src">§12</td></tr>    <tr><td class="reqid">CONTENT-06</td><td>Every server-produced RRSIG SHALL carry an <code class="inline">Hdr.Ttl</code> equal to
 its covered RRset's TTL.</td><td class="src">RFC 4034 §3</td></tr>    <tr><td class="reqid">CONTENT-07</td><td>A full-zone push SHALL compute an RFC 4034/4035 NSEC chain covering every owner name,
 served as an authenticated denial-of-existence proof (closest-encloser/wildcard-slot for
 NXDOMAIN; direct NSEC for NODATA) when the querier sets the DO bit.</td><td class="src">RFC 4034/4035 §3.1.3</td></tr>    <tr><td class="reqid">CONTENT-08</td><td>Every negative response (NXDOMAIN or NODATA) SHALL carry the zone's SOA in the Authority
-section.</td><td class="src">RFC 2308 §3</td></tr>    <tr><td class="reqid">CONTENT-09</td><td>A partial (differential) push carrying no valid patch of its own to an existing
+section.</td><td class="src">RFC 2308 §3</td></tr>    <tr><td class="reqid">CONTENT-09</td><td>A partial push carrying no valid patch of its own to an existing
 NSEC/NSEC3 chain SHALL invalidate that chain until the next full push recomputes it,
 rather than serve a proof that may now be incorrect.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTENT-10</td><td>Signing, serving, and content verification SHALL be correct for arbitrary RR types with
 no type-specific special-casing (verified at minimum for A, AAAA, CNAME, MX, TXT, NS,
@@ -405,15 +411,16 @@ onboarded SHALL fall through to the next plugin rather than being swallowed.</td
 owner-name set from enumeration, as an opt-in alternative to plain NSEC (CONTENT-07);
 the closest-encloser/next-closer-name/wildcard-cover proof for NXDOMAIN, and the
 matching record for NODATA, SHALL be served when the querier sets the DO bit, exactly
-as for plain NSEC.</td><td class="src">RFC 5155 &middot; §7.2</td></tr>    <tr><td class="reqid">CONTENT-14</td><td>A partial (differential) push carrying a correctly-computed NSEC/NSEC3 chain patch,
-accompanied by an RFC 2136 §2.4.2 value-dependent prerequisite asserting the prior
-value of every neighbor record it touches, SHALL have that patch applied directly
-(without invalidating the rest of the chain) if every asserted prerequisite still
-holds, and SHALL be rejected outright, with the zone's actual current record attached
-for the first prerequisite that does not, otherwise.</td><td class="src">RFC 2136 &middot; §2.4.2 (engineering decision)</td></tr>    <tr><td class="reqid">CONTENT-15</td><td>A push that carries an apex DNSKEY but changes no other served content (a KSK/ZSK
+as for plain NSEC.</td><td class="src">RFC 5155 &middot; §7.2</td></tr>    <tr><td class="reqid">CONTENT-15</td><td>A push that carries an apex DNSKEY but changes no other served content (a KSK/ZSK
 rollover, or a ZSK registration/retirement) SHALL NOT invalidate an existing
-NSEC/NSEC3 chain -- only a push that actually changes zone content, with no valid
-chain patch of its own, SHALL.</td><td class="src">Engineering decision</td></tr>  </table></div>
+NSEC/NSEC3 chain, nor any other served content -- only a push that actually changes
+zone content SHALL.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTENT-16</td><td>The client's zone definition (YAML or BIND-format zone file) SHALL be the single
+source of truth for a zone's content: a content push (<code class="inline">sazuctl
+publish-zone</code>) SHALL always carry the zone's complete, authoritative content,
+and SHALL replace it entirely -- a record present in an earlier push but absent from
+a later one SHALL no longer be served afterward. There SHALL be no
+partial/differential content-update mechanism. Key-management records (DNSKEY) SHALL
+never be affected by a content push.</td><td class="src">Engineering decision</td></tr>  </table></div>
   <h3 class="subhead" id="req-contact"><span class="secno">3.6</span> CONTACT &mdash; Registration record</h3>
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CONTACT-01</td><td>A contact-address registration SHALL ride an ordinary authenticated UPDATE, addressed to
@@ -446,7 +453,7 @@ chain-of-trust network walk) SHALL be accepted only over a connection-oriented t
 (TCP, HTTPS, HTTP/3); an attempt over plain UDP SHALL be refused (status <code
 class="inline">ERR_TRANSPORT_NOT_ALLOWED</code>).</td><td class="src">Engineering decision (spoofing hardening)</td></tr>    <tr><td class="reqid">SEC-02</td><td>A global, per-source-address rate limit on UPDATE attempts SHALL be enforced independent
 of the target zone, checked before SIG(0) verification; an excess SHALL be refused
-(status <code class="inline">ERR_RATE_LIMITED</code>).</td><td class="src">§12</td></tr>    <tr><td class="reqid">SEC-03</td><td>A per-zone daily quota on full-zone and differential pushes SHALL be enforced
+(status <code class="inline">ERR_RATE_LIMITED</code>).</td><td class="src">§12</td></tr>    <tr><td class="reqid">SEC-03</td><td>A per-zone daily quota on full-zone and key-management pushes SHALL be enforced
 independently over a rolling 24-hour window; an excess SHALL be refused (status <code
 class="inline">ERR_QUOTA_EXCEEDED</code>).</td><td class="src">§12</td></tr>    <tr><td class="reqid">SEC-04</td><td>Rate-limiter internal state SHALL be periodically garbage-collected so memory is bounded
 by recently active keys, not by every distinct key ever observed.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">SEC-05</td><td>Rejections caused by SEC-01 or SEC-02 SHALL NOT be persisted to the audit trail.</td><td class="src">Engineering decision</td></tr>  </table></div>
@@ -458,7 +465,7 @@ SEC-05) SHALL be recorded — transaction ID, zone, remote address, RCODE, statu
 timestamp — regardless of accept/reject outcome.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-03</td><td>The N most recent audit-trail entries for a zone SHALL be retrievable via a query
 interface.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-04</td><td>All nine §12 status codes SHALL be carried as a diagnostic TXT record in the response's
 Additional section.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-05</td><td>Every configurable quota/limit SHALL default to a documented value when unset (5
-full/day, 50 differential/day, 30 updates/minute per address).</td><td class="src">§12</td></tr>  </table></div>
+full/day, 50 key-management/day, 30 updates/minute per address).</td><td class="src">§12</td></tr>  </table></div>
   <h3 class="subhead" id="req-watch"><span class="secno">3.11</span> WATCH &mdash; Delegation-change monitoring</h3>
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">WATCH-01</td><td>A standalone daemon, architecturally separate from the CoreDNS process, SHALL
@@ -480,8 +487,9 @@ it is opened, with no operator action and no forced re-onboarding.</td><td class
   <h3 class="subhead" id="req-client"><span class="secno">3.13</span> CLIENT &mdash; sazuctl</h3>
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CLIENT-01</td><td>The client SHALL provide subcommands to generate a key, print a registrar-ready DS
-record, push a full zone, push a differential update, and register/clear a zone's
-contact address.</td><td class="src">§10 (client tooling)</td></tr>    <tr><td class="reqid">CLIENT-02</td><td>The client SHALL self-verify a signed push's SIG(0) before transmitting it.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CLIENT-03</td><td>The client SHALL print actionable, registrar-aware guidance when a push is denied with
+record, publish a zone's complete content, manage KSK/ZSK key state (first-contact
+trust establishment, ZSK registration/retirement, key rotation), and register/clear a
+zone's contact address.</td><td class="src">§10 (client tooling)</td></tr>    <tr><td class="reqid">CLIENT-02</td><td>The client SHALL self-verify a signed push's SIG(0) before transmitting it.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CLIENT-03</td><td>The client SHALL print actionable, registrar-aware guidance when a push is denied with
 <code class="inline">ERR_NO_DS_PUBLISHED</code> or <code
 class="inline">ERR_UNKNOWN_SIGNER</code>.</td><td class="src">§12 (operator experience)</td></tr>    <tr><td class="reqid">CLIENT-04</td><td>The client SHALL provide a decision-support command for key rotation that, given no
 explicit role, explains the KSK-vs-ZSK tradeoff and takes no action until the operator
@@ -594,11 +602,12 @@ TestVerifyAnyRRSIGRejectsWrongKey, TestVerifyAnyRRSIGRejectsExpired</td><td>CHAI
 candidate.</td><td class="mono">TestTrustAnchorVerifiesRealDigestNotJustMetadata, TestTrustAnchorRejectsNonKSK</td><td>CHAIN-03</td></tr>    <tr><td class="tcid">TC-CHAIN-04</td><td>RRset canonical ordering (RFC 4034) is handled regardless of input order.</td><td class="mono">TestMultiRecordRRsetCanonicalOrderingIsDeterministic</td><td>CHAIN-03</td></tr>    <tr><td class="tcid">TC-CHAIN-05</td><td>First contact is denied with <code class="inline">ERR_NO_DS_PUBLISHED</code> when the
 parent publishes no DS.</td><td class="mono">TestOnboardDeniedWithNoDSPublishedGivesDiagnostic</td><td>CHAIN-04, CHAIN-07, OPS-04</td></tr>    <tr><td class="tcid">TC-CHAIN-06</td><td>First contact is denied with <code class="inline">ERR_UNKNOWN_SIGNER</code> when a DS
 exists but doesn't match.</td><td class="mono">TestOnboardDeniedWithKeyMismatchGivesDiagnostic</td><td>CHAIN-05, CHAIN-07, OPS-04</td></tr>    <tr><td class="tcid">TC-CHAIN-07</td><td>A generic chain failure carries no diagnostic status, distinguishing it from
-TC-CHAIN-05/06's specific cases.</td><td class="mono">TestOnboardDeniedForOtherChainReasonsCarriesNoDiagnostic</td><td>CHAIN-04, CHAIN-05 (negative)</td></tr>    <tr><td class="tcid">TC-CHAIN-08</td><td>First contact without an apex SOA is rejected without pinning a key.</td><td class="mono">TestOnboardWithoutSOAIsRejected</td><td>CHAIN-06</td></tr>    <tr><td class="tcid">TC-CHAIN-09</td><td>A full, successful onboarding is servable, including RRSIGs with the DO bit.</td><td class="mono">TestOnboardFullPushThenQuery, TestOnboardedZoneServesRRSIGsWithDOBit</td><td>CHAIN-01, CHAIN-02, CONTENT-11</td></tr>    <tr><td class="tcid">TC-CHAIN-10</td><td>A wildcard Corefile scope onboards multiple independent domains with no restart, and
+TC-CHAIN-05/06's specific cases.</td><td class="mono">TestOnboardDeniedForOtherChainReasonsCarriesNoDiagnostic</td><td>CHAIN-04, CHAIN-05 (negative)</td></tr>    <tr><td class="tcid">TC-CHAIN-08</td><td>First contact without an apex SOA (the publish-trust shape: a KSK and its paired ZSK,
+no zone content at all) is accepted, and the candidate KSK pinned.</td><td class="mono">TestOnboardWithoutSOAIsAccepted</td><td>CHAIN-06</td></tr>    <tr><td class="tcid">TC-CHAIN-09</td><td>A full, successful onboarding is servable, including RRSIGs with the DO bit.</td><td class="mono">TestOnboardFullPushThenQuery, TestOnboardedZoneServesRRSIGsWithDOBit</td><td>CHAIN-01, CHAIN-02, CONTENT-11</td></tr>    <tr><td class="tcid">TC-CHAIN-10</td><td>A wildcard Corefile scope onboards multiple independent domains with no restart, and
 never onboarding a name still falls through to the next plugin.</td><td class="mono">TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges,
 TestWildcardScopeFallsThroughForNeverOnboardedNames</td><td>CONTENT-12</td></tr>  </table></div>
   <h3 class="subhead" id="ts-key"><span class="secno">3.3</span> KEY</h3>  <div class="wrap"><table class="spec">
-    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-KEY-01</td><td>KeyRegistry KSK pin/get round-trips; zone names are compared case-insensitively.</td><td class="mono">TestKeyRegistryPinKSKAndGet, TestKeyRegistryNormalizesZoneNames</td><td>KEY-01</td></tr>    <tr><td class="tcid">TC-KEY-02</td><td>A push signed by an unpinned/wrong key is rejected.</td><td class="mono">TestPartialPushFromWrongKeyRejected</td><td>KEY-02</td></tr>    <tr><td class="tcid">TC-KEY-03</td><td>An ordinary differential push after onboarding succeeds against the pinned key.</td><td class="mono">TestOrdinaryPartialPushAfterOnboarding</td><td>KEY-01</td></tr>    <tr><td class="tcid">TC-KEY-04</td><td>A valid KSK rollover (new candidate independently chains to a DS) succeeds; the
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-KEY-01</td><td>KeyRegistry KSK pin/get round-trips; zone names are compared case-insensitively.</td><td class="mono">TestKeyRegistryPinKSKAndGet, TestKeyRegistryNormalizesZoneNames</td><td>KEY-01</td></tr>    <tr><td class="tcid">TC-KEY-02</td><td>A push signed by an unpinned/wrong key is rejected.</td><td class="mono">TestPartialPushFromWrongKeyRejected</td><td>KEY-02</td></tr>    <tr><td class="tcid">TC-KEY-03</td><td>An ordinary partial push after onboarding succeeds against the pinned key.</td><td class="mono">TestOrdinaryPartialPushAfterOnboarding</td><td>KEY-01</td></tr>    <tr><td class="tcid">TC-KEY-04</td><td>A valid KSK rollover (new candidate independently chains to a DS) succeeds; the
 superseded key stops working.</td><td class="mono">TestKeyRolloverSwitchesToNewKey</td><td>KEY-03, KEY-05</td></tr>    <tr><td class="tcid">TC-KEY-05</td><td>Rollover fails, and the old key remains pinned, when the new candidate has no DS.</td><td class="mono">TestKeyRolloverFailsWithoutADSForTheNewKey</td><td>KEY-03</td></tr>    <tr><td class="tcid">TC-KEY-06</td><td>A rollover candidate below the algorithm floor is rejected before any chain-of-trust
 effort.</td><td class="mono">TestKeyRolloverRejectedForWeakAlgorithm</td><td>KEY-03, ALGO-03</td></tr>    <tr><td class="tcid">TC-KEY-07</td><td>A ZSK cannot be registered before a KSK exists; once one does, registering and reading
 it back round-trips, and a duplicate key tag is rejected.</td><td class="mono">TestKeyRegistryAddZSKRequiresExistingKSK, TestKeyRegistryAddZSKThenGet,
@@ -608,16 +617,19 @@ the content-signer set is the KSK plus every registered ZSK.</td><td class="mono
 chain-of-trust network walk; a zone that never registers one behaves exactly as before
 the ZSK split existed.</td><td class="mono">TestZSKCanBeRegisteredOverAnOrdinaryPush,
 TestRegisteringAZSKIsOptionalZoneBehaviorIsUnchangedWithoutOne</td><td>KEY-06, KEY-08</td></tr>    <tr><td class="tcid">TC-KEY-12</td><td>Once registered, a ZSK authenticates further transactions entirely on its own, with the
-content it carries servable afterward.</td><td class="mono">TestZSKAuthenticatesFurtherTransactionsOnceRegistered</td><td>KEY-01, KEY-11</td></tr>    <tr><td class="tcid">TC-KEY-13</td><td>Content signed by a ZSK (rather than the KSK) still verifies under §4's Level-2
+content it carries servable afterward.</td><td class="mono">TestZSKAuthenticatesFurtherTransactionsOnceRegistered</td><td>KEY-01, KEY-11</td></tr>    <tr><td class="tcid">TC-KEY-13</td><td>Content signed by a ZSK (rather than the KSK) still verifies under §4's mandatory
 content-signature check.</td><td class="mono">TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs</td><td>KEY-10</td></tr>    <tr><td class="tcid">TC-KEY-14</td><td>A retired ZSK no longer authenticates anything, end to end.</td><td class="mono">TestZSKCanBeRetired</td><td>KEY-09</td></tr>    <tr><td class="tcid">TC-KEY-15</td><td>A KSK rollover, end to end, preserves and keeps trusting an already-registered ZSK
 afterward.</td><td class="mono">TestKSKRolloverPreservesExistingZSK</td><td>KEY-05</td></tr>    <tr><td class="tcid">TC-KEY-16</td><td>A first-contact candidate without the SEP (KSK) flag is refused with a dedicated
 diagnostic and pins nothing.</td><td class="mono">TestFirstContactRejectsNonKSKCandidate</td><td>KEY-07</td></tr>    <tr><td class="tcid">TC-KEY-17</td><td>A ZSK registration below the algorithm floor is refused before being registered.</td><td class="mono">TestAddZSKRejectsWeakAlgorithm</td><td>KEY-08, ALGO-01</td></tr>    <tr><td class="tcid">TC-KEY-18</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
-against a real server: the full KSK use case — onboarding, a differential push, and a
-full KSK rollover, with the superseded key rejected and the new one accepted afterward.</td><td class="mono">TestE2EKSKFullLifecycle</td><td>KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, CLIENT-04, CLIENT-05</td></tr>    <tr><td class="tcid">TC-KEY-19</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
-against a real server: the full ZSK use case — registration, ZSK-only authentication,
-KSK-authenticated-but-ZSK-signed content, retirement, the retired key rejected
-afterward, and the <code class="inline">rotate-key -role zsk</code> register-then-retire
-convenience path.</td><td class="mono">TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, CLIENT-04</td></tr>  </table></div>
+against a real server: the full KSK use case — <code class="inline">publish-trust</code>
+onboarding (KSK+ZSK generated together), a <code class="inline">publish-zone</code>
+content re-push, and a full KSK rollover (<code class="inline">rotate-key -role
+ksk</code>), with the ZSK still authenticating content afterward.</td><td class="mono">TestE2EKSKFullLifecycle</td><td>KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, CLIENT-04, CLIENT-05</td></tr>    <tr><td class="tcid">TC-KEY-19</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
+against a real server: the full ZSK use case — a <code class="inline">publish-zone</code>
+content push authenticated and signed entirely by the ZSK <code
+class="inline">publish-trust</code> registered, retirement, the retired key rejected
+afterward, a freshly registered replacement working again, and the <code
+class="inline">rotate-key -role zsk</code> register-then-retire convenience path.</td><td class="mono">TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, CLIENT-04</td></tr>  </table></div>
   <h3 class="subhead" id="ts-algo"><span class="secno">3.4</span> ALGO</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-ALGO-01</td><td>Recommended algorithms are accepted; weak or unrecognised ones are rejected, at the
 classification primitive.</td><td class="mono">TestAlgorithmMeetsFloorAcceptsRecommendedAlgorithms,
@@ -633,16 +645,15 @@ TestEvaluatePrerequisitesGenericValueDependentPrereqCarriesNoStatus</td><td>CONT
 TestApplyUpdateOpsDeleteAllRRsetsFromName, TestApplyUpdateOpsDeleteOneRR</td><td>CONTENT-02</td></tr>    <tr><td class="tcid">TC-CONTENT-04</td><td>Signing produces exactly one RRSIG per RRset, with the correct TTL, and the signature
 verifies.</td><td class="mono">TestSignZoneContentProducesOneRRSIGPerRRset,
 TestSignZoneContentRRSIGsCarryTheCoveredRRsetsTTL,
-TestSignZoneContentRRSIGsActuallyVerify</td><td>CONTENT-06</td></tr>    <tr><td class="tcid">TC-CONTENT-05</td><td>Content-level (Level 2) verification accepts genuine signatures and rejects unsigned,
-wrong-key, and expired content; delete-shaped ops need none.</td><td class="mono">TestVerifySignedRRsetsAcceptsGenuinelySignedContent,
+TestSignZoneContentRRSIGsActuallyVerify</td><td>CONTENT-06</td></tr>    <tr><td class="tcid">TC-CONTENT-05</td><td>Content verification accepts genuine signatures and rejects unsigned, wrong-key, and
+expired content; delete-shaped ops need none.</td><td class="mono">TestVerifySignedRRsetsAcceptsGenuinelySignedContent,
 TestVerifySignedRRsetsRejectsUnsignedRRset,
 TestVerifySignedRRsetsRejectsWrongKeySignature,
 TestVerifySignedRRsetsRejectsExpiredSignature,
 TestVerifySignedRRsetsMissingSignatureCarriesNoExpiredStatus,
-TestVerifySignedRRsetsIgnoresDeleteShapedOps</td><td>CONTENT-04, CONTENT-05</td></tr>    <tr><td class="tcid">TC-CONTENT-06</td><td>End-to-end: the opt-in verification gate rejects unsigned content, distinguishes an
-expired-but-genuine signature, and (off by default) still accepts unsigned content.</td><td class="mono">TestRequireValidRRSIGsRejectsUnsignedContent,
-TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic,
-TestRequireValidRRSIGsOffAcceptsUnsignedContent</td><td>CONTENT-04, CONTENT-05</td></tr>    <tr><td class="tcid">TC-CONTENT-07</td><td>In-memory zone store: dedup identical rdata, TTL refresh, multi-signer RRSIG
+TestVerifySignedRRsetsIgnoresDeleteShapedOps</td><td>CONTENT-04, CONTENT-05</td></tr>    <tr><td class="tcid">TC-CONTENT-06</td><td>End-to-end: the mandatory verification gate rejects unsigned content and distinguishes
+an expired-but-genuine signature from the generic no-valid-signature case.</td><td class="mono">TestRequireValidRRSIGsRejectsUnsignedContent,
+TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic</td><td>CONTENT-04, CONTENT-05</td></tr>    <tr><td class="tcid">TC-CONTENT-07</td><td>In-memory zone store: dedup identical rdata, TTL refresh, multi-signer RRSIG
 coexistence, independent copies on lookup, apex SOA protected from deletion.</td><td class="mono">21 functions in store_test.go (TestZoneData*, TestStoreGet*)</td><td>CONTENT-02</td></tr>    <tr><td class="tcid">TC-CONTENT-08</td><td>NSEC chain construction covers every owner name and cycles correctly; type bitmap
 reflects actual content; canonical ordering matches the RFC 4034 worked example.</td><td class="mono">10 functions in nsec_test.go (TestCanonicalCompare*, TestSortNamesCanonically,
 TestClosestEncloser*, TestCoveringOwner*, TestBuildNSECChain*)</td><td>CONTENT-07</td></tr>    <tr><td class="tcid">TC-CONTENT-09</td><td>The NSEC chain is replaced, not accumulated, on re-push, and purged together with its
@@ -669,34 +680,15 @@ case-insensitive on the input name, and depends on salt/iterations.</td><td clas
 TestCoveringHashFindsPredecessorAndWraps)</td><td>CONTENT-13</td></tr>    <tr><td class="tcid">TC-CONTENT-16</td><td>End-to-end, a zone onboarded with NSEC3 instead of plain NSEC serves a genuinely
 verifying NSEC3 proof for both NODATA and NXDOMAIN (closest-encloser match included),
 and a partial push invalidates the NSEC3 chain the same way it does a plain NSEC one.</td><td class="mono">TestNODATACarriesValidNSEC3Proof, TestNXDOMAINCarriesValidNSEC3Proof,
-TestPartialPushInvalidatesNSEC3UntilNextFullPush (nsec3_test.go)</td><td>CONTENT-13, CONTENT-08, CONTENT-09</td></tr>    <tr><td class="tcid">TC-CONTENT-17</td><td>cmd/sazuctl's "push-zone -nsec3" flag (plus -nsec3-salt/-nsec3-opt-out) genuinely
+TestPartialPushInvalidatesNSEC3UntilNextFullPush (nsec3_test.go)</td><td>CONTENT-13, CONTENT-08, CONTENT-09</td></tr>    <tr><td class="tcid">TC-CONTENT-17</td><td>cmd/sazuctl's "publish-zone -nsec3" flag (plus -nsec3-salt/-nsec3-opt-out) genuinely
 changes what the server ends up serving for a real NXDOMAIN query -- NSEC3, with the
-Opt-Out flag set, and no plain NSEC alongside it.</td><td class="mono">TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-13</td></tr>    <tr><td class="tcid">TC-CONTENT-18</td><td>ComputeChainPatch correctly computes an insertion (splitting the predecessor),
-a full removal (merging the predecessor past the doomed name), a bitmap-only edit
-(no topology change), and a no-op (a type already present) -- for both NSEC and
-NSEC3 -- and, specifically, two new names landing in the same canonical/hash-order
-gap in one push thread correctly rather than needing a separate hand-rolled case.
-Also specifically covers a domain in the middle of a longer (five-name) chain, with
-two ordinary domains as neighbors rather than the apex on one side the way a smaller
-zone's other cases unavoidably have: both an update (bitmap-only) and a full removal
-leave both neighbors completely untouched and thread the ring correctly around the
-gap either way.</td><td class="mono">10 functions in chainpatch_test.go (TestComputeChainPatch*)</td><td>CONTENT-14</td></tr>    <tr><td class="tcid">TC-CONTENT-19</td><td>End-to-end, the server applies a well-formed incremental chain patch directly (the
-chain keeps serving a valid proof covering old and new names alike, never purged),
-and rejects a patch whose prerequisite no longer matches the server's actual current
-record outright -- nothing partially applied -- returning that actual record so the
-client can reconcile. Also specifically covers removing one domain out of several via
-an incremental patch: the removed domain stops resolving, both of its former
-neighbors keep resolving exactly as before (never touched by the patch), and the
-chain still produces a valid, fully-linked proof over what remains.</td><td class="mono">TestServerAcceptsIncrementalChainPatchWithoutPurging,
-TestServerRejectsStaleChainPatchAndReturnsCurrentValue,
-TestServerRemovesInteriorDomainViaIncrementalPatch,
-TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue (prereq_test.go)</td><td>CONTENT-14</td></tr>    <tr><td class="tcid">TC-CONTENT-20</td><td>A KSK rollover -- which carries an apex DNSKEY, same as a full push, but changes no
-served content and supplies no replacement chain -- leaves an existing NSEC3 chain
-fully intact and still validly signed, rather than being purged on the mistaken
-assumption that carrying an apex DNSKEY alone means "full push."</td><td class="mono">TestKSKRolloverDoesNotPurgeExistingChain</td><td>CONTENT-15</td></tr>    <tr><td class="tcid">TC-CONTENT-21</td><td>End-to-end through the actual sazuctl CLI: push-zone -nsec3 writes a local chain
-cache, and a subsequent push-update adding a brand-new name uses it automatically
-to patch the chain incrementally -- proven by the chain still producing a valid
-NSEC3 proof covering both the original and the newly added name afterward.</td><td class="mono">TestE2EPushUpdateIncrementalChainMaintenance (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-14</td></tr>  </table></div>
+Opt-Out flag set, and no plain NSEC alongside it.</td><td class="mono">TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-13</td></tr>    <tr><td class="tcid">TC-CONTENT-20</td><td>A KSK rollover -- which carries an apex DNSKEY, same as a full push, but changes no
+served content and supplies no replacement chain -- leaves an existing zone's content
+and its NSEC chain fully intact and still validly signed, rather than being purged on
+the mistaken assumption that carrying an apex DNSKEY alone means "full push."</td><td class="mono">TestKSKRolloverNeverPurgesContentOrChain</td><td>CONTENT-15</td></tr>    <tr><td class="tcid">TC-CONTENT-22</td><td>A full content push (sazuctl publish-zone) replaces a zone's entire served content:
+a record present in an earlier push but absent from a later one is confirmed gone
+after the next push, while the apex DNSKEY RRset (key management, untouched by
+content pushes) survives exactly as it was.</td><td class="mono">TestPublishZoneRemovesContentDroppedFromTheZoneFile</td><td>CONTENT-16</td></tr>  </table></div>
   <h3 class="subhead" id="ts-contact"><span class="secno">3.6</span> CONTACT</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CONTACT-01</td><td>A contact add/delete op is correctly split from the update ops; non-contact ops pass
 through untouched; no contact op yields no update.</td><td class="mono">TestSplitContactOpsExtractsAddOp, TestSplitContactOpsExtractsDeleteOp,
@@ -734,7 +726,7 @@ TestPlainDNSMessageContentTypeIsNeverTreatedAsJSON (doh)</td><td>CARRIER-04, CAR
 rejected (regression baseline).</td><td class="mono">TestDoH, TestDoHGETRejectsOversizedDNSQuery (doh)</td><td>CARRIER-01, CARRIER-02 (baseline)</td></tr>    <tr><td class="tcid">TC-CARRIER-06</td><td>core/dnsserver's HTTPS and HTTP3 servers reject UPDATE by default and accept it once
 <code class="inline">Config.AllowOpcode</code> is set, over POST/GET/JSON, with the
 exact original wire bytes recoverable from the request context.</td><td class="mono">TestServerHTTPSRejectsUpdate, TestServerHTTPSAllowOpcodeAcceptsUpdate,
-TestServerHTTPS3RejectsUpdate, TestServerHTTPS3AllowOpcodeAcceptsUpdate (core/dnsserver)</td><td>CARRIER-02, CARRIER-03, CARRIER-04, CARRIER-05, AUTH-03</td></tr>    <tr><td class="tcid">TC-CARRIER-07</td><td>The plugin onboards a zone and pushes a differential update over a real HTTPS round
+TestServerHTTPS3RejectsUpdate, TestServerHTTPS3AllowOpcodeAcceptsUpdate (core/dnsserver)</td><td>CARRIER-02, CARRIER-03, CARRIER-04, CARRIER-05, AUTH-03</td></tr>    <tr><td class="tcid">TC-CARRIER-07</td><td>The plugin onboards a zone and pushes a partial update over a real HTTPS round
 trip, both as raw bytes and as the JSON envelope.</td><td class="mono">TestOnboardOverHTTPSRawWireBytes, TestOnboardOverHTTPSJSONWireEnvelope,
 TestPartialPushOverHTTPSAfterOnboarding (https_test.go)</td><td>CARRIER-02, CARRIER-04, CARRIER-05</td></tr>    <tr><td class="tcid">TC-CARRIER-08</td><td>cmd/sazuctl's own client-side sendOverHTTP function -- not the server side an
 <code class="inline">http(s)://</code> target already has coverage for elsewhere in
@@ -748,12 +740,12 @@ TestKeyRolloverOverUDPIsRefused, TestOrdinaryPartialPushOverUDPStillWorks
 UDP address as connection-oriented via the context signal.</td><td class="mono">TestConnectionOrientedUDPIsNotConnectionOriented,
 TestConnectionOrientedTCPIsConnectionOriented,
 TestConnectionOrientedNilAddrIsNotConnectionOriented,
-TestConnectionOrientedHTTP3ShapedUDPAddrIsStillConnectionOriented</td><td>SEC-01</td></tr>    <tr><td class="tcid">TC-SEC-03</td><td>The per-zone quota enforces its limit, tracks full/differential and distinct zones
+TestConnectionOrientedHTTP3ShapedUDPAddrIsStillConnectionOriented</td><td>SEC-01</td></tr>    <tr><td class="tcid">TC-SEC-03</td><td>The per-zone quota enforces its limit, tracks full/key-management and distinct zones
 independently, slides its window, and is case-insensitive on zone name.</td><td class="mono">TestRateLimiterAllowsUpToTheLimitThenRefuses,
-TestRateLimiterTracksFullAndDifferentialIndependently,
+TestRateLimiterTracksFullAndKeyManagementIndependently,
 TestRateLimiterTracksZonesIndependently, TestRateLimiterSlidesTheWindow,
-TestRateLimiterIsCaseInsensitiveOnZoneName</td><td>SEC-03</td></tr>    <tr><td class="tcid">TC-SEC-04</td><td>An exhausted per-zone quota rejects a further differential push end to end and never
-applies its content.</td><td class="mono">TestRateLimiterExceededRejectsFurtherDifferentialPushes</td><td>SEC-03</td></tr>    <tr><td class="tcid">TC-SEC-05</td><td>The per-source-IP limiter enforces its budget, is port-independent, slides its window,
+TestRateLimiterIsCaseInsensitiveOnZoneName</td><td>SEC-03</td></tr>    <tr><td class="tcid">TC-SEC-04</td><td>An exhausted per-zone quota rejects a further key-management push end to end and never
+applies its content.</td><td class="mono">TestRateLimiterExceededRejectsFurtherKeyManagementPushes</td><td>SEC-03</td></tr>    <tr><td class="tcid">TC-SEC-05</td><td>The per-source-IP limiter enforces its budget, is port-independent, slides its window,
 and covers many distinct zone names from one address.</td><td class="mono">TestIPRateLimiterAllowsUpToTheLimitThenRefuses,
 TestIPRateLimiterTracksAddressesIndependently, TestIPRateLimiterSlidesTheWindow,
 TestIPRateLimiterCoversManyDistinctZoneNamesFromOneAddress, TestSourceIPStripsPort,
@@ -819,16 +811,16 @@ TestDateSerialFormat</td><td>CLIENT-07</td></tr>    <tr><td class="tcid">TC-CLIE
 produces — apex/relative/absolute record names resolve correctly, a record's own TTL
 overrides the zone default, and required fields (SOA nameserver, mailbox source, record
 type/value) are enforced — round-tripping correctly through an actual file on disk, and
-<code class="inline">push-zone</code>'s own loader dispatches to it purely by file
+<code class="inline">publish-zone</code>'s own loader dispatches to it purely by file
 extension.</td><td class="mono">TestRecordOwnerNameResolvesApexRelativeAndAbsolute,
 TestYamlZoneToRRsBuildsSOAAndRecords, TestYamlZoneToRRsRejectsMissingAdminEmailOrMbox,
 TestYamlZoneToRRsRejectsMissingNS, TestYamlZoneToRRsFallsBackToGivenZoneWhenFileOmitsIt,
 TestYamlZoneToRRsRejectsRecordWithoutTypeOrValue,
 TestLoadYAMLZoneRoundTripsThroughAFile, TestLoadZoneSourceDispatchesOnExtension</td><td>CLIENT-07</td></tr>    <tr><td class="tcid">TC-CLIENT-10</td><td>End-to-end: <code class="inline">init-zone</code> writes a starter YAML definition <code
-class="inline">push-zone</code> accepts directly (no conversion step) and which onboards
+class="inline">publish-zone</code> accepts directly (no conversion step) and which onboards
 correctly; it refuses to overwrite an existing file; <code
 class="inline">zone-convert</code>'s generated BIND-format output is itself directly
-pushable.</td><td class="mono">TestE2EInitZoneThenPushZoneWithYAML, TestE2EInitZoneRefusesToOverwriteExistingFile,
+pushable.</td><td class="mono">TestE2EInitZoneThenPublishZoneWithYAML, TestE2EInitZoneRefusesToOverwriteExistingFile,
 TestE2EZoneConvertProducesAPushableZoneFile</td><td>CLIENT-07</td></tr>  </table></div>
   <h3 class="subhead" id="ts-nfr"><span class="secno">3.14</span> NFR</h3>  <p class="sec-abstract">NFR-02 (per-zone, not global, update serialization) is specific enough to warrant its
 own dedicated tests (TC-NFR-01 … 03, below). The other four are each still cited from a
@@ -848,7 +840,7 @@ name, and a realistic number of distinct zone names spreads across most of the a
 stripes rather than colliding onto a handful.</td><td class="mono">TestUpdateLockForIsStableForTheSameZone, TestUpdateLockForSpreadsAcrossStripes</td><td>NFR-02</td></tr>    <tr><td class="tcid">TC-NFR-02</td><td>End-to-end: a slow, in-flight first-contact chain-of-trust walk for one zone (a fake,
 delay-injecting validator standing in for the real network round trip) does not delay an
 unrelated, already-authenticated push to a different zone.</td><td class="mono">TestConcurrentUpdatesToDifferentZonesDoNotSerialize</td><td>NFR-02</td></tr>    <tr><td class="tcid">TC-NFR-03</td><td>Switching from one global lock to per-zone stripes does not weaken correctness for the
-*same* zone: 20 concurrent differential pushes to one already-onboarded zone all still
+*same* zone: 20 concurrent partial pushes to one already-onboarded zone all still
 apply, with none silently lost to a race.</td><td class="mono">TestConcurrentUpdatesToSameZoneStillSerializeCorrectly</td><td>NFR-02</td></tr>    <tr><td class="tcid">TC-NFR-04</td><td>The registered <code class="inline">database/sql</code> driver named
 <code class="inline">sqlite</code> is modernc.org/sqlite's pure-Go implementation; no
 cgo-based alternative (mattn/go-sqlite3, which registers as <code

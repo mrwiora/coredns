@@ -63,6 +63,42 @@ func TestNotifierSendRecoveryPayloadCarriesNoError(t *testing.T) {
 	}
 }
 
+func TestNotifierSendWebhookZSKMissingPayloadCarriesKind(t *testing.T) {
+	var got webhookPayload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := &Notifier{HTTPClient: srv.Client()}
+	alert := Alert{Zone: "example.org.", Addresses: []string{srv.URL}, Kind: AlertZSKMissing, KeyTag: 12345}
+	if errs := n.Send(alert); len(errs) != 0 {
+		t.Fatalf("expected no errors, got %+v", errs)
+	}
+	if got.Kind != "zsk_missing" || got.KeyTag != 12345 || got.Recovered {
+		t.Fatalf("unexpected payload: %+v", got)
+	}
+}
+
+func TestNotifierSendWebhookChainOfTrustPayloadCarriesKind(t *testing.T) {
+	var got webhookPayload
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	n := &Notifier{HTTPClient: srv.Client()}
+	alert := Alert{Zone: "example.org.", Addresses: []string{srv.URL}, Err: fmt.Errorf("no DS published")}
+	if errs := n.Send(alert); len(errs) != 0 {
+		t.Fatalf("expected no errors, got %+v", errs)
+	}
+	if got.Kind != "chain_of_trust" {
+		t.Fatalf("expected the zero-value Kind to render as chain_of_trust, got %+v", got)
+	}
+}
+
 func TestNotifierSendEmailWithoutSMTPAddrConfiguredFails(t *testing.T) {
 	n := &Notifier{} // no SMTPAddr
 	alert := Alert{Zone: "example.org.", Addresses: []string{"mailto:ops@example.org"}, Err: fmt.Errorf("broken")}
