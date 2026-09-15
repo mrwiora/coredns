@@ -70,7 +70,23 @@ sazu ZONES... {
   database at PATH (created if it doesn't exist), so a restart doesn't
   forget them. **Omit this and everything is purely in-memory** — lost on
   every restart, which is fine for a quick one-off test but not for
-  anything you want to survive a redeploy.
+  anything you want to survive a redeploy. PATH is an ordinary filesystem
+  path, absolute or relative to wherever `coredns` is run from — the
+  parent directory must already exist (the database *file* itself is
+  created automatically, the directory is not):
+
+  ```
+  sazu . {
+      db /var/lib/sazu/sazu.db
+  }
+  ```
+
+  This is what every example elsewhere in this README that says "for a
+  quick one-off test" or similar is deliberately omitting — add this one
+  line to any of those Corefiles to make onboarding survive a restart.
+  `sazu-watchd` (below) reads this exact same file, so persistence is
+  also what lets it monitor zones independently of whichever CoreDNS
+  process wrote them.
 * `rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY` overrides §12's per-zone
   push quotas, each enforced over a rolling 24h window: FULL_PER_DAY for a
   push that actually changes zone content (`publish-zone` — always a
