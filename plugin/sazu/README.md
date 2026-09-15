@@ -67,6 +67,217 @@ Building the server and client, then onboarding a zone locally, verifying
 it, pushing an updated full zone, and finally setting up a real zone with a
 YAML zone definition against your registrar's chain of trust.
 
+### Setting up your zone
+
+A dedicated, start-to-finish walkthrough for onboarding one real domain
+against a real registrar: writing its YAML zone definition, generating its
+KSK and ZSK independently (the real-world shape of key custody — see step
+4), and pushing it. What's different from **Creating a new zone** below is
+that a *real* domain also needs a real DS record at your registrar before
+`publish-trust` will succeed, which this walks through end to end.
+
+You do **not** need to change this domain's actual nameserver delegation,
+and you do **not** need to run this server on a public IP or port 53 to do
+any of this — the chain-of-trust check only asks "does the parent zone
+publish a DS record matching this key," a normal, unauthenticated DNS
+question anyone can ask against the real DNS root; it has nothing to do
+with who currently serves the domain's real traffic. So you can point
+`sazuctl` at a test instance of this server running anywhere reachable to
+you, on any port, while your domain keeps working normally through its
+real nameservers throughout.
+
+1. **Start the server**, same as the sandbox walkthrough but with
+   `insecure_skip_chain_validation` **removed** (this is the whole point of
+   setting up against a real registrar). `sazu .` still means no domain
+   name needs deciding or editing into the Corefile up front — including
+   onboarding more than one real domain later, with no second server block
+   or restart:
+
+   ```
+   cat > Corefile <<'EOF'
+   .:15353 {
+       bind 127.0.0.1
+       sazu .
+       log
+       errors
+   }
+   EOF
+   ./coredns -conf Corefile
+   ```
+
+   (A narrower scope, e.g. `sazu yourdomain.example`, works the same way if
+   you'd rather this instance only ever accept that one domain — see
+   **Syntax** below.)
+
+   The server needs outbound UDP/53 reachability to the internet (real root
+   and TLD servers) for the chain walk to succeed — the usual case for any
+   machine with normal internet access, but worth checking explicitly if
+   this runs somewhere with restrictive egress rules.
+
+   It also needs **inbound TCP/53 reachable**, not just UDP/53: `sazuctl`
+   sends anything over roughly 1.2 KB over TCP automatically (see
+   `push.go`/`cmd/sazuctl`), since a real signed push routinely exceeds the
+   path MTU and gets silently dropped as an IP fragment on UDP — found the
+   hard way against a real security-group-restricted host. If
+   `publish-trust` reports no response at all (not even a denial) against a
+   server you otherwise know is up, check that inbound TCP/53 specifically
+   isn't blocked, separately from UDP/53.
+
+2. **Write the zone's YAML definition** with `sazuctl init-zone` — it
+   sidesteps the two things that regularly trip people up when hand-writing
+   a BIND-format zone file from scratch: the SOA serial number and the
+   responsible-party mailbox's escaped-`@` syntax:
+
+   ```
+   ./sazuctl init-zone -zone yourdomain.example
+   ```
+
+   writes `yourdomain.example.yaml`, a small, commented, directly editable
+   file:
+
+   ```yaml
+   zone: yourdomain.example.
+   ttl: 3600
+   soa:
+     ns: ns1.yourdomain.example.
+     admin_email: hostmaster@yourdomain.example
+     serial: auto   # today's date as YYYYMMDD00 -- see the file's own comment
+     refresh: 3600
+     retry: 900
+     expire: 604800
+     minttl: 3600
+   records:
+     - name: www
+       type: A
+       value: 203.0.113.10
+   ```
+
+   Add, edit, or remove entries under `records:` to match your actual
+   domain — a record's `value` is ordinary zone-file syntax for whatever
+   comes after the type, and a `name` without a trailing dot is relative to
+   the zone, same as a real zone file. `publish-zone` (step 7, below)
+   accepts this file directly; there's no separate conversion step.
+
+3. **If this domain is currently live with real traffic on it, read
+   [Migrating an already-live domain](REGISTRARS.md#migrating-an-already-live-domain)
+   in `REGISTRARS.md` before doing anything else in this section.**
+   Publishing a DS record for a domain whose current host isn't also
+   serving matching signatures breaks the *entire* domain — not just
+   DNSSEC lookups — for every validating resolver, until that's fixed. A
+   brand-new domain with no live traffic yet has none of this risk and can
+   skip straight to the next step.
+
+4. **Generate the zone's KSK and ZSK independently, each with its own
+   `sazuctl keygen` command, then try establishing trust.** This is the
+   real-world shape of key custody, not just a sandbox shortcut: the two
+   keys never have to exist on the same machine at all.
+
+   ```
+   ./sazuctl keygen -out client.private -zone yourdomain.example -role ksk
+   ./sazuctl keygen -out zsk.private -zone yourdomain.example -role zsk
+   ```
+
+   Run the first command only on whichever machine will keep the KSK
+   long-term. The second can be run anywhere — including directly on the
+   separate machine that should end up handling this zone's routine
+   `publish-zone` pushes from now on, with `zsk.private` then copied (or
+   generated in place) onto that machine and never onto the one holding
+   the KSK. (`publish-trust`, below, also generates both keys itself if
+   you skip this step and point it at paths that don't exist yet — a
+   convenience for a quick sandbox test, but the explicit two-command
+   form above is what a deployment with keys living on separate machines
+   actually runs.)
+
+   With both keys in hand, establish trust — this step carries no zone
+   content, so the YAML file from step 2 isn't involved yet:
+
+   ```
+   ./sazuctl publish-trust -zone yourdomain.example -key client.private \
+       -zsk-key zsk.private -target 127.0.0.1:15353
+   ```
+
+   The first attempt against a real, not-yet-onboarded domain is *expected*
+   to be denied — that's the chain-of-trust cross-check working correctly,
+   not a bug. Onboarding only ever succeeds once your registrar is already
+   publishing a matching DS record; until then, this server saves nothing
+   at all — no zone, no pinned KSK, no registered ZSK — so a denied attempt
+   is exactly as safe to retry as the first one, as many times as it takes.
+   `sazuctl` prints the exact DS record to give your registrar (plus the
+   KSK's raw fields — type, algorithm, key tag, public key — for a
+   registrar like AWS Route 53 that asks you to enter those by hand instead
+   of pasting a DS record), and points you at `REGISTRARS.md` for
+   registrar-specific steps.
+
+   A different denial is also possible here: if a DS record already exists
+   for this domain but doesn't match this key (`ERR_UNKNOWN_SIGNER`),
+   `sazuctl` prints separate guidance for that instead — it usually means
+   DNSSEC is already enabled for this domain under a different key
+   (possibly its current host's own, if you followed step 3 above), not
+   necessarily anything wrong with this key. Onboarding isn't blocked by
+   this: `sazuctl` tells you to add this key's DS record *alongside* the
+   existing one (most registrars accept more than one) rather than
+   replacing it, so you can proceed the same way as this step without
+   disturbing whatever's already keeping the domain validated.
+
+   **As soon as this ZSK is registered (once trust succeeds, below), it
+   is fully authorized for this zone** — not narrowly scoped to "push
+   content." Whichever machine holds `zsk.private` can, from then on, do
+   anything a SIG(0)-authenticated push can do here: push zone content,
+   register or retire further ZSKs (for onboarding yet more signer
+   machines — see `add-zsk`/`retire-zsk` below — without ever touching
+   the KSK again), and manage the zone's contact address. There is no
+   narrower per-key permission than that today; see README's **Known
+   limitations**.
+
+5. **Submit that DS record at your registrar** — every major registrar
+   that supports DNSSEC has a form for this (look for "DS record,"
+   "DNSSEC," or "delegation signer"); see `REGISTRARS.md` for what's
+   documented so far per registrar. **This is the one genuinely manual,
+   out-of-band step** — ordinary DNSSEC hygiene, not something SAZU
+   replaces.
+
+6. **Wait for it to propagate**, then confirm with `dig DS yourdomain.example
+   +short` as the message above says, and **re-run the exact same
+   `publish-trust` command from step 4.** Once the DS is visible, the same
+   command that was denied now succeeds:
+
+   ```
+   Self-verification: OK (145 bytes)
+   Sent 145 bytes to 127.0.0.1:15353
+   Accepted (NOERROR).
+   ```
+
+   Trust is now established and the ZSK is registered — the zone itself
+   still has no content yet.
+
+7. **Push the zone's YAML content from step 2**, authenticated and signed
+   entirely by the ZSK, and confirm the response is NOERROR, not REFUSED:
+
+   ```
+   ./sazuctl publish-zone -zone yourdomain.example -zsk-key zsk.private \
+       -zonefile yourdomain.example.yaml -target 127.0.0.1:15353
+   ```
+
+   A REFUSED response here means the ZSK isn't the one `publish-trust`
+   registered — recheck step 4/6; it has nothing to do with the DS/chain
+   of trust any more, since that's a separate, already-settled fact by this
+   point.
+
+8. **Verify with dig**, then iterate by editing the YAML file and re-running
+   `publish-zone` — every push resends the zone's complete content, so a
+   newly added or edited record just needs to be in the file before the
+   next push:
+
+   ```
+   dig @127.0.0.1 -p 15353 www.yourdomain.example A
+   dig @127.0.0.1 -p 15353 yourdomain.example SOA
+   ```
+
+At no point in this flow does your domain's real, currently-serving
+delegation change — this test server is never in the actual query path for
+anyone but you, deliberately, so a mistake here can't take your domain
+offline.
+
 ### Building the server
 
 From the root of this checkout:
@@ -218,7 +429,7 @@ wire bytes either way, never a structural re-encoding of the message (see
 `plugin/pkg/doh`'s own doc comments for why: SIG(0) signs literal wire
 bytes, and a structural JSON translation has no lossless way back to
 them). A Corefile only needs an `https://` (or `https3://`) server block
-with a `sazu` directive in it to accept these — see **Syntax** above,
+with a `sazu` directive in it to accept these — see **Syntax** below,
 nothing carrier-specific to configure.
 
 Every subcommand that reads or writes a key file (`keygen`'s `-out`, every
@@ -359,217 +570,6 @@ sandbox to publish a DS record against — start the server, establish
 trust, push and re-push a zone, and confirm an impersonation attempt is
 rejected, all against `127.0.0.1`. See
 [`docs/SAZU-DEV.md`](docs/SAZU-DEV.md) for the full walkthrough.
-
-### Setting up your zone
-
-A dedicated, start-to-finish walkthrough for onboarding one real domain
-against a real registrar: writing its YAML zone definition, generating its
-KSK and ZSK independently (the real-world shape of key custody — see step
-4), and pushing it. What's different from **Creating a new zone** above is
-that a *real* domain also needs a real DS record at your registrar before
-`publish-trust` will succeed, which this walks through end to end.
-
-You do **not** need to change this domain's actual nameserver delegation,
-and you do **not** need to run this server on a public IP or port 53 to do
-any of this — the chain-of-trust check only asks "does the parent zone
-publish a DS record matching this key," a normal, unauthenticated DNS
-question anyone can ask against the real DNS root; it has nothing to do
-with who currently serves the domain's real traffic. So you can point
-`sazuctl` at a test instance of this server running anywhere reachable to
-you, on any port, while your domain keeps working normally through its
-real nameservers throughout.
-
-1. **Start the server**, same as the sandbox walkthrough but with
-   `insecure_skip_chain_validation` **removed** (this is the whole point of
-   setting up against a real registrar). `sazu .` still means no domain
-   name needs deciding or editing into the Corefile up front — including
-   onboarding more than one real domain later, with no second server block
-   or restart:
-
-   ```
-   cat > Corefile <<'EOF'
-   .:15353 {
-       bind 127.0.0.1
-       sazu .
-       log
-       errors
-   }
-   EOF
-   ./coredns -conf Corefile
-   ```
-
-   (A narrower scope, e.g. `sazu yourdomain.example`, works the same way if
-   you'd rather this instance only ever accept that one domain — see
-   **Syntax** above.)
-
-   The server needs outbound UDP/53 reachability to the internet (real root
-   and TLD servers) for the chain walk to succeed — the usual case for any
-   machine with normal internet access, but worth checking explicitly if
-   this runs somewhere with restrictive egress rules.
-
-   It also needs **inbound TCP/53 reachable**, not just UDP/53: `sazuctl`
-   sends anything over roughly 1.2 KB over TCP automatically (see
-   `push.go`/`cmd/sazuctl`), since a real signed push routinely exceeds the
-   path MTU and gets silently dropped as an IP fragment on UDP — found the
-   hard way against a real security-group-restricted host. If
-   `publish-trust` reports no response at all (not even a denial) against a
-   server you otherwise know is up, check that inbound TCP/53 specifically
-   isn't blocked, separately from UDP/53.
-
-2. **Write the zone's YAML definition** with `sazuctl init-zone` — it
-   sidesteps the two things that regularly trip people up when hand-writing
-   a BIND-format zone file from scratch: the SOA serial number and the
-   responsible-party mailbox's escaped-`@` syntax:
-
-   ```
-   ./sazuctl init-zone -zone yourdomain.example
-   ```
-
-   writes `yourdomain.example.yaml`, a small, commented, directly editable
-   file:
-
-   ```yaml
-   zone: yourdomain.example.
-   ttl: 3600
-   soa:
-     ns: ns1.yourdomain.example.
-     admin_email: hostmaster@yourdomain.example
-     serial: auto   # today's date as YYYYMMDD00 -- see the file's own comment
-     refresh: 3600
-     retry: 900
-     expire: 604800
-     minttl: 3600
-   records:
-     - name: www
-       type: A
-       value: 203.0.113.10
-   ```
-
-   Add, edit, or remove entries under `records:` to match your actual
-   domain — a record's `value` is ordinary zone-file syntax for whatever
-   comes after the type, and a `name` without a trailing dot is relative to
-   the zone, same as a real zone file. `publish-zone` (step 7, below)
-   accepts this file directly; there's no separate conversion step.
-
-3. **If this domain is currently live with real traffic on it, read
-   [Migrating an already-live domain](REGISTRARS.md#migrating-an-already-live-domain)
-   in `REGISTRARS.md` before doing anything else in this section.**
-   Publishing a DS record for a domain whose current host isn't also
-   serving matching signatures breaks the *entire* domain — not just
-   DNSSEC lookups — for every validating resolver, until that's fixed. A
-   brand-new domain with no live traffic yet has none of this risk and can
-   skip straight to the next step.
-
-4. **Generate the zone's KSK and ZSK independently, each with its own
-   `sazuctl keygen` command, then try establishing trust.** This is the
-   real-world shape of key custody, not just a sandbox shortcut: the two
-   keys never have to exist on the same machine at all.
-
-   ```
-   ./sazuctl keygen -out client.private -zone yourdomain.example -role ksk
-   ./sazuctl keygen -out zsk.private -zone yourdomain.example -role zsk
-   ```
-
-   Run the first command only on whichever machine will keep the KSK
-   long-term. The second can be run anywhere — including directly on the
-   separate machine that should end up handling this zone's routine
-   `publish-zone` pushes from now on, with `zsk.private` then copied (or
-   generated in place) onto that machine and never onto the one holding
-   the KSK. (`publish-trust`, below, also generates both keys itself if
-   you skip this step and point it at paths that don't exist yet — a
-   convenience for a quick sandbox test, but the explicit two-command
-   form above is what a deployment with keys living on separate machines
-   actually runs.)
-
-   With both keys in hand, establish trust — this step carries no zone
-   content, so the YAML file from step 2 isn't involved yet:
-
-   ```
-   ./sazuctl publish-trust -zone yourdomain.example -key client.private \
-       -zsk-key zsk.private -target 127.0.0.1:15353
-   ```
-
-   The first attempt against a real, not-yet-onboarded domain is *expected*
-   to be denied — that's the chain-of-trust cross-check working correctly,
-   not a bug. Onboarding only ever succeeds once your registrar is already
-   publishing a matching DS record; until then, this server saves nothing
-   at all — no zone, no pinned KSK, no registered ZSK — so a denied attempt
-   is exactly as safe to retry as the first one, as many times as it takes.
-   `sazuctl` prints the exact DS record to give your registrar (plus the
-   KSK's raw fields — type, algorithm, key tag, public key — for a
-   registrar like AWS Route 53 that asks you to enter those by hand instead
-   of pasting a DS record), and points you at `REGISTRARS.md` for
-   registrar-specific steps.
-
-   A different denial is also possible here: if a DS record already exists
-   for this domain but doesn't match this key (`ERR_UNKNOWN_SIGNER`),
-   `sazuctl` prints separate guidance for that instead — it usually means
-   DNSSEC is already enabled for this domain under a different key
-   (possibly its current host's own, if you followed step 3 above), not
-   necessarily anything wrong with this key. Onboarding isn't blocked by
-   this: `sazuctl` tells you to add this key's DS record *alongside* the
-   existing one (most registrars accept more than one) rather than
-   replacing it, so you can proceed the same way as this step without
-   disturbing whatever's already keeping the domain validated.
-
-   **As soon as this ZSK is registered (once trust succeeds, below), it
-   is fully authorized for this zone** — not narrowly scoped to "push
-   content." Whichever machine holds `zsk.private` can, from then on, do
-   anything a SIG(0)-authenticated push can do here: push zone content,
-   register or retire further ZSKs (for onboarding yet more signer
-   machines — see `add-zsk`/`retire-zsk` above — without ever touching
-   the KSK again), and manage the zone's contact address. There is no
-   narrower per-key permission than that today; see README's **Known
-   limitations**.
-
-5. **Submit that DS record at your registrar** — every major registrar
-   that supports DNSSEC has a form for this (look for "DS record,"
-   "DNSSEC," or "delegation signer"); see `REGISTRARS.md` for what's
-   documented so far per registrar. **This is the one genuinely manual,
-   out-of-band step** — ordinary DNSSEC hygiene, not something SAZU
-   replaces.
-
-6. **Wait for it to propagate**, then confirm with `dig DS yourdomain.example
-   +short` as the message above says, and **re-run the exact same
-   `publish-trust` command from step 4.** Once the DS is visible, the same
-   command that was denied now succeeds:
-
-   ```
-   Self-verification: OK (145 bytes)
-   Sent 145 bytes to 127.0.0.1:15353
-   Accepted (NOERROR).
-   ```
-
-   Trust is now established and the ZSK is registered — the zone itself
-   still has no content yet.
-
-7. **Push the zone's YAML content from step 2**, authenticated and signed
-   entirely by the ZSK, and confirm the response is NOERROR, not REFUSED:
-
-   ```
-   ./sazuctl publish-zone -zone yourdomain.example -zsk-key zsk.private \
-       -zonefile yourdomain.example.yaml -target 127.0.0.1:15353
-   ```
-
-   A REFUSED response here means the ZSK isn't the one `publish-trust`
-   registered — recheck step 4/6; it has nothing to do with the DS/chain
-   of trust any more, since that's a separate, already-settled fact by this
-   point.
-
-8. **Verify with dig**, then iterate by editing the YAML file and re-running
-   `publish-zone` — every push resends the zone's complete content, so a
-   newly added or edited record just needs to be in the file before the
-   next push:
-
-   ```
-   dig @127.0.0.1 -p 15353 www.yourdomain.example A
-   dig @127.0.0.1 -p 15353 yourdomain.example SOA
-   ```
-
-At no point in this flow does your domain's real, currently-serving
-delegation change — this test server is never in the actual query path for
-anyone but you, deliberately, so a mistake here can't take your domain
-offline.
 
 ### Key rollover
 
