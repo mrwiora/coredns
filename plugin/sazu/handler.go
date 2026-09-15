@@ -130,7 +130,7 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 		// section, naming the zone directly -- no suffix matching, and
 		// it may well be a zone never seen before (first contact).
 		if plugin.Zones(s.Zones).Matches(qname) == "" {
-			return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
+			return s.nextOrRefuse(ctx, w, r, qname, "outside this instance's configured zone scope")
 		}
 		return s.serveUpdate(ctx, w, r, qname)
 	}
@@ -143,9 +143,31 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 	// doesn't swallow every other zone/plugin on the same server.
 	_, z, ok := s.Store.FindZoneForName(qname)
 	if !ok {
-		return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
+		return s.nextOrRefuse(ctx, w, r, qname, "not an onboarded zone")
 	}
 	return s.serveQuery(w, r, z)
+}
+
+// nextOrRefuse falls through to Next exactly like plugin.NextOrFailure,
+// except when Next is nil: rather than that generic helper's SERVFAIL
+// (its "no next plugin found" is a signal aimed at a misconfigured
+// Corefile missing a catch-all, easily misread as sazu itself being
+// broken or missing), it returns REFUSED directly -- the same
+// convention plugin/auto already uses for exactly this situation ("If
+// no next plugin is configured, it's more correct to return REFUSED as
+// auto acts as an authoritative server"), which applies to sazu just as
+// directly: declining a name that isn't one of its onboarded zones is
+// an ordinary, everyday answer an authoritative server gives, not the
+// kind of thing SERVFAIL exists to signal. reason is logged at debug
+// level so an operator has a clear trail for *why* sazu declined a
+// given query, in sazu's own logs, before whatever the final rcode
+// becomes downstream.
+func (s *Sazu) nextOrRefuse(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, qname, reason string) (int, error) {
+	if s.Next == nil {
+		log.Debugf("query %s: %s, refusing (no next plugin configured to try instead)", qname, reason)
+		return dns.RcodeRefused, nil
+	}
+	return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
 }
 
 func (s *Sazu) serveQuery(w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, error) {

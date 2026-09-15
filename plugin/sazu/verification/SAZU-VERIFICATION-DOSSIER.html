@@ -425,7 +425,12 @@ publish-zone</code>) SHALL always carry the zone's complete, authoritative conte
 and SHALL replace it entirely -- a record present in an earlier push but absent from
 a later one SHALL no longer be served afterward. There SHALL be no
 partial/differential content-update mechanism. Key-management records (DNSKEY) SHALL
-never be affected by a content push.</td><td class="src">Engineering decision</td></tr>  </table></div>
+never be affected by a content push.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTENT-17</td><td>A query or update whose name falls outside the plugin's static Corefile scope (CLIENT-04
+of an UPDATE's zone section) or names a zone never onboarded SHALL fall through to the
+next plugin in the chain (CONTENT-12) when one is configured; when none is (a deployment
+with no catch-all after this plugin), it SHALL be refused (REFUSED) rather than answered
+with SERVFAIL — the same convention an authoritative-zone plugin acting as the end of its
+own chain SHALL follow generally.</td><td class="src">Engineering decision (matches plugin/auto's own established convention)</td></tr>  </table></div>
   <h3 class="subhead" id="req-contact"><span class="secno">3.6</span> CONTACT &mdash; Registration record</h3>
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CONTACT-01</td><td>A contact-address registration SHALL ride an ordinary authenticated UPDATE, addressed to
@@ -531,7 +536,7 @@ clearly-named opt-in (<code class="inline">insecure_skip_chain_validation</code>
   <h2><span class="secno">5</span> Traceability summary</h2>
   <p>Every requirement above is verified by at least one automated test case; the mapping is maintained in the companion <a href="#" onclick="document.querySelector('[data-doc=test]').click();return false;">Test Specification</a> (&sect;3, per-area tables) and its execution recorded in the <a href="#" onclick="document.querySelector('[data-doc=report]').click();return false;">Test Report</a> (&sect;3). No requirement in this document is currently unverified or outstanding.</p>
   <div class="stats">
-    <div class="stat"><div class="v ok">88</div><div class="l">requirements specified</div></div>
+    <div class="stat"><div class="v ok">89</div><div class="l">requirements specified</div></div>
     <div class="stat"><div class="v ok">13</div><div class="l">functional areas</div></div>
     <div class="stat"><div class="v ok">5</div><div class="l">non-functional</div></div>
     <div class="stat"><div class="v ok">0</div><div class="l">unimplemented</div></div>
@@ -612,8 +617,12 @@ parent publishes no DS.</td><td class="mono">TestOnboardDeniedWithNoDSPublishedG
 exists but doesn't match.</td><td class="mono">TestOnboardDeniedWithKeyMismatchGivesDiagnostic</td><td>CHAIN-05, CHAIN-07, OPS-04</td></tr>    <tr><td class="tcid">TC-CHAIN-07</td><td>A generic chain failure carries no diagnostic status, distinguishing it from
 TC-CHAIN-05/06's specific cases.</td><td class="mono">TestOnboardDeniedForOtherChainReasonsCarriesNoDiagnostic</td><td>CHAIN-04, CHAIN-05 (negative)</td></tr>    <tr><td class="tcid">TC-CHAIN-08</td><td>First contact without an apex SOA (the publish-trust shape: a KSK and its paired ZSK,
 no zone content at all) is accepted, and the candidate KSK pinned.</td><td class="mono">TestOnboardWithoutSOAIsAccepted</td><td>CHAIN-06</td></tr>    <tr><td class="tcid">TC-CHAIN-09</td><td>A full, successful onboarding is servable, including RRSIGs with the DO bit.</td><td class="mono">TestOnboardFullPushThenQuery, TestOnboardedZoneServesRRSIGsWithDOBit</td><td>CHAIN-01, CHAIN-02, CONTENT-11</td></tr>    <tr><td class="tcid">TC-CHAIN-10</td><td>A wildcard Corefile scope onboards multiple independent domains with no restart, and
-never onboarding a name still falls through to the next plugin.</td><td class="mono">TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges,
-TestWildcardScopeFallsThroughForNeverOnboardedNames</td><td>CONTENT-12</td></tr>  </table></div>
+never onboarding a name still falls through to the next plugin when one is configured;
+with none configured, both a never-onboarded name (ordinary query) and an UPDATE outside
+the static Corefile zone scope are refused (REFUSED) rather than met with SERVFAIL.</td><td class="mono">TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges,
+TestWildcardScopeFallsThroughForNeverOnboardedNames,
+TestNeverOnboardedNameIsRefusedNotServerFailureWithNoNextPlugin,
+TestUpdateOutsideZoneScopeIsRefusedNotServerFailureWithNoNextPlugin</td><td>CONTENT-12, CONTENT-17</td></tr>  </table></div>
   <h3 class="subhead" id="ts-key"><span class="secno">3.3</span> KEY</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-KEY-01</td><td>KeyRegistry KSK pin/get round-trips; zone names are compared case-insensitively.</td><td class="mono">TestKeyRegistryPinKSKAndGet, TestKeyRegistryNormalizesZoneNames</td><td>KEY-01</td></tr>    <tr><td class="tcid">TC-KEY-02</td><td>A push signed by an unpinned/wrong key is rejected.</td><td class="mono">TestPartialPushFromWrongKeyRejected</td><td>KEY-02</td></tr>    <tr><td class="tcid">TC-KEY-03</td><td>An ordinary partial push after onboarding succeeds against the pinned key.</td><td class="mono">TestOrdinaryPartialPushAfterOnboarding</td><td>KEY-01</td></tr>    <tr><td class="tcid">TC-KEY-04</td><td>A valid KSK rollover (new candidate independently chains to a DS) succeeds; the
 superseded key stops working.</td><td class="mono">TestKeyRolloverSwitchesToNewKey</td><td>KEY-03, KEY-05</td></tr>    <tr><td class="tcid">TC-KEY-05</td><td>Rollover fails, and the old key remains pinned, when the new candidate has no DS.</td><td class="mono">TestKeyRolloverFailsWithoutADSForTheNewKey</td><td>KEY-03</td></tr>    <tr><td class="tcid">TC-KEY-06</td><td>A rollover candidate below the algorithm floor is rejected before any chain-of-trust

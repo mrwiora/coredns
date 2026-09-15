@@ -1540,6 +1540,53 @@ func TestWildcardScopeFallsThroughForNeverOnboardedNames(t *testing.T) {
 	}
 }
 
+// TestNeverOnboardedNameIsRefusedNotServerFailureWithNoNextPlugin proves
+// nextOrRefuse's whole point: when nothing follows sazu in the plugin
+// chain (s.Next nil, e.g. a Corefile with no catch-all after "sazu" --
+// a real, observed deployment shape, not a contrived one), a query for a
+// name sazu doesn't recognize gets REFUSED, matching plugin/auto's own
+// established convention for exactly this situation ("more correct to
+// return REFUSED as auto acts as an authoritative server") -- not
+// plugin.NextOrFailure's generic SERVFAIL, which reads as "something is
+// broken" for what is actually an entirely ordinary "not my zone" answer.
+// serveThroughRealServer registers sazu as the sole plugin, so s.Next is
+// nil here exactly as it would be for this real Corefile shape.
+func TestNeverOnboardedNameIsRefusedNotServerFailureWithNoNextPlugin(t *testing.T) {
+	s := newTestSazu("example.org.")
+	addr := serveThroughRealServer(t, s)
+
+	m := new(dns.Msg)
+	m.SetQuestion("never-onboarded.example.", dns.TypeA)
+	resp, _, err := new(dns.Client).Exchange(m, addr)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	}
+}
+
+// TestUpdateOutsideZoneScopeIsRefusedNotServerFailureWithNoNextPlugin is
+// TestNeverOnboardedNameIsRefusedNotServerFailureWithNoNextPlugin's
+// counterpart for the other nextOrRefuse call site: an UPDATE whose zone
+// section names something outside s.Zones' own static Corefile scope.
+func TestUpdateOutsideZoneScopeIsRefusedNotServerFailureWithNoNextPlugin(t *testing.T) {
+	s := newTestSazu("example.org.")
+	addr := serveThroughRealServer(t, s)
+
+	m := new(dns.Msg)
+	m.SetQuestion("outside-scope.example.", dns.TypeSOA)
+	m.Opcode = dns.OpcodeUpdate
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatalf("packing update: %v", err)
+	}
+	resp := sendRaw(t, addr, wire)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	}
+}
+
 // TestContactRegistrationRidesOrdinaryPushAndIsNeverServed proves §10.6's
 // registration record: a contact address travels inside an otherwise
 // ordinary, already-authenticated push (no separate protocol/transport of

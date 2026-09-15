@@ -179,11 +179,15 @@ areas:
   - id: TC-CHAIN-10
     objective: |-
       A wildcard Corefile scope onboards multiple independent domains with no restart, and
-      never onboarding a name still falls through to the next plugin.
+      never onboarding a name still falls through to the next plugin when one is configured;
+      with none configured, both a never-onboarded name (ordinary query) and an UPDATE outside
+      the static Corefile zone scope are refused (REFUSED) rather than met with SERVFAIL.
     functions: |-
       TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges,
-      TestWildcardScopeFallsThroughForNeverOnboardedNames
-    verifies: CONTENT-12
+      TestWildcardScopeFallsThroughForNeverOnboardedNames,
+      TestNeverOnboardedNameIsRefusedNotServerFailureWithNoNextPlugin,
+      TestUpdateOutsideZoneScopeIsRefusedNotServerFailureWithNoNextPlugin
+    verifies: CONTENT-12, CONTENT-17
 - id: key
   title: KEY
   cases:

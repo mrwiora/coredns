@@ -1216,6 +1216,39 @@ pushes alike.
   actually validates each time -- the exact end-to-end property that
   was broken.
 
+- **Fixed: SERVFAIL, not REFUSED, for a query/update sazu doesn't
+  recognize when nothing follows it in the plugin chain.** Found from a
+  real deployment log line -- `plugin/sazu: no next plugin found` for a
+  domain never onboarded here -- that read as confusingly close to "the
+  sazu plugin itself is missing," when what actually happened was
+  entirely ordinary: sazu correctly determined the name wasn't one of
+  its zones and tried to hand the query to the next plugin, and there
+  wasn't one. That string is CoreDNS's own shared
+  `plugin.NextOrFailure` wording, used identically by every plugin
+  falling through with no next plugin configured -- not something sazu
+  itself can or should reword. What sazu *can* control is the rcode:
+  checked `plugin/auto`'s handling of the identical situation, which
+  already returns `REFUSED` directly rather than falling through to
+  `NextOrFailure`'s `SERVFAIL` when it has no next plugin, with the
+  comment "more correct to return REFUSED as auto acts as an
+  authoritative server." The same reasoning applies to sazu just as
+  directly.
+
+  New `(*Sazu).nextOrRefuse` wraps both of `ServeDNS`'s "not mine"
+  fallthrough sites (an ordinary query for a never-onboarded zone, and
+  an UPDATE outside the static Corefile scope) with this: REFUSED
+  (with a `log.Debugf` explaining why, in sazu's own logs) when
+  `s.Next` is nil, `plugin.NextOrFailure` unchanged otherwise. New
+  `CONTENT-17` in the verification dossier, and two new tests
+  (`TestNeverOnboardedNameIsRefusedNotServerFailureWithNoNextPlugin`,
+  `TestUpdateOutsideZoneScopeIsRefusedNotServerFailureWithNoNextPlugin`,
+  `plugin/sazu/handler_test.go`) confirm both sites now return REFUSED
+  under exactly the Corefile shape (sazu as the sole/last plugin) that
+  produced the original confusing log line, while the existing
+  fall-through-when-a-next-plugin-exists behavior
+  (`TestWildcardScopeFallsThroughForNeverOnboardedNames`) is
+  unaffected.
+
 ## Outstanding
 
 Every item the architectural review that led to this document identified

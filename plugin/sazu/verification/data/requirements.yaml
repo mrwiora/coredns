@@ -357,6 +357,15 @@ areas:
       partial/differential content-update mechanism. Key-management records (DNSKEY) SHALL
       never be affected by a content push.
     source: Engineering decision
+  - id: CONTENT-17
+    text: |-
+      A query or update whose name falls outside the plugin's static Corefile scope (CLIENT-04
+      of an UPDATE's zone section) or names a zone never onboarded SHALL fall through to the
+      next plugin in the chain (CONTENT-12) when one is configured; when none is (a deployment
+      with no catch-all after this plugin), it SHALL be refused (REFUSED) rather than answered
+      with SERVFAIL — the same convention an authoritative-zone plugin acting as the end of its
+      own chain SHALL follow generally.
+    source: Engineering decision (matches plugin/auto's own established convention)
 - id: contact
   code: CONTACT
   title: Registration record

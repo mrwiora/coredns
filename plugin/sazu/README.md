@@ -54,7 +54,12 @@ sazu ZONES... {
   the `db` file if configured), not by this list. Use a narrower zone
   (e.g. `customers.example.`) to restrict onboarding to subdomains
   delegated under one umbrella zone instead. If empty, the zones from the
-  server block are used.
+  server block are used. A query or push for a name within scope but never
+  onboarded falls through to whatever plugin comes after `sazu` in the
+  Corefile, so a broad `.` scope doesn't swallow every other domain/plugin
+  on the same server; if nothing comes after it, that query is refused
+  (REFUSED) rather than answered with SERVFAIL — the same convention
+  `plugin/auto` uses for the same situation.
 * `insecure_skip_chain_validation` disables the §10.2 chain-of-trust
   cross-check at first contact. **For local testing only** — see
   [Local sandbox testing](#local-sandbox-testing) below. Never set this in
