@@ -298,10 +298,12 @@ areas:
       against a real server: the full KSK use case — <code class="inline">publish-trust</code>
       onboarding (KSK+ZSK generated together), a <code class="inline">publish-zone</code>
       content re-push, and a full KSK rollover (<code class="inline">rotate-key -role
-      ksk</code>), with the ZSK still authenticating content afterward.
+      ksk</code>), with the ZSK still authenticating content afterward; the old KSK's own
+      DNSKEY record is genuinely gone from what's served post-rollover, and a live DNSKEY
+      query's RRSIG validates against the complete, actually-served resulting set.
     functions: TestE2EKSKFullLifecycle
     verifies: |-
-      KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, CLIENT-04, CLIENT-05
+      KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, KEY-12, CLIENT-04, CLIENT-05
   - id: TC-KEY-19
     objective: |-
       End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
@@ -309,10 +311,32 @@ areas:
       content push authenticated and signed entirely by the ZSK <code
       class="inline">publish-trust</code> registered, retirement, the retired key rejected
       afterward, a freshly registered replacement working again, and the <code
-      class="inline">rotate-key -role zsk</code> register-then-retire convenience path.
+      class="inline">rotate-key -role zsk</code> register-then-retire convenience path. Also,
+      after a second <code class="inline">add-zsk</code> (three served DNSKEY records) and
+      after a <code class="inline">retire-zsk</code> (back down to two, with the retired
+      record genuinely no longer served), a live DNSKEY query's RRSIG validates against
+      whatever the complete, actually-served set is at each point.
     functions: |-
       TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires
-    verifies: KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, CLIENT-04
+    verifies: KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, KEY-12, CLIENT-04
+  - id: TC-KEY-20
+    objective: |-
+      <code class="inline">BuildAddZSKPush</code>/<code class="inline">BuildRetireZSKPush</code>/
+      <code class="inline">BuildKSKRolloverPush</code> each produce a single RRSIG that
+      validates against the complete resulting DNSKEY RRset (never one computed over only the
+      changed record), and a rollover or retirement explicitly deletes whichever record is no
+      longer part of that set. Directly regresses the bug this family of functions was built to
+      fix: an earlier version signed only the newly added or self-signing record in isolation,
+      which stopped covering what was actually served the moment a zone had more than the
+      original KSK+ZSK pair, or after any KSK rollover at all. cmd/sazuctl's add-zsk,
+      retire-zsk, and rotate-key -role ksk all require -target (rather than allowing the usual
+      print-and-self-verify-only mode) so they can query that current set live before signing.
+    functions: |-
+      TestBuildAddZSKPushSignsCompleteResultingRRset,
+      TestBuildRetireZSKPushSignsCompleteRemainingRRsetAndDeletesRetired,
+      TestBuildKSKRolloverPushSignsCompleteResultingRRsetAndDeletesOldKSK,
+      TestAddZSKRetireZSKAndRotateKeyKSKRequireTarget (cmd/sazuctl/main_test.go)
+    verifies: KEY-12
 - id: algo
   title: ALGO
   cases:

@@ -163,6 +163,146 @@ func BuildTrustPush(zone string, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *
 	return m, nil
 }
 
+// dnskeyRRAt builds a fresh apex DNSKEY record for zone from k's key
+// material -- k itself may carry a different owner name (e.g. one just
+// fetched live via an ordinary query, which sets it from the query
+// name), which this deliberately discards in favor of zone.
+func dnskeyRRAt(zone string, k *dns.DNSKEY) *dns.DNSKEY {
+	return &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     k.Flags, Protocol: k.Protocol, Algorithm: k.Algorithm, PublicKey: k.PublicKey,
+	}
+}
+
+// sameDNSKEY reports whether a and b are the same key -- compared by
+// public key material and algorithm alone, the two fields that actually
+// identify "the same key" independent of which zone name or flags a
+// given copy happens to carry (e.g. one just fetched live via a query
+// versus one loaded from a local file).
+func sameDNSKEY(a, b *dns.DNSKEY) bool {
+	return a.Algorithm == b.Algorithm && a.PublicKey == b.PublicKey
+}
+
+// buildDNSKEYRRsetPush builds an RFC 2136 UPDATE message that changes a
+// zone's served apex DNSKEY RRset from current to want: an RFC 2136
+// §2.5.4 delete for each record in current no longer in want, followed
+// by every record in want -- new or unchanged -- re-asserted as an
+// ordinary add, together with one fresh RRSIG (signed by signer/
+// signerPriv) covering exactly want.
+//
+// Re-asserting every unchanged record isn't redundant, and skipping it
+// is the mistake this function exists to prevent: an RRSIG covers its
+// whole RRset as one unit, never a single record added or removed
+// independently of the rest, and this package's server never holds a
+// private key to recompute one itself (SAZU's whole premise is that it
+// never needs to). So whichever client changes this RRset's membership
+// -- BuildAddZSKPush, BuildRetireZSKPush, BuildKSKRolloverPush, all
+// built on this -- must present, and sign, the complete new membership
+// every time, not just the delta, or the signature ends up covering
+// content that no longer matches what's actually served (see
+// SAZU-PLAN.md for the concrete failure this was found from: a stale
+// RRSIG left covering a DNSKEY set that no longer existed, which a real
+// validating resolver would see as a bogus signature over the entire
+// zone).
+func buildDNSKEYRRsetPush(zone string, current, want []*dns.DNSKEY, signer *dns.DNSKEY, signerPriv crypto.Signer) (*dns.Msg, error) {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
+	m.Opcode = dns.OpcodeUpdate
+
+	var removed []dns.RR
+	for _, k := range current {
+		still := false
+		for _, w := range want {
+			if sameDNSKEY(k, w) {
+				still = true
+				break
+			}
+		}
+		if !still {
+			removed = append(removed, dnskeyRRAt(zone, k))
+		}
+	}
+	if len(removed) > 0 {
+		m.Remove(removed)
+	}
+
+	wantRRs := make([]dns.RR, len(want))
+	for i, k := range want {
+		wantRRs[i] = dnskeyRRAt(zone, k)
+	}
+	now := time.Now()
+	signed, err := SignZoneContent(wantRRs, signer, signerPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	if err != nil {
+		return nil, err
+	}
+	m.Insert(signed)
+	return m, nil
+}
+
+// BuildAddZSKPush builds an RFC 2136 UPDATE message that registers
+// newZSK on top of a zone's existing DNSKEY RRset, re-signing the
+// complete resulting set (current plus newZSK) as one RRSIG -- see
+// buildDNSKEYRRsetPush's doc comment for why re-signing only newZSK
+// alone, the way an earlier version of this package did, is wrong.
+//
+// current is every DNSKEY record the zone currently serves -- a live
+// query (see cmd/sazuctl's fetchCurrentDNSKEYs), since this package
+// tracks no server-side state of its own and has no other way to know
+// it. signer/signerPriv is whichever key is authenticating and content-
+// signing this transaction: ordinarily the KSK, but this package's own
+// convention (see keys.go's KeyRole doc comment) also allows an
+// already-authorized ZSK to register another.
+//
+// The transaction itself (SIG(0), via SignUpdate) must also be signed
+// by signer.
+func BuildAddZSKPush(zone string, current []*dns.DNSKEY, newZSK *dns.DNSKEY, signer *dns.DNSKEY, signerPriv crypto.Signer) (*dns.Msg, error) {
+	want := append(append([]*dns.DNSKEY{}, current...), newZSK)
+	return buildDNSKEYRRsetPush(zone, current, want, signer, signerPriv)
+}
+
+// BuildRetireZSKPush builds an RFC 2136 UPDATE message that removes
+// retiredZSK from a zone's DNSKEY RRset, re-signing the complete
+// remaining set -- BuildAddZSKPush's inverse; see its doc comment and
+// buildDNSKEYRRsetPush's for why the remaining, unchanged records must
+// be re-signed too, not just deleted from.
+//
+// current and signer/signerPriv are exactly as in BuildAddZSKPush.
+func BuildRetireZSKPush(zone string, current []*dns.DNSKEY, retiredZSK *dns.DNSKEY, signer *dns.DNSKEY, signerPriv crypto.Signer) (*dns.Msg, error) {
+	var want []*dns.DNSKEY
+	for _, k := range current {
+		if !sameDNSKEY(k, retiredZSK) {
+			want = append(want, k)
+		}
+	}
+	return buildDNSKEYRRsetPush(zone, current, want, signer, signerPriv)
+}
+
+// BuildKSKRolloverPush builds an RFC 2136 UPDATE message that replaces
+// a zone's KSK: removes oldKSK and installs newKSK (which self-signs,
+// same as BuildTrustPush's first contact), re-signing the complete
+// resulting DNSKEY RRset -- every currently registered ZSK, unchanged,
+// plus newKSK. See buildDNSKEYRRsetPush's doc comment for why the
+// unchanged ZSKs must be re-signed too, not just newKSK alone: without
+// this, a rollover leaves both the old KSK's record (never explicitly
+// removed, so it lingers in what's actually served) and a signature
+// that covers only the new key in isolation, matching neither the old
+// nor the new complete set.
+//
+// current is every DNSKEY record the zone currently serves (see
+// BuildAddZSKPush). The transaction itself (SIG(0), via SignUpdate)
+// must also be signed by newKSK -- a rollover, like first contact, only
+// ever trusts a SEP-flagged candidate to authenticate it.
+func BuildKSKRolloverPush(zone string, current []*dns.DNSKEY, oldKSK, newKSK *dns.DNSKEY, newKSKPriv crypto.Signer) (*dns.Msg, error) {
+	var want []*dns.DNSKEY
+	for _, k := range current {
+		if !sameDNSKEY(k, oldKSK) {
+			want = append(want, k)
+		}
+	}
+	want = append(want, newKSK)
+	return buildDNSKEYRRsetPush(zone, current, want, newKSK, newKSKPriv)
+}
+
 // BuildContentPush builds an RFC 2136 UPDATE message for a routine,
 // ZSK-only zone-content push: the zone's complete content (soa, rrs, and
 // a freshly computed denial-of-existence chain), signed entirely by zsk

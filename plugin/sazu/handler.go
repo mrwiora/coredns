@@ -731,8 +731,11 @@ func findCandidateKey(updateOps []dns.RR, zone string) (*dns.DNSKEY, error) {
 			continue
 		}
 		h := key.Header()
-		if h.Rdlength == 0 || !strings.EqualFold(h.Name, zoneLower) {
-			continue // a delete-shaped DNSKEY op, or for a different name
+		if h.Class != dns.ClassINET || h.Rdlength == 0 || !strings.EqualFold(h.Name, zoneLower) {
+			continue // a delete-shaped DNSKEY op (§2.5.2/.3's Rdlength==0 form,
+			// or §2.5.4's Class-NONE-with-full-rdata one -- a KSK rollover's
+			// own explicit delete of the superseded key is exactly this
+			// latter shape), or for a different name
 		}
 		if key.Flags&dns.SEP != 0 {
 			if ksk != nil {

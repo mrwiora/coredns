@@ -179,3 +179,37 @@ func TestRunPublishZoneRejectsUnknownDenialOfExistenceValue(t *testing.T) {
 		t.Fatalf("expected the error to name -denial-of-existence, got %q", err)
 	}
 }
+
+// TestAddZSKRetireZSKAndRotateKeyKSKRequireTarget proves -target is
+// enforced as required (not merely conventional) for the three commands
+// that need to query a zone's current DNSKEY set live before they can
+// correctly sign a change to it -- see fetchCurrentDNSKEYs' own doc
+// comment for why omitting it can no longer be treated as "just print
+// the wire bytes" the way every other subcommand still allows.
+func TestAddZSKRetireZSKAndRotateKeyKSKRequireTarget(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func() error
+	}{
+		{"add-zsk", func() error {
+			return runAddZSK([]string{"-zone", "example.org.", "-ksk-key", "/nonexistent", "-zsk-key", "/nonexistent"})
+		}},
+		{"retire-zsk", func() error {
+			return runRetireZSK([]string{"-zone", "example.org.", "-ksk-key", "/nonexistent", "-zsk-key", "/nonexistent"})
+		}},
+		{"rotate-key -role ksk", func() error {
+			return runRotateKey([]string{"-zone", "example.org.", "-role", "ksk", "-key", "/nonexistent", "-new-key", "/nonexistent"})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if err == nil {
+				t.Fatalf("expected an error when -target is omitted")
+			}
+			if !strings.Contains(err.Error(), "-target") {
+				t.Fatalf("expected the error to name -target, got %q", err)
+			}
+		})
+	}
+}

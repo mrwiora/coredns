@@ -232,6 +232,16 @@ areas:
       the KSK; every ZSK registered via an ordinary push SHALL default to this, since the
       DNSKEY wire format (RFC 4034 §2.1.1) has no reserved bit to request otherwise.
     source: RFC 4034 §2.1.1 &middot; Engineering decision
+  - id: KEY-12
+    text: |-
+      Any client-side change to a zone's served DNSKEY RRset membership (a ZSK registration or
+      retirement, or a KSK rollover) SHALL leave that RRset covered by a single RRSIG that
+      validates against its complete, current membership — never one computed over only the
+      record being added or removed — and SHALL explicitly remove any DNSKEY record no longer
+      part of that membership (an RFC 2136 §2.5.4 delete), rather than leaving it served
+      alongside a signature that no longer covers it.
+    source: |-
+      RFC 4034 §3 (an RRSIG covers its whole RRset) &middot; Engineering decision
 - id: algo
   code: ALGO
   title: Minimum algorithm floor

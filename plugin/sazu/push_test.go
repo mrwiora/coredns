@@ -243,3 +243,157 @@ func TestBuildFullZonePushSignsAndVerifies(t *testing.T) {
 		t.Fatalf("full-zone push should self-verify: %v", err)
 	}
 }
+
+// dnskeysAndSigFromOps splits ops (an add-zsk/retire-zsk/KSK-rollover
+// push's Ns section) into its added DNSKEY records, its deleted ones
+// (RFC 2136 §2.5.4, class NONE), and its single RRSIG(DNSKEY) -- the
+// three things TestBuildAddZSKPush.../TestBuildRetireZSKPush.../
+// TestBuildKSKRolloverPush... below all check.
+func dnskeysAndSigFromOps(t *testing.T, ops []dns.RR) (adds, deletes []*dns.DNSKEY, sig *dns.RRSIG) {
+	t.Helper()
+	for _, rr := range ops {
+		switch v := rr.(type) {
+		case *dns.RRSIG:
+			if v.TypeCovered != dns.TypeDNSKEY {
+				continue
+			}
+			if sig != nil {
+				t.Fatalf("expected exactly one RRSIG(DNSKEY), found a second: %s", v.String())
+			}
+			sig = v
+		case *dns.DNSKEY:
+			if rr.Header().Class == dns.ClassNONE {
+				deletes = append(deletes, v)
+			} else {
+				adds = append(adds, v)
+			}
+		}
+	}
+	return adds, deletes, sig
+}
+
+func toRRSlice(keys []*dns.DNSKEY) []dns.RR {
+	out := make([]dns.RR, len(keys))
+	for i, k := range keys {
+		out[i] = k
+	}
+	return out
+}
+
+// TestBuildAddZSKPushSignsCompleteResultingRRset is the regression test
+// for the bug this whole family of functions exists to fix: an earlier
+// version of this package (in cmd/sazuctl, before BuildAddZSKPush
+// existed) signed only the newly added ZSK record in isolation, leaving
+// the DNSKEY RRset with no RRSIG that actually covered what was served
+// once a zone had more than the original KSK+ZSK pair. Verified here
+// directly against a real RRSIG.Verify call, the same check a validating
+// resolver performs.
+func TestBuildAddZSKPushSignsCompleteResultingRRset(t *testing.T) {
+	ksk, kskPriv, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatalf("generating KSK: %v", err)
+	}
+	zskA, _, err := GenerateEd25519Key("example.org.", false)
+	if err != nil {
+		t.Fatalf("generating ZSK A: %v", err)
+	}
+	zskB, _, err := GenerateEd25519Key("example.org.", false)
+	if err != nil {
+		t.Fatalf("generating ZSK B: %v", err)
+	}
+
+	m, err := BuildAddZSKPush("example.org.", []*dns.DNSKEY{ksk, zskA}, zskB, ksk, kskPriv)
+	if err != nil {
+		t.Fatalf("BuildAddZSKPush: %v", err)
+	}
+
+	adds, deletes, sig := dnskeysAndSigFromOps(t, m.Ns)
+	if len(deletes) != 0 {
+		t.Fatalf("expected no deletes when only adding a key, got %+v", deletes)
+	}
+	if len(adds) != 3 {
+		t.Fatalf("expected all 3 resulting keys re-asserted as adds, got %d: %+v", len(adds), adds)
+	}
+	if sig == nil {
+		t.Fatalf("expected a covering RRSIG(DNSKEY) among the ops")
+	}
+	if err := sig.Verify(ksk, toRRSlice(adds)); err != nil {
+		t.Fatalf("expected the RRSIG to validate against the complete resulting 3-key RRset, got %v", err)
+	}
+}
+
+// TestBuildRetireZSKPushSignsCompleteRemainingRRsetAndDeletesRetired
+// proves both halves of the fix: the retired key is explicitly deleted
+// (never just implied by its absence from a fresh signature), and the
+// fresh RRSIG covers exactly the remaining set -- provably not the
+// stale, pre-retirement one, which is the failure this was found from.
+func TestBuildRetireZSKPushSignsCompleteRemainingRRsetAndDeletesRetired(t *testing.T) {
+	ksk, kskPriv, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatalf("generating KSK: %v", err)
+	}
+	zskA, _, err := GenerateEd25519Key("example.org.", false)
+	if err != nil {
+		t.Fatalf("generating ZSK A: %v", err)
+	}
+	zskB, _, err := GenerateEd25519Key("example.org.", false)
+	if err != nil {
+		t.Fatalf("generating ZSK B: %v", err)
+	}
+	current := []*dns.DNSKEY{ksk, zskA, zskB}
+
+	m, err := BuildRetireZSKPush("example.org.", current, zskB, ksk, kskPriv)
+	if err != nil {
+		t.Fatalf("BuildRetireZSKPush: %v", err)
+	}
+
+	adds, deletes, sig := dnskeysAndSigFromOps(t, m.Ns)
+	if len(deletes) != 1 || deletes[0].PublicKey != zskB.PublicKey {
+		t.Fatalf("expected exactly one delete, for the retired ZSK, got %+v", deletes)
+	}
+	if len(adds) != 2 {
+		t.Fatalf("expected the 2 remaining keys re-asserted as adds, got %d: %+v", len(adds), adds)
+	}
+	if err := sig.Verify(ksk, toRRSlice(adds)); err != nil {
+		t.Fatalf("expected the RRSIG to validate against the complete remaining 2-key RRset, got %v", err)
+	}
+	if err := sig.Verify(ksk, toRRSlice(current)); err == nil {
+		t.Fatalf("expected the fresh RRSIG NOT to validate against the stale, pre-retirement 3-key set")
+	}
+}
+
+// TestBuildKSKRolloverPushSignsCompleteResultingRRsetAndDeletesOldKSK
+// proves a rollover explicitly removes the old KSK's own served record
+// (never just left to linger once it's out of the key registry) and
+// re-signs the complete resulting set (the new KSK plus every unchanged
+// ZSK) with the new, self-signing KSK.
+func TestBuildKSKRolloverPushSignsCompleteResultingRRsetAndDeletesOldKSK(t *testing.T) {
+	oldKSK, _, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatalf("generating old KSK: %v", err)
+	}
+	zskA, _, err := GenerateEd25519Key("example.org.", false)
+	if err != nil {
+		t.Fatalf("generating ZSK A: %v", err)
+	}
+	newKSK, newKSKPriv, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatalf("generating new KSK: %v", err)
+	}
+
+	m, err := BuildKSKRolloverPush("example.org.", []*dns.DNSKEY{oldKSK, zskA}, oldKSK, newKSK, newKSKPriv)
+	if err != nil {
+		t.Fatalf("BuildKSKRolloverPush: %v", err)
+	}
+
+	adds, deletes, sig := dnskeysAndSigFromOps(t, m.Ns)
+	if len(deletes) != 1 || deletes[0].PublicKey != oldKSK.PublicKey {
+		t.Fatalf("expected exactly one delete, for the old KSK, got %+v", deletes)
+	}
+	if len(adds) != 2 {
+		t.Fatalf("expected the new KSK plus the unchanged ZSK re-asserted as adds, got %d: %+v", len(adds), adds)
+	}
+	if err := sig.Verify(newKSK, toRRSlice(adds)); err != nil {
+		t.Fatalf("expected the RRSIG (self-signed by the new KSK) to validate against the complete resulting 2-key RRset, got %v", err)
+	}
+}

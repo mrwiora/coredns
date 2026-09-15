@@ -193,17 +193,23 @@ Subcommands:
   can repeat. This rides an ordinary authenticated push at a reserved owner
   name (`_sazu-contact.<zone>`) — it is never itself DNSSEC-signed or
   servable DNS content, just metadata carried alongside a real update.
-* `sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-target host:port|url] [-json]` —
+* `sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-json]` —
   register an additional ZSK on top of a zone's existing KSK: an
   ordinary push, authenticated by `-ksk-key`, that adds `-zsk-key`'s DNSKEY
   record. Generates `-zsk-key` if it doesn't exist yet. No chain-of-trust
   network walk and no registrar step. `publish-trust` already creates a
   zone's first ZSK automatically at onboarding — reach for this to add a
   second one, or to register a replacement after `retire-zsk`; see **KSK,
-  and the ZSK it's always paired with** below for what this is for.
-* `sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-target host:port|url] [-json]` —
+  and the ZSK it's always paired with** below for what this is for. Unlike
+  every other subcommand, `-target` is **required**, not optional: an
+  RRSIG covers a whole RRset, so correctly re-signing the DNSKEY set this
+  adds a record to means first querying `-target` live for its current,
+  complete membership — this tool holds no server-side state of its own
+  to fall back on.
+* `sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-json]` —
   the reverse: remove a previously registered ZSK. `-zsk-key` must already
-  exist (never generated here).
+  exist (never generated here). `-target` is required for the same reason
+  as `add-zsk`.
 * `sazuctl rotate-key -zone <zone> [-role ksk|zsk] ...` — the decision-support
   entry point for rotating *some* key when you're not sure which kind. Run
   with no `-role` at all, it makes no change and instead explains the
@@ -213,10 +219,13 @@ Subcommands:
   retires the old one — needs `-key`, `-current-zsk-key`, `-new-zsk-key`) or
   `-role ksk` (performs an ordinary §10.4 KSK rollover — needs `-key`,
   `-new-key` — printing a reminder that this always requires a new DS
-  record at your registrar).
+  record at your registrar). `-target` is required for either role, for
+  the same reason as `add-zsk`/`retire-zsk` above (a rollover re-signs the
+  complete resulting DNSKEY set too, not just the new KSK).
 
-Every subcommand without `-target` just prints the signed wire bytes and
-self-verifies — safe to run with nothing listening yet.
+Every subcommand *other than* `add-zsk`, `retire-zsk`, and `rotate-key`
+run without `-target` just prints the signed wire bytes and self-verifies
+— safe to run with nothing listening yet.
 
 `-target` accepts either `host:port` (sent over TCP, always, by default —
 it works regardless of message size or path MTU, at the cost of one extra

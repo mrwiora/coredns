@@ -188,12 +188,12 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sazuctl publish-trust -zone <zone> -key <path> -zsk-key <path> [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-denial-of-existence nsec3|nsec] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl contact -zone <zone> -key <path> [-address mailto:you@example.org]... [-clear] [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl rotate-key -zone <zone> [-role ksk|zsk] [-udp (role zsk only)] ... (run with no -role for an explanation of the choice)")
+	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-udp] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-udp] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl rotate-key -zone <zone> [-role ksk|zsk] -target host:port|url [-udp (role zsk only)] ... (run with no -role for an explanation of the choice)")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "-key-passphrase-file encrypts/decrypts the key file at rest (§10.8); omit it for a plain BIND-format key file (the default).")
-	fmt.Fprintln(os.Stderr, "-target accepts an http(s):// URL to push over §7.3's HTTPS carrier instead of TCP; -json then sends a JSON wire envelope instead of raw bytes.")
+	fmt.Fprintln(os.Stderr, "-target accepts an http(s):// URL to push over §7.3's HTTPS carrier instead of TCP; -json then sends a JSON wire envelope instead of raw bytes. Required (not optional) for add-zsk, retire-zsk, and rotate-key: each needs to query the zone's current DNSKEY set live before it can correctly re-sign the complete resulting set -- see fetchCurrentDNSKEYs' own doc comment.")
 	fmt.Fprintln(os.Stderr, "TCP is the default and always used for push/publish-trust/publish-zone/rotate-key -role ksk (a compliant server refuses those over UDP regardless of size); -udp, where offered, opts other pushes back into UDP, falling back to TCP with a warning if the push is too large for one safe datagram.")
 	fmt.Fprintln(os.Stderr, "-denial-of-existence (publish-zone) picks the authenticated denial-of-existence proof for this push: nsec3 (the default) additionally hides the zone's name set from enumeration; nsec falls back to plain RFC 4034 NSEC. -nsec3-iterations and -nsec3-salt (hex, e.g. AABBCCDD) default to RFC 9276's current guidance (0, none) if omitted, and -nsec3-opt-out sets the Opt-Out flag; all three are ignored under -denial-of-existence=nsec.")
 	fmt.Fprintln(os.Stderr, "-zonefile (publish-zone) accepts a YAML zone definition (.yaml/.yml) as a drop-in alternative to a raw zone file -- see 'sazuctl init-zone' to create a starter one.")
@@ -790,6 +790,9 @@ func runAddZSK(args []string) error {
 	if *zone == "" || *kskPath == "" || *zskPath == "" {
 		return fmt.Errorf("-zone, -ksk-key, and -zsk-key are required")
 	}
+	if *target == "" {
+		return fmt.Errorf("-target is required: this command needs to query the zone's current DNSKEY set live before it can correctly sign a change to it")
+	}
 	kskPassphrase, err := readPassphraseFile(*kskPassphraseFile)
 	if err != nil {
 		return err
@@ -813,23 +816,20 @@ func runAddZSK(args []string) error {
 	}
 	printKeyInfo(*zskPath, zsk)
 
-	zskRR := &dns.DNSKEY{
-		Hdr:   dns.RR_Header{Name: dns.Fqdn(*zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags: zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
-	}
-	now := time.Now()
-	// Content-signature verification is mandatory on every push -- signed
-	// by -ksk-key (whichever key is authenticating this transaction),
-	// RFC 4034's own convention that the trusted key signs the DNSKEY set.
-	signed, err := sazu.SignZoneContent([]dns.RR{zskRR}, ksk, kskPriv, now.Add(-sazu.DefaultSignatureInceptionSkew), now.Add(sazu.DefaultSignatureValidity))
+	// The DNSKEY RRset's RRSIG must cover its complete membership, not
+	// just the record being added -- see BuildAddZSKPush's own doc
+	// comment for why -target is required here to fetch that live: this
+	// tool tracks no server-side state of its own.
+	current, err := fetchCurrentDNSKEYs(*target, *zone)
 	if err != nil {
 		return err
 	}
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(*zone), dns.TypeSOA)
-	m.Opcode = dns.OpcodeUpdate
-	m.Insert(signed)
+	m, err := sazu.BuildAddZSKPush(*zone, current, zsk, ksk, kskPriv)
+	if err != nil {
+		return err
+	}
 
+	now := time.Now()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		return err
@@ -859,6 +859,9 @@ func runRetireZSK(args []string) error {
 	if *zone == "" || *kskPath == "" || *zskPath == "" {
 		return fmt.Errorf("-zone, -ksk-key, and -zsk-key are required")
 	}
+	if *target == "" {
+		return fmt.Errorf("-target is required: this command needs to query the zone's current DNSKEY set live before it can correctly sign a change to it")
+	}
 	kskPassphrase, err := readPassphraseFile(*kskPassphraseFile)
 	if err != nil {
 		return err
@@ -875,13 +878,18 @@ func runRetireZSK(args []string) error {
 	}
 	printKeyInfo(*zskPath, zsk)
 
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(*zone), dns.TypeSOA)
-	m.Opcode = dns.OpcodeUpdate
-	m.Remove([]dns.RR{&dns.DNSKEY{
-		Hdr:   dns.RR_Header{Name: dns.Fqdn(*zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags: zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
-	}})
+	// See runAddZSK's identical comment: the DNSKEY RRset's RRSIG must
+	// cover its complete remaining membership after this key is gone,
+	// not just the deletion itself, which is why this needs a live
+	// -target too.
+	current, err := fetchCurrentDNSKEYs(*target, *zone)
+	if err != nil {
+		return err
+	}
+	m, err := sazu.BuildRetireZSKPush(*zone, current, zsk, ksk, kskPriv)
+	if err != nil {
+		return err
+	}
 
 	now := time.Now()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
@@ -971,10 +979,24 @@ func runRotateKey(args []string) error {
 		if *keyPath == "" || *newKeyPath == "" {
 			return fmt.Errorf("-role ksk needs -key (the current KSK) and -new-key")
 		}
+		if *target == "" {
+			return fmt.Errorf("-target is required: a KSK rollover needs to query the zone's current DNSKEY set live before it can correctly sign the complete resulting set")
+		}
 		fmt.Println("KSK rotation requires a new DS record at your registrar, exactly like first onboarding this")
 		fmt.Println("zone did -- if the push below is refused with a DS-related diagnostic, follow the guidance")
 		fmt.Println("it prints (the new key's DS record, and how to publish it) before trying again.")
 		fmt.Println()
+		passphrase, err := readPassphraseFile(*passphraseFile)
+		if err != nil {
+			return err
+		}
+		oldPriv, err := sazu.LoadPrivateKey(*keyPath, passphrase)
+		if err != nil {
+			return fmt.Errorf("-key %s: %w", *keyPath, err)
+		}
+		oldKSK := sazu.DNSKEYFor(*zone, oldPriv, true)
+		printKeyInfo(*keyPath, oldKSK)
+
 		newPassphrase, err := readPassphraseFile(*newPassphraseFile)
 		if err != nil {
 			return err
@@ -988,22 +1010,21 @@ func runRotateKey(args []string) error {
 		}
 		printKeyInfo(*newKeyPath, newKSK)
 
-		newKSKRR := &dns.DNSKEY{
-			Hdr:   dns.RR_Header{Name: dns.Fqdn(*zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-			Flags: newKSK.Flags, Protocol: newKSK.Protocol, Algorithm: newKSK.Algorithm, PublicKey: newKSK.PublicKey,
-		}
-		now := time.Now()
-		// Content-signature verification is mandatory on every push -- the
-		// new KSK self-signs its own DNSKEY RRset, same as first contact.
-		signed, err := sazu.SignZoneContent([]dns.RR{newKSKRR}, newKSK, newPriv, now.Add(-sazu.DefaultSignatureInceptionSkew), now.Add(sazu.DefaultSignatureValidity))
+		// The resulting DNSKEY RRset's RRSIG must cover the new KSK plus
+		// every currently registered ZSK, not just the new KSK alone --
+		// see BuildKSKRolloverPush's own doc comment for why -target is
+		// required here to fetch that live: this tool tracks no
+		// server-side state of its own.
+		current, err := fetchCurrentDNSKEYs(*target, *zone)
 		if err != nil {
 			return err
 		}
-		m := new(dns.Msg)
-		m.SetQuestion(dns.Fqdn(*zone), dns.TypeSOA)
-		m.Opcode = dns.OpcodeUpdate
-		m.Insert(signed)
+		m, err := sazu.BuildKSKRolloverPush(*zone, current, oldKSK, newKSK, newPriv)
+		if err != nil {
+			return err
+		}
 
+		now := time.Now()
 		wire, err := sazu.SignUpdate(m, newKSK, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
 		if err != nil {
 			return err
@@ -1034,6 +1055,84 @@ func udpFlagArg(udp bool) string {
 		return "-udp"
 	}
 	return "-udp=false"
+}
+
+// fetchCurrentDNSKEYs queries target live for zone's current, complete
+// DNSKEY RRset -- an ordinary, unauthenticated query (over the same
+// carrier a push to target would use: TCP for a "host:port" target, or
+// the §7.3 HTTPS carrier for an "http://"/"https://" URL). Required
+// before add-zsk, retire-zsk, or a KSK rollover can correctly sign a
+// change to that RRset: an RRSIG covers a whole RRset, never a record
+// added or removed independently of the rest, and this tool has no
+// other way to know what that RRset currently is -- it tracks no
+// server-side state of its own, and sazu's own server never holds a
+// private key to recompute a signature on its own behalf either. See
+// BuildAddZSKPush/BuildRetireZSKPush/BuildKSKRolloverPush's own doc
+// comments in the sazu package for the full reasoning.
+func fetchCurrentDNSKEYs(target, zone string) ([]*dns.DNSKEY, error) {
+	if target == "" {
+		return nil, fmt.Errorf("-target is required: this command needs to query the zone's current DNSKEY set live before it can correctly sign a change to it")
+	}
+	q := new(dns.Msg)
+	q.SetQuestion(dns.Fqdn(zone), dns.TypeDNSKEY)
+	wire, err := q.Pack()
+	if err != nil {
+		return nil, err
+	}
+
+	var buf []byte
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		url := strings.TrimRight(target, "/") + doh.Path
+		req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(wire))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", doh.MimeType)
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("querying %s for %s's current DNSKEY set: %w", target, zone, err)
+		}
+		defer resp.Body.Close()
+		buf, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("reading DNSKEY query response from %s: %w", target, err)
+		}
+	} else {
+		conn, err := net.Dial("tcp", target)
+		if err != nil {
+			return nil, fmt.Errorf("querying %s for %s's current DNSKEY set: %w", target, zone, err)
+		}
+		defer conn.Close()
+		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+			return nil, err
+		}
+		if err := writeRequest(conn, "tcp", wire); err != nil {
+			return nil, fmt.Errorf("sending DNSKEY query to %s: %w", target, err)
+		}
+		buf, err = readResponse(conn, "tcp")
+		if err != nil {
+			return nil, fmt.Errorf("reading DNSKEY query response from %s: %w", target, err)
+		}
+	}
+
+	resp := new(dns.Msg)
+	if err := resp.Unpack(buf); err != nil {
+		return nil, fmt.Errorf("parsing DNSKEY query response from %s: %w", target, err)
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return nil, fmt.Errorf("querying %s for %s's current DNSKEY set: %s", target, zone, dns.RcodeToString[resp.Rcode])
+	}
+	var keys []*dns.DNSKEY
+	for _, rr := range resp.Answer {
+		if k, ok := rr.(*dns.DNSKEY); ok {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("%s currently serves no DNSKEY records for %s -- is it actually onboarded yet ('sazuctl publish-trust')?", target, zone)
+	}
+	return keys, nil
 }
 
 // chooseNetwork is signSelfVerifyAndSend's transport decision, pulled

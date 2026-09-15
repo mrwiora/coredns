@@ -379,7 +379,12 @@ tag; an RFC 2136 §2.5.2 "delete RRset" op SHALL NOT be treated as ZSK retiremen
 would remove the KSK too).</td><td class="src">RFC 2136 §2.5.2/§2.5.4 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-10</td><td>Content signed by any key currently valid for the zone — the KSK or any registered ZSK —
 SHALL verify under §4's mandatory content-signature check.</td><td class="src">CONTENT-04/05 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-11</td><td>A ZSK MAY be granted the ability to authenticate transactions on its own, independent of
 the KSK; every ZSK registered via an ordinary push SHALL default to this, since the
-DNSKEY wire format (RFC 4034 §2.1.1) has no reserved bit to request otherwise.</td><td class="src">RFC 4034 §2.1.1 &middot; Engineering decision</td></tr>  </table></div>
+DNSKEY wire format (RFC 4034 §2.1.1) has no reserved bit to request otherwise.</td><td class="src">RFC 4034 §2.1.1 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-12</td><td>Any client-side change to a zone's served DNSKEY RRset membership (a ZSK registration or
+retirement, or a KSK rollover) SHALL leave that RRset covered by a single RRSIG that
+validates against its complete, current membership — never one computed over only the
+record being added or removed — and SHALL explicitly remove any DNSKEY record no longer
+part of that membership (an RFC 2136 §2.5.4 delete), rather than leaving it served
+alongside a signature that no longer covers it.</td><td class="src">RFC 4034 §3 (an RRSIG covers its whole RRset) &middot; Engineering decision</td></tr>  </table></div>
   <h3 class="subhead" id="req-algo"><span class="secno">3.4</span> ALGO &mdash; Minimum algorithm floor</h3>
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">ALGO-01</td><td>A first-contact or rollover candidate key whose algorithm RFC&nbsp;8624&nbsp;§3.1 rates
@@ -526,7 +531,7 @@ clearly-named opt-in (<code class="inline">insecure_skip_chain_validation</code>
   <h2><span class="secno">5</span> Traceability summary</h2>
   <p>Every requirement above is verified by at least one automated test case; the mapping is maintained in the companion <a href="#" onclick="document.querySelector('[data-doc=test]').click();return false;">Test Specification</a> (&sect;3, per-area tables) and its execution recorded in the <a href="#" onclick="document.querySelector('[data-doc=report]').click();return false;">Test Report</a> (&sect;3). No requirement in this document is currently unverified or outstanding.</p>
   <div class="stats">
-    <div class="stat"><div class="v ok">87</div><div class="l">requirements specified</div></div>
+    <div class="stat"><div class="v ok">88</div><div class="l">requirements specified</div></div>
     <div class="stat"><div class="v ok">13</div><div class="l">functional areas</div></div>
     <div class="stat"><div class="v ok">5</div><div class="l">non-functional</div></div>
     <div class="stat"><div class="v ok">0</div><div class="l">unimplemented</div></div>
@@ -627,12 +632,30 @@ diagnostic and pins nothing.</td><td class="mono">TestFirstContactRejectsNonKSKC
 against a real server: the full KSK use case — <code class="inline">publish-trust</code>
 onboarding (KSK+ZSK generated together), a <code class="inline">publish-zone</code>
 content re-push, and a full KSK rollover (<code class="inline">rotate-key -role
-ksk</code>), with the ZSK still authenticating content afterward.</td><td class="mono">TestE2EKSKFullLifecycle</td><td>KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, CLIENT-04, CLIENT-05</td></tr>    <tr><td class="tcid">TC-KEY-19</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
+ksk</code>), with the ZSK still authenticating content afterward; the old KSK's own
+DNSKEY record is genuinely gone from what's served post-rollover, and a live DNSKEY
+query's RRSIG validates against the complete, actually-served resulting set.</td><td class="mono">TestE2EKSKFullLifecycle</td><td>KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, KEY-12, CLIENT-04, CLIENT-05</td></tr>    <tr><td class="tcid">TC-KEY-19</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
 against a real server: the full ZSK use case — a <code class="inline">publish-zone</code>
 content push authenticated and signed entirely by the ZSK <code
 class="inline">publish-trust</code> registered, retirement, the retired key rejected
 afterward, a freshly registered replacement working again, and the <code
-class="inline">rotate-key -role zsk</code> register-then-retire convenience path.</td><td class="mono">TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, CLIENT-04</td></tr>  </table></div>
+class="inline">rotate-key -role zsk</code> register-then-retire convenience path. Also,
+after a second <code class="inline">add-zsk</code> (three served DNSKEY records) and
+after a <code class="inline">retire-zsk</code> (back down to two, with the retired
+record genuinely no longer served), a live DNSKEY query's RRSIG validates against
+whatever the complete, actually-served set is at each point.</td><td class="mono">TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, KEY-12, CLIENT-04</td></tr>    <tr><td class="tcid">TC-KEY-20</td><td><code class="inline">BuildAddZSKPush</code>/<code class="inline">BuildRetireZSKPush</code>/
+<code class="inline">BuildKSKRolloverPush</code> each produce a single RRSIG that
+validates against the complete resulting DNSKEY RRset (never one computed over only the
+changed record), and a rollover or retirement explicitly deletes whichever record is no
+longer part of that set. Directly regresses the bug this family of functions was built to
+fix: an earlier version signed only the newly added or self-signing record in isolation,
+which stopped covering what was actually served the moment a zone had more than the
+original KSK+ZSK pair, or after any KSK rollover at all. cmd/sazuctl's add-zsk,
+retire-zsk, and rotate-key -role ksk all require -target (rather than allowing the usual
+print-and-self-verify-only mode) so they can query that current set live before signing.</td><td class="mono">TestBuildAddZSKPushSignsCompleteResultingRRset,
+TestBuildRetireZSKPushSignsCompleteRemainingRRsetAndDeletesRetired,
+TestBuildKSKRolloverPushSignsCompleteResultingRRsetAndDeletesOldKSK,
+TestAddZSKRetireZSKAndRotateKeyKSKRequireTarget (cmd/sazuctl/main_test.go)</td><td>KEY-12</td></tr>  </table></div>
   <h3 class="subhead" id="ts-algo"><span class="secno">3.4</span> ALGO</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-ALGO-01</td><td>Recommended algorithms are accepted; weak or unrecognised ones are rejected, at the
 classification primitive.</td><td class="mono">TestAlgorithmMeetsFloorAcceptsRecommendedAlgorithms,

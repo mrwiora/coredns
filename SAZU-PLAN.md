@@ -1147,6 +1147,75 @@ pushes alike.
   impossible to lose track of again, and, having been found, not left
   unfixed.
 
+- **Fixed: a stale RRSIG(DNSKEY) left covering a DNSKEY set that no
+  longer existed.** Found while answering a user question about
+  whether retiring a ZSK is a real change to served content or just a
+  database change -- it's a real one, but investigating it surfaced
+  that the associated signature was never kept correct. `add-zsk`
+  signed only the newly added ZSK record in isolation
+  (`SignZoneContent([]dns.RR{zskRR}, ...)`); `rotate-key -role ksk`
+  signed only the new KSK the same way, and never even deleted the old
+  KSK's own served record. An RRSIG covers its whole RRset as one unit
+  (RFC 4034 §3), never a record added or removed independently of the
+  rest, and this server never holds a private key to recompute one
+  itself -- so once a zone had more than the original KSK+ZSK pair, or
+  after any KSK rollover at all, the DNSKEY RRset ended up served with
+  no RRSIG that actually covered it. Confirmed empirically against a
+  live test server before fixing anything: a real `dig`-style query
+  after `retire-zsk` returned a DNSKEY RRset whose only RRSIG failed
+  `dns: bad signature` against exactly what was being served. A real
+  validating resolver would see this zone's entire DNSKEY RRset as
+  bogus, cascading to the whole zone, from the moment either operation
+  ran.
+
+  Fixed with three new exported functions in `push.go` --
+  `BuildAddZSKPush`, `BuildRetireZSKPush`, `BuildKSKRolloverPush`,
+  all built on a shared `buildDNSKEYRRsetPush` -- that take the zone's
+  *current* complete DNSKEY set as an explicit parameter, diff it
+  against the desired result, emit an RFC 2136 §2.5.4 delete for
+  anything no longer present, and re-assert every record in the new
+  set (changed or not) together with one fresh RRSIG signed over
+  exactly that complete set. Re-asserting unchanged records isn't
+  redundant -- `VerifySignedRRsets`' own mandatory check verifies a
+  pushed RRSIG against exactly the records pushed alongside it in the
+  same op, not against whatever the server already has stored, so the
+  RRSIG's coverage and the ops' own add-shaped content have to agree
+  literally in the wire message itself.
+
+  Since `cmd/sazuctl` has no server-side state of its own, it now has
+  to ask for that current set live: `fetchCurrentDNSKEYs` sends an
+  ordinary, unauthenticated DNSKEY query to `-target` before `add-zsk`,
+  `retire-zsk`, or `rotate-key -role ksk` build anything. This makes
+  `-target` a hard requirement for those three specifically (previously
+  optional everywhere, for "just print the signed wire bytes" dry
+  runs) -- there's no way to correctly sign a change to a set this tool
+  can't see.
+
+  Fixing this surfaced a second, smaller, previously-latent bug it
+  exposed rather than caused: `findCandidateKey` (the KSK-rollover
+  candidate detector) only recognized RFC 2136 §2.5.2/§2.5.3's
+  RDLENGTH-zero delete shape, never §2.5.4's Class-NONE-with-full-rdata
+  one -- harmless until a rollover push actually included an explicit
+  delete of the old KSK (which it now correctly does), at which point
+  the old KSK's delete-shaped record and the new KSK's add-shaped one
+  both looked like "candidates," tripping "more than one candidate
+  DNSKEY in update" internally and producing a bare NOTAUTH. Fixed by
+  adding the same `h.Class != dns.ClassINET` check
+  `findNewZSKCandidate` already had.
+
+  Verified with three new library-level tests in `push_test.go`
+  (`TestBuildAddZSKPushSignsCompleteResultingRRset`,
+  `TestBuildRetireZSKPushSignsCompleteRemainingRRsetAndDeletesRetired`,
+  `TestBuildKSKRolloverPushSignsCompleteResultingRRsetAndDeletesOldKSK`)
+  that call the real `RRSIG.Verify` -- the same check a validating
+  resolver performs -- against the complete resulting set, plus
+  extensions to the existing `TestE2EZSKFullLifecycle`/
+  `TestE2EKSKFullLifecycle` (`cmd/sazuctl/e2e_test.go`) that query a
+  real server's live DNSKEY RRset after a second `add-zsk`, after
+  `retire-zsk`, and after a KSK rollover, and confirm the served RRSIG
+  actually validates each time -- the exact end-to-end property that
+  was broken.
+
 ## Outstanding
 
 Every item the architectural review that led to this document identified

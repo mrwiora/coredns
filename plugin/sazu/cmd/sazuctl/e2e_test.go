@@ -109,6 +109,33 @@ func queryA(t *testing.T, addr, name string) []dns.RR {
 	return resp.Answer
 }
 
+// queryDNSKEYWithRRSIG queries zone's live DNSKEY RRset (DO bit set, the
+// same query a validating resolver would send) and splits the answer
+// into its DNSKEY records and its RRSIG(s) covering them -- used below
+// to prove the RRSIG actually validates against what's really being
+// served, not just that some RRSIG is present.
+func queryDNSKEYWithRRSIG(t *testing.T, addr, zone string) (dnskeys []dns.RR, sigs []*dns.RRSIG) {
+	t.Helper()
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), dns.TypeDNSKEY)
+	m.SetEdns0(4096, true)
+	resp, _, err := new(dns.Client).Exchange(m, addr)
+	if err != nil {
+		t.Fatalf("querying %s DNSKEY: %v", zone, err)
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("querying %s DNSKEY: rcode = %s", zone, dns.RcodeToString[resp.Rcode])
+	}
+	for _, rr := range resp.Answer {
+		if sig, ok := rr.(*dns.RRSIG); ok {
+			sigs = append(sigs, sig)
+		} else {
+			dnskeys = append(dnskeys, rr)
+		}
+	}
+	return dnskeys, sigs
+}
+
 func writeTestZoneFile(t *testing.T, zone string) string {
 	t.Helper()
 	return writeZoneFileWithRecords(t, zone, 1, "www."+zone+" 300 IN A 203.0.113.10")
@@ -199,6 +226,58 @@ func TestE2EKSKFullLifecycle(t *testing.T) {
 	if answer := queryA(t, addr, "after-rotation."+zone); len(answer) != 1 {
 		t.Fatalf("expected the post-rotation push's content to be servable, got %d answers", len(answer))
 	}
+
+	// The regression this whole test exists to guard, on top of what it
+	// already checked above (functional content serving through a KSK
+	// rollover): the rollover leaves the old KSK's own DNSKEY record
+	// gone from what's served, and a live DNSKEY query's RRSIG actually
+	// validates against the complete resulting set (new KSK + ZSK) --
+	// not just "some RRSIG is present." See BuildKSKRolloverPush's doc
+	// comment (plugin/sazu/push.go) for the bug this guards against: an
+	// earlier version signed only the new KSK in isolation and never
+	// deleted the old one, leaving a served DNSKEY RRset no RRSIG
+	// actually covered.
+	dnskeys, sigs := queryDNSKEYWithRRSIG(t, addr, zone)
+	if len(dnskeys) != 2 {
+		t.Fatalf("expected exactly 2 served DNSKEY records (new KSK + ZSK) after rollover, got %d: %+v", len(dnskeys), dnskeys)
+	}
+	for _, k := range dnskeys {
+		if dk, ok := k.(*dns.DNSKEY); ok && dk.Flags&dns.SEP != 0 {
+			newKSK, _, _, err := sazu.LoadOrGenerateKey(newKSKPath, zone, true, nil)
+			if err != nil {
+				t.Fatalf("re-loading the new KSK for comparison: %v", err)
+			}
+			if dk.PublicKey != newKSK.PublicKey {
+				t.Fatalf("expected the served KSK to be the NEW one, found a different key -- the old KSK was never actually replaced")
+			}
+		}
+	}
+	if len(sigs) == 0 {
+		t.Fatalf("expected at least one RRSIG(DNSKEY) among the answer")
+	}
+	if !anyRRSIGValidates(sigs, dnskeys) {
+		t.Fatalf("expected some RRSIG(DNSKEY) to validate against the actually-served, complete post-rollover DNSKEY set")
+	}
+}
+
+// anyRRSIGValidates reports whether any sig in sigs, verified against
+// whichever record in rrset its own KeyTag names, actually validates
+// against the complete rrset -- the real check a validating resolver
+// performs, matching the signing key to the signature by key tag first
+// rather than assuming a particular order or a single signer.
+func anyRRSIGValidates(sigs []*dns.RRSIG, rrset []dns.RR) bool {
+	for _, sig := range sigs {
+		for _, rr := range rrset {
+			dk, ok := rr.(*dns.DNSKEY)
+			if !ok || dk.KeyTag() != sig.KeyTag {
+				continue
+			}
+			if sig.Verify(dk, rrset) == nil {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC exercises publish-zone's
@@ -380,8 +459,51 @@ func TestE2EZSKFullLifecycle(t *testing.T) {
 		t.Fatalf("expected the ZSK-authenticated push's content to be servable, got %d answers", len(answer))
 	}
 
+	// The regression this test exists to guard, on top of publish-trust's
+	// already-correct 2-key case: register a second ZSK (so the DNSKEY
+	// RRset has 3 records, KSK + 2 ZSKs) and confirm a live query's
+	// RRSIG actually validates against the complete served set -- an
+	// earlier version signed only the newly added record in isolation,
+	// which stopped validating the moment a zone had more than the
+	// original KSK+ZSK pair. See BuildAddZSKPush's doc comment
+	// (plugin/sazu/push.go).
+	secondZSKPath := filepath.Join(dir, "second-zsk.private")
+	if err := runAddZSK([]string{"-zone", zone, "-ksk-key", kskPath, "-zsk-key", secondZSKPath, "-target", addr}); err != nil {
+		t.Fatalf("add-zsk (second ZSK): %v", err)
+	}
+	dnskeys, sigs := queryDNSKEYWithRRSIG(t, addr, zone)
+	if len(dnskeys) != 3 {
+		t.Fatalf("expected 3 served DNSKEY records (KSK + 2 ZSKs), got %d: %+v", len(dnskeys), dnskeys)
+	}
+	if !anyRRSIGValidates(sigs, dnskeys) {
+		t.Fatalf("expected some RRSIG(DNSKEY) to validate against the complete 3-key served set after a second add-zsk")
+	}
+
 	if err := runRetireZSK([]string{"-zone", zone, "-ksk-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
 		t.Fatalf("retire-zsk: %v", err)
+	}
+
+	// Retiring the first ZSK: the record is genuinely gone (not just a
+	// database bookkeeping change -- see this test's own retirement
+	// check below), and the RRSIG covering what remains (KSK + the
+	// second ZSK) still validates.
+	dnskeys, sigs = queryDNSKEYWithRRSIG(t, addr, zone)
+	if len(dnskeys) != 2 {
+		t.Fatalf("expected 2 served DNSKEY records (KSK + the second ZSK) after retiring the first, got %d: %+v", len(dnskeys), dnskeys)
+	}
+	for _, k := range dnskeys {
+		if dk, ok := k.(*dns.DNSKEY); ok {
+			retired, _, _, err := sazu.LoadOrGenerateKey(zskPath, zone, false, nil)
+			if err != nil {
+				t.Fatalf("re-loading the retired ZSK for comparison: %v", err)
+			}
+			if dk.PublicKey == retired.PublicKey {
+				t.Fatalf("expected the retired ZSK's own record to no longer be served, found it still present")
+			}
+		}
+	}
+	if !anyRRSIGValidates(sigs, dnskeys) {
+		t.Fatalf("expected some RRSIG(DNSKEY) to validate against the complete remaining 2-key served set after retire-zsk")
 	}
 
 	// The retired ZSK no longer authenticates anything.
