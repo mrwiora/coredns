@@ -922,3 +922,37 @@ a real-world test isn't mistaken for a production trial run:
   a specific key to a narrower set of operations. See plugin/sazu/docs/SAZU-PLAN.md's
   KSK/ZSK section for why that's a materially different problem
   (authorization, not a DNSSEC key role) from the KSK/ZSK split itself.
+
+## Further design work
+
+A few larger topics beyond what's described above have been designed to
+varying depth, but are **not implemented**. Kept as their own documents
+in `docs/` rather than folded into this README, since each is either a
+full design in its own right or long enough to want a document of its
+own. Listed here so an agent or person picking this project back up has
+a map of what exists to read before starting, rather than having to
+rediscover it:
+
+* **`docs/SAZU-PLAN.md`** — the running build log this port was
+  developed against: what's done, why, and (its own final section) what
+  was identified but deliberately left outstanding.
+* **`docs/SAZU-THREAT-MODEL.md`** — a consolidated, STRIDE-organized pass
+  through this package's actual security posture: the parties involved,
+  what's already mitigated and how (citing real code, not aspirational),
+  and — called out explicitly rather than left implicit — the gaps that
+  pass surfaced. Worth reading before relying on this in production; the
+  closest thing here to a single security overview.
+* **`docs/SAZU-MULTIINSTANCE-CONCEPT.md`** and **`docs/SAZU-CLUSTER.md`**
+  — a design for running more than one SAZU instance for the same zones,
+  converged automatically (symmetric partner list, digest-comparison
+  gossip, a shared cluster secret, zone decommission/tombstones). The
+  concept document is the exploration (including alternatives considered
+  and rejected along the way, e.g. mTLS between instances); the cluster
+  document restates the result as a settled specification. **This is
+  currently a purely planned item, not being implemented** — the same
+  status as the differential-update mechanisms described and rejected
+  above, with one difference: clustering hasn't been rejected, just not
+  yet built. The one piece of it that *does* exist today is
+  `sazuctl decommission-zone` (documented above), built as a genuine,
+  independently useful prerequisite regardless of whether the rest of
+  the cluster design is ever implemented.
