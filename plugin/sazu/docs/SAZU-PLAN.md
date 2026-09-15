@@ -1111,7 +1111,7 @@ pushes alike.
   (`TC-KEY-07`) sitting undetected in the document since the KSK/ZSK
   rewrite two revisions earlier.
 
-  Moved to `plugin/sazu/verification/`, restructured as three YAML data
+  Moved to `plugin/sazu/docs/verification/`, restructured as three YAML data
   files (`data/requirements.yaml`, `data/test-specification.yaml`,
   `data/test-report.yaml`) rendered through a Jinja2 template
   (`template.html.j2`) by a small Python script (`build.py`) into the
