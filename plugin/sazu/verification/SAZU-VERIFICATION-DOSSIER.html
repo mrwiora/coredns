@@ -682,7 +682,10 @@ verifying NSEC3 proof for both NODATA and NXDOMAIN (closest-encloser match inclu
 and a partial push invalidates the NSEC3 chain the same way it does a plain NSEC one.</td><td class="mono">TestNODATACarriesValidNSEC3Proof, TestNXDOMAINCarriesValidNSEC3Proof,
 TestPartialPushInvalidatesNSEC3UntilNextFullPush (nsec3_test.go)</td><td>CONTENT-13, CONTENT-08, CONTENT-09</td></tr>    <tr><td class="tcid">TC-CONTENT-17</td><td>cmd/sazuctl's "publish-zone -nsec3" flag (plus -nsec3-salt/-nsec3-opt-out) genuinely
 changes what the server ends up serving for a real NXDOMAIN query -- NSEC3, with the
-Opt-Out flag set, and no plain NSEC alongside it.</td><td class="mono">TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-13</td></tr>    <tr><td class="tcid">TC-CONTENT-20</td><td>A KSK rollover -- which carries an apex DNSKEY, same as a full push, but changes no
+Opt-Out flag set, and no plain NSEC alongside it; an ordinary invocation with no
+NSEC-related flags at all defaults to NSEC3 the same way; -nsec3=false is a working
+fallback back to plain NSEC, with no NSEC3 alongside it.</td><td class="mono">TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC, TestE2EPushZoneDefaultServesNSEC3,
+TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-13</td></tr>    <tr><td class="tcid">TC-CONTENT-20</td><td>A KSK rollover -- which carries an apex DNSKEY, same as a full push, but changes no
 served content and supplies no replacement chain -- leaves an existing zone's content
 and its NSEC chain fully intact and still validly signed, rather than being purged on
 the mistaken assumption that carrying an apex DNSKEY alone means "full push."</td><td class="mono">TestKSKRolloverNeverPurgesContentOrChain</td><td>CONTENT-15</td></tr>    <tr><td class="tcid">TC-CONTENT-22</td><td>A full content push (sazuctl publish-zone) replaces a zone's entire served content:

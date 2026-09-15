@@ -259,6 +259,97 @@ func TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC(t *testing.T) {
 	}
 }
 
+// TestE2EPushZoneDefaultServesNSEC3 proves NSEC3 is what an ordinary
+// publish-zone invocation with no NSEC-related flags at all produces --
+// -nsec3 defaults to true, so this is the CLI's actual out-of-the-box
+// behavior, not just what -nsec3 does when named explicitly (already
+// covered above).
+func TestE2EPushZoneDefaultServesNSEC3(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-nsec3-default.example."
+	dir := t.TempDir()
+	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
+	zoneFile := writeTestZoneFile(t, zone)
+
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone (no NSEC-related flags): %v", err)
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("does-not-exist."+zone), dns.TypeA)
+	m.SetEdns0(4096, true)
+	resp, _, err := new(dns.Client).Exchange(m, addr)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	var sawNSEC3, sawNSEC bool
+	for _, rr := range resp.Ns {
+		switch rr.(type) {
+		case *dns.NSEC3:
+			sawNSEC3 = true
+		case *dns.NSEC:
+			sawNSEC = true
+		}
+	}
+	if !sawNSEC3 {
+		t.Fatalf("expected the default publish-zone push to serve NSEC3, got %+v", resp.Ns)
+	}
+	if sawNSEC {
+		t.Fatalf("expected no plain NSEC records alongside the default NSEC3, got %+v", resp.Ns)
+	}
+}
+
+// TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC proves -nsec3=false is a
+// working escape hatch back to plain NSEC now that NSEC3 is the default.
+func TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-nsec3-fallback.example."
+	dir := t.TempDir()
+	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
+	zoneFile := writeTestZoneFile(t, zone)
+
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile, "-nsec3=false", "-target", addr}); err != nil {
+		t.Fatalf("publish-zone -nsec3=false: %v", err)
+	}
+
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn("does-not-exist."+zone), dns.TypeA)
+	m.SetEdns0(4096, true)
+	resp, _, err := new(dns.Client).Exchange(m, addr)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[resp.Rcode])
+	}
+	var sawNSEC3, sawNSEC bool
+	for _, rr := range resp.Ns {
+		switch rr.(type) {
+		case *dns.NSEC3:
+			sawNSEC3 = true
+		case *dns.NSEC:
+			sawNSEC = true
+		}
+	}
+	if !sawNSEC {
+		t.Fatalf("expected -nsec3=false to fall back to plain NSEC, got %+v", resp.Ns)
+	}
+	if sawNSEC3 {
+		t.Fatalf("expected no NSEC3 records alongside the plain-NSEC fallback, got %+v", resp.Ns)
+	}
+}
+
 // TestE2EZSKFullLifecycle exercises the ZSK use case end to end through
 // the actual sazuctl CLI entry points: publish-trust onboarding
 // (generating a KSK and ZSK together), a routine content push

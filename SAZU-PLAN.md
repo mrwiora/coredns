@@ -274,6 +274,16 @@ for a manually verified real-binary walkthrough.
   their own, so `OptOut` applies uniformly rather than per-delegation --
   a zone with its own delegations would need logic this package doesn't
   implement.
+
+  `sazuctl publish-zone`'s `-nsec3` flag has since flipped from opt-in
+  (default false) to opt-out (default true): NSEC3 -- with its
+  additional zone-walking privacy property and no real downside for the
+  zone sizes this protocol targets -- is now what a plain `publish-zone`
+  invocation with no NSEC-related flags at all produces, and `-nsec3=false`
+  is the explicit fallback to plain NSEC. Nothing at the protocol or
+  server level changed: the server still just stores and serves whichever
+  chain a given push carried, same as before -- only the CLI's own
+  default choice moved.
 ### Decision: no differential/partial update command
 
 `sazuctl publish-zone` always sends a zone's complete, authoritative
