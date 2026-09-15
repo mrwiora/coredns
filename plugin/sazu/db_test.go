@@ -353,9 +353,10 @@ func TestDBRecordTransactionAndRecentTransactions(t *testing.T) {
 	db := openTestDB(t)
 
 	base := time.Now()
+	zskTag := uint16(54321)
 	entries := []AuditEntry{
 		{ID: "tx-1", Zone: "example.org.", RemoteAddr: "203.0.113.1:5353", Rcode: "REFUSED", Status: "ERR_NO_DS_PUBLISHED", At: base},
-		{ID: "tx-2", Zone: "example.org.", RemoteAddr: "203.0.113.1:5353", Rcode: "NOERROR", Status: "", At: base.Add(time.Minute)},
+		{ID: "tx-2", Zone: "example.org.", RemoteAddr: "203.0.113.1:5353", Rcode: "NOERROR", Status: "", At: base.Add(time.Minute), KeyTag: &zskTag, KeyRole: "ZSK"},
 		{ID: "tx-3", Zone: "other.example.", RemoteAddr: "203.0.113.2:5353", Rcode: "NOERROR", Status: "", At: base.Add(2 * time.Minute)},
 	}
 	for _, e := range entries {
@@ -377,6 +378,12 @@ func TestDBRecordTransactionAndRecentTransactions(t *testing.T) {
 	if got[1].Status != "ERR_NO_DS_PUBLISHED" {
 		t.Fatalf("expected the rejected attempt's status to survive, got %q", got[1].Status)
 	}
+	if got[1].KeyTag != nil || got[1].KeyRole != "" {
+		t.Fatalf("expected the rejected (never-authenticated) attempt to carry no key attribution, got tag=%v role=%q", got[1].KeyTag, got[1].KeyRole)
+	}
+	if got[0].KeyTag == nil || *got[0].KeyTag != zskTag || got[0].KeyRole != "ZSK" {
+		t.Fatalf("expected the authenticated push's key tag and role to survive, got tag=%v role=%q", got[0].KeyTag, got[0].KeyRole)
+	}
 
 	if got, err := db.RecentTransactions("never-touched.example.", 10); err != nil || len(got) != 0 {
 		t.Fatalf("expected no entries (not an error) for an untouched zone, got %+v err=%v", got, err)
@@ -385,6 +392,84 @@ func TestDBRecordTransactionAndRecentTransactions(t *testing.T) {
 	if limited, err := db.RecentTransactions("example.org.", 1); err != nil || len(limited) != 1 || limited[0].ID != "tx-2" {
 		t.Fatalf("expected limit to cap results to the single newest entry, got %+v err=%v", limited, err)
 	}
+}
+
+// TestDBOpenMigratesPreKeyAttributionAuditLog proves an audit_log table
+// written before key_tag/key_role existed is transparently upgraded in
+// place the first time it's opened with this version -- an existing
+// deployment's audit history survives the upgrade with no operator
+// action, its pre-existing rows simply carrying no key attribution
+// (there is nothing to attribute them to after the fact).
+func TestDBOpenMigratesPreKeyAttributionAuditLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sazu.db")
+
+	// Build a database in the pre-key-attribution shape directly via SQL,
+	// bypassing Open (which would create the current-shape table from the
+	// start).
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TABLE audit_log (
+			id          TEXT PRIMARY KEY,
+			zone        TEXT NOT NULL,
+			remote_addr TEXT NOT NULL,
+			rcode       TEXT NOT NULL,
+			status      TEXT NOT NULL,
+			at          INTEGER NOT NULL
+		);
+	`); err != nil {
+		t.Fatalf("creating pre-key-attribution schema: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO audit_log (id, zone, remote_addr, rcode, status, at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"old-tx", "example.org.", "203.0.113.1:5353", "NOERROR", "", time.Now().Unix(),
+	); err != nil {
+		t.Fatalf("inserting pre-key-attribution row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("closing raw handle: %v", err)
+	}
+
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open (expected to migrate transparently): %v", err)
+	}
+	defer db.Close()
+
+	got, err := db.RecentTransactions("example.org.", 10)
+	if err != nil {
+		t.Fatalf("RecentTransactions after migration: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "old-tx" {
+		t.Fatalf("expected the pre-existing row to survive migration, got %+v", got)
+	}
+	if got[0].KeyTag != nil || got[0].KeyRole != "" {
+		t.Fatalf("expected a pre-migration row to carry no key attribution, got tag=%v role=%q", got[0].KeyTag, got[0].KeyRole)
+	}
+
+	// A fresh row recorded after migration must round-trip its key
+	// attribution normally.
+	tag := uint16(999)
+	if err := db.RecordTransaction(AuditEntry{ID: "new-tx", Zone: "example.org.", RemoteAddr: "203.0.113.1:5353", Rcode: "NOERROR", At: time.Now(), KeyTag: &tag, KeyRole: "KSK"}); err != nil {
+		t.Fatalf("RecordTransaction after migration: %v", err)
+	}
+	got, err = db.RecentTransactions("example.org.", 10)
+	if err != nil {
+		t.Fatalf("RecentTransactions after post-migration write: %v", err)
+	}
+	if got[0].ID != "new-tx" || got[0].KeyTag == nil || *got[0].KeyTag != tag || got[0].KeyRole != "KSK" {
+		t.Fatalf("expected the post-migration row's key attribution to round-trip, got %+v", got[0])
+	}
+
+	// A second Open (simulating a restart) must be a no-op migration --
+	// the table is already current-shape.
+	db2, err := Open(path)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	defer db2.Close()
 }
 
 // TestDBCommitUpdateAddsAndRetiresZSK proves the optional ZSK split

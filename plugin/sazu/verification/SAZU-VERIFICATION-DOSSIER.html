@@ -462,7 +462,10 @@ by recently active keys, not by every distinct key ever observed.</td><td class=
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">OPS-01</td><td>The server SHALL generate a fresh transaction identifier (UUIDv4) for every UPDATE
 transaction.</td><td class="src">RFC 4122 &middot; §12</td></tr>    <tr><td class="reqid">OPS-02</td><td>With persistence configured, one audit-trail row per transaction (except as excluded by
 SEC-05) SHALL be recorded — transaction ID, zone, remote address, RCODE, status,
-timestamp — regardless of accept/reject outcome.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-03</td><td>The N most recent audit-trail entries for a zone SHALL be retrievable via a query
+timestamp, and (when SIG(0) verification succeeded) the authenticating key's tag and
+role — regardless of accept/reject outcome. A transaction whose authentication never
+succeeded SHALL carry no key attribution, since there is no proof of who sent it to
+attribute.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-03</td><td>The N most recent audit-trail entries for a zone SHALL be retrievable via a query
 interface.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-04</td><td>All nine §12 status codes SHALL be carried as a diagnostic TXT record in the response's
 Additional section.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-05</td><td>Every configurable quota/limit SHALL default to a documented value when unset (5
 full/day, 50 key-management/day, 30 updates/minute per address).</td><td class="src">§12</td></tr>  </table></div>
@@ -763,12 +766,19 @@ TestRateLimiterSweepsStaleZoneNamesOutOfMemory, TestSweepIfDueOnlyRunsOncePerWin
 rejection is still fully audited.</td><td class="mono">TestTransportAndRateLimitRejectionsAreNotAudited</td><td>SEC-05</td></tr>  </table></div>
   <h3 class="subhead" id="ts-ops"><span class="secno">3.10</span> OPS</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-OPS-01</td><td>One audit row is recorded for a rejected attempt and one for a later successful
-onboarding, each with a distinct transaction ID, newest first.</td><td class="mono">TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions</td><td>OPS-01, OPS-02</td></tr>    <tr><td class="tcid">TC-OPS-02</td><td>Audit-trail entries persist and page/limit correctly, including for a zone with none at
-all.</td><td class="mono">TestDBRecordTransactionAndRecentTransactions</td><td>OPS-02, OPS-03</td></tr>    <tr><td class="tcid">TC-OPS-03</td><td><code class="inline">rate_limit</code>/<code class="inline">ip_rate_limit</code>
+onboarding, each with a distinct transaction ID, newest first; the rejected attempt
+(never authenticated) carries no key attribution, and the accepted onboarding is
+attributed to the KSK that authenticated it.</td><td class="mono">TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions</td><td>OPS-01, OPS-02</td></tr>    <tr><td class="tcid">TC-OPS-02</td><td>Audit-trail entries persist and page/limit correctly, including for a zone with none at
+all; an authenticated push's key tag and role round-trip, and a never-authenticated
+rejection's absence of either survives the round trip too.</td><td class="mono">TestDBRecordTransactionAndRecentTransactions</td><td>OPS-02, OPS-03</td></tr>    <tr><td class="tcid">TC-OPS-03</td><td><code class="inline">rate_limit</code>/<code class="inline">ip_rate_limit</code>
 Corefile directives parse correctly, default correctly when omitted, and reject
 malformed arguments; the plugin wires up with or without persistence.</td><td class="mono">TestParseSazu, TestParseSazuRateLimitDefaultsAndOverride,
 TestParseSazuIPRateLimitDefaultAndOverride, TestSetupWiresPluginAndOptionalDB,
-TestSetupWithoutDBIsPurelyInMemory</td><td>OPS-05, PERSIST-04</td></tr>  </table></div>
+TestSetupWithoutDBIsPurelyInMemory</td><td>OPS-05, PERSIST-04</td></tr>    <tr><td class="tcid">TC-OPS-04</td><td>End to end, two independently registered ZSKs -- standing in for two different signer
+machines in an HA/multi-signer deployment -- each get their own content pushes
+attributed to their own key tag and role in the audit trail, never confused with each
+other or with the KSK that registered both; both ZSK registrations are themselves
+correctly attributed to the KSK that authorized them.</td><td class="mono">TestServeUpdateAuditTrailAttributesEachPushToItsOwnZSK</td><td>OPS-02</td></tr>  </table></div>
   <h3 class="subhead" id="ts-watch"><span class="secno">3.11</span> WATCH</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-WATCH-01</td><td>A zone's first observation establishes a baseline without alerting, even if already
 failing.</td><td class="mono">TestCheckOnceFirstObservationEstablishesBaselineWithoutAlerting (sazu_watchd)</td><td>WATCH-03, WATCH-05</td></tr>    <tr><td class="tcid">TC-WATCH-02</td><td>An alert fires on OK→failing and failing→OK; none fires while the outcome is unchanged.</td><td class="mono">TestCheckOnceAlertsOnTransitionFromOKToFailing, TestCheckOnceAlertsOnRecovery,
@@ -786,7 +796,11 @@ class="inline">LoadZoneKeys</code>, independently of the KSK; the lighter-weight
 class="inline">LoadKey</code> accessor keeps returning only the KSK.</td><td class="mono">TestDBCommitUpdateAddsAndRetiresZSK</td><td>KEY-08, KEY-09, PERSIST-02</td></tr>    <tr><td class="tcid">TC-PERSIST-04</td><td>A KSK rollover replaces that zone's sole KSK database row rather than leaving the
 superseded key tag behind as a stale second row.</td><td class="mono">TestDBCommitUpdateKSKRolloverReplacesRowNotAdds</td><td>KEY-05, PERSIST-02</td></tr>    <tr><td class="tcid">TC-PERSIST-05</td><td>A database written before the optional-ZSK key-storage schema existed is transparently
 migrated in place on open — every pre-existing key becomes that zone's KSK, and a second
-<code class="inline">Open</code> on an already-migrated database is a safe no-op.</td><td class="mono">TestDBOpenMigratesPreZSKKeysTable</td><td>PERSIST-05</td></tr>  </table></div>
+<code class="inline">Open</code> on an already-migrated database is a safe no-op.</td><td class="mono">TestDBOpenMigratesPreZSKKeysTable</td><td>PERSIST-05</td></tr>    <tr><td class="tcid">TC-PERSIST-06</td><td>A database written before the audit trail's key_tag/key_role columns existed is
+transparently migrated in place on open — the pre-existing row survives with no key
+attribution (there is nothing to attribute it to after the fact), a freshly recorded
+row's key attribution round-trips normally, and a second <code
+class="inline">Open</code> on an already-migrated database is a safe no-op.</td><td class="mono">TestDBOpenMigratesPreKeyAttributionAuditLog</td><td>PERSIST-05</td></tr>  </table></div>
   <h3 class="subhead" id="ts-client"><span class="secno">3.13</span> CLIENT</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CLIENT-01</td><td>Every embedded guidance template (onboarding-denied diagnostics, the rotate-key
 tradeoff) executes without error against the data its caller passes it, and renders

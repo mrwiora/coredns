@@ -745,14 +745,17 @@ areas:
   - id: TC-OPS-01
     objective: |-
       One audit row is recorded for a rejected attempt and one for a later successful
-      onboarding, each with a distinct transaction ID, newest first.
+      onboarding, each with a distinct transaction ID, newest first; the rejected attempt
+      (never authenticated) carries no key attribution, and the accepted onboarding is
+      attributed to the KSK that authenticated it.
     functions: |-
       TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions
     verifies: OPS-01, OPS-02
   - id: TC-OPS-02
     objective: |-
       Audit-trail entries persist and page/limit correctly, including for a zone with none at
-      all.
+      all; an authenticated push's key tag and role round-trip, and a never-authenticated
+      rejection's absence of either survives the round trip too.
     functions: TestDBRecordTransactionAndRecentTransactions
     verifies: OPS-02, OPS-03
   - id: TC-OPS-03
@@ -765,6 +768,15 @@ areas:
       TestParseSazuIPRateLimitDefaultAndOverride, TestSetupWiresPluginAndOptionalDB,
       TestSetupWithoutDBIsPurelyInMemory
     verifies: OPS-05, PERSIST-04
+  - id: TC-OPS-04
+    objective: |-
+      End to end, two independently registered ZSKs -- standing in for two different signer
+      machines in an HA/multi-signer deployment -- each get their own content pushes
+      attributed to their own key tag and role in the audit trail, never confused with each
+      other or with the KSK that registered both; both ZSK registrations are themselves
+      correctly attributed to the KSK that authorized them.
+    functions: TestServeUpdateAuditTrailAttributesEachPushToItsOwnZSK
+    verifies: OPS-02
 - id: watch
   title: WATCH
   cases:
@@ -839,6 +851,15 @@ areas:
       migrated in place on open — every pre-existing key becomes that zone's KSK, and a second
       <code class="inline">Open</code> on an already-migrated database is a safe no-op.
     functions: TestDBOpenMigratesPreZSKKeysTable
+    verifies: PERSIST-05
+  - id: TC-PERSIST-06
+    objective: |-
+      A database written before the audit trail's key_tag/key_role columns existed is
+      transparently migrated in place on open — the pre-existing row survives with no key
+      attribution (there is nothing to attribute it to after the fact), a freshly recorded
+      row's key attribution round-trips normally, and a second <code
+      class="inline">Open</code> on an already-migrated database is a safe no-op.
+    functions: TestDBOpenMigratesPreKeyAttributionAuditLog
     verifies: PERSIST-05
 - id: client
   title: CLIENT

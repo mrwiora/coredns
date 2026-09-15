@@ -23,6 +23,20 @@ type AuditEntry struct {
 	Rcode      string // dns.RcodeToString[...], e.g. "NOERROR", "REFUSED"
 	Status     string // a §12 status code (e.g. ERR_NO_DS_PUBLISHED), or "" if none applies
 	At         time.Time
+
+	// KeyTag and KeyRole identify which key's verified SIG(0) signature
+	// authenticated this transaction -- KeyTag nil (and KeyRole "") when
+	// it never got that far (rejected before or during SIG(0)
+	// verification itself), since there's no cryptographic proof of who
+	// sent an unauthenticated attempt to attribute it to. This is what
+	// answers "which signer pushed this" for a zone with more than one
+	// registered ZSK (see keys.go's AddZSK), each held by a different
+	// signer machine in an HA/multi-signer deployment: the KSK/ZSK split
+	// already lets each hold its own independently-revocable key, and
+	// this is the other half -- knowing, after the fact, which one
+	// actually sent a given push.
+	KeyTag  *uint16
+	KeyRole string // "KSK" or "ZSK" (see KeyRole.String()); "" when KeyTag is nil
 }
 
 // newTransactionID returns a fresh random UUID (v4, RFC 4122), used to

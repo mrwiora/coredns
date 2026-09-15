@@ -216,6 +216,15 @@ func isDNSSECRequested(r *dns.Msg) bool {
 func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, zone string) (int, error) {
 	txID := newTransactionID()
 	remoteAddr := w.RemoteAddr().String()
+	// authKeyTag/authKeyRole identify the key whose SIG(0) signature
+	// authenticated this transaction, for attribution in the audit trail
+	// below -- set once, right after that verification actually succeeds,
+	// never before: a candidate key found in the wire message but not yet
+	// verified is not proof of anything, and attributing an audit entry to
+	// it would let an attacker frame an arbitrary key tag in the log
+	// merely by naming it, with no need to ever prove possession of it.
+	var authKeyTag *uint16
+	var authKeyRole string
 	// reply is the sole exit point for this function: every response,
 	// accepted or refused, goes through it, so the §12 audit trail (when
 	// s.DB is configured) sees every transaction this server decided on,
@@ -240,7 +249,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		// unreliable). Every other rejection reason is still fully
 		// audited, including ones IPRateLimiter itself did let through.
 		if s.DB != nil && status != statusErrRateLimited && status != statusErrTransportNotAllowed {
-			entry := AuditEntry{ID: txID, Zone: zone, RemoteAddr: remoteAddr, Rcode: dns.RcodeToString[rcode], Status: status, At: time.Now()}
+			entry := AuditEntry{ID: txID, Zone: zone, RemoteAddr: remoteAddr, Rcode: dns.RcodeToString[rcode], Status: status, At: time.Now(), KeyTag: authKeyTag, KeyRole: authKeyRole}
 			if err := s.DB.RecordTransaction(entry); err != nil {
 				log.Errorf("update for %s: recording audit entry %s: %v", zone, txID, err)
 			}
@@ -295,6 +304,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 
 	zk, alreadyPinned := s.Keys.Get(zone)
 	var candidate *dns.DNSKEY
+	var candidateRole KeyRole
 	isRollover := false
 	var sigErr error
 	if alreadyPinned {
@@ -307,7 +317,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		// loop's second iteration is the common case, not a fallback.
 		for _, auth := range zk.Authenticators() {
 			if err := VerifySIG0(raw, auth.DNSKEY); err == nil {
-				candidate, sigErr = auth.DNSKEY, nil
+				candidate, candidateRole, sigErr = auth.DNSKEY, auth.Role, nil
 				break
 			} else {
 				sigErr = err
@@ -348,7 +358,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 					return reply(dns.RcodeRefused, statusErrWeakAlgorithm)
 				}
 				if verr := VerifySIG0(raw, other); verr == nil {
-					candidate, isRollover, sigErr = other, true, nil
+					candidate, candidateRole, isRollover, sigErr = other, RoleKSK, true, nil
 				}
 			}
 		}
@@ -380,12 +390,18 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			return reply(dns.RcodeRefused, statusErrFirstContactNeedsKSK)
 		}
 		sigErr = VerifySIG0(raw, candidate)
+		candidateRole = RoleKSK
 	}
 	if sigErr != nil {
 		log.Debugf("update for %s: SIG(0) verification failed: %v", zone, sigErr)
 		return reply(dns.RcodeNotAuth, "")
 	}
 	log.Debugf("update for %s: SIG(0) verified (rollover=%v)", zone, isRollover)
+	// Recorded only now that verification has actually succeeded -- see
+	// authKeyTag's own doc comment above for why.
+	keyTag := candidate.KeyTag()
+	authKeyTag = &keyTag
+	authKeyRole = candidateRole.String()
 
 	// §10.6 registration record: a contact address (if this push carries
 	// one) rides the same authenticated UPDATE as everything else, at a

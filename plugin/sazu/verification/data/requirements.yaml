@@ -480,7 +480,10 @@ areas:
     text: |-
       With persistence configured, one audit-trail row per transaction (except as excluded by
       SEC-05) SHALL be recorded — transaction ID, zone, remote address, RCODE, status,
-      timestamp — regardless of accept/reject outcome.
+      timestamp, and (when SIG(0) verification succeeded) the authenticating key's tag and
+      role — regardless of accept/reject outcome. A transaction whose authentication never
+      succeeded SHALL carry no key attribution, since there is no proof of who sent it to
+      attribute.
     source: §12
   - id: OPS-03
     text: |-

@@ -806,6 +806,31 @@ pushes alike.
   DNSKEY from ever being purged on a content push -- so what remains
   is worth having, but is a narrower guarantee than originally framed.
 
+  The other item named as deliberately out of scope here -- independent
+  per-instance authorized-pusher identities for HA/multi-signer
+  deployments -- turned out to be mostly already solved by mechanism
+  that predates this note: `KeyRegistry.AddZSK`/`RetireZSK` already let
+  a zone register more than one ZSK, each independently held and
+  revocable, so several signer machines can already push under separate
+  identities today with no new code. What was actually missing was
+  *visibility*: `audit_log` recorded zone/remote-addr/rcode/status but
+  never which key authenticated a transaction, so there was no way to
+  answer "which signer pushed this" after the fact. Closed with a small,
+  additive fix: `AuditEntry` gained `KeyTag`/`KeyRole`, populated in
+  `handler.go`'s `serveUpdate` from the key that actually verified
+  SIG(0) (never from an unverified candidate -- see `authKeyTag`'s own
+  doc comment there for why that distinction matters) and persisted via
+  two new nullable `audit_log` columns
+  (`migrateAuditLogTableIfNeeded` upgrades a pre-existing database the
+  same way `migrateKeysTableIfNeeded` already does for the `keys`
+  table). What this still doesn't give: per-key *authorization scoping*
+  -- every registered key, KSK or ZSK alike, is authorized to do
+  everything a SIG(0)-authenticated push can do here (push content,
+  add/retire a ZSK, manage the contact address), with no way to restrict
+  a specific key to a narrower set of operations. That authorization
+  problem -- materially different from the DNSSEC key *role* the KSK/ZSK
+  split addresses -- remains genuinely open; see **Outstanding**, below.
+
 - **Key custody hardening (§10.8), client-side.** `sazuctl` writes a plain
   BIND-format key file by default, unchanged -- but every subcommand that
   touches one now accepts `-key-passphrase-file <path>`: give it and that
@@ -1126,20 +1151,24 @@ pushes alike.
 
 Every item the architectural review that led to this document identified
 -- CoreDNS-plugin, client-side, and the one separate-server item -- is
-implemented; see **Done**, above. One item was identified but
-deliberately not implemented in the optional-KSK/ZSK-split pass, noted
-there with its own reasoning (a `sazu-watchd` check for a ZSK's
-continued presence in a zone's served DNSKEY RRset, the other item
-originally listed here, was later built -- see **Done**, above, for
-what it actually catches and why that turned out narrower than first
-framed):
+implemented; see **Done**, above. Two items were identified but
+deliberately not implemented in the optional-KSK/ZSK-split pass, each
+noted there with its own reasoning, and both later revisited -- see
+**Done**, above, for what each turned out to actually need and why that
+was narrower than first framed: a `sazu-watchd` check for a ZSK's
+continued presence in a zone's served DNSKEY RRset was built in full;
+independent per-instance authorized-pusher identities turned out to be
+mostly already solved by pre-existing mechanism (`AddZSK`/`RetireZSK`)
+plus a small audit-trail attribution addition, leaving only the
+narrower item below still genuinely open:
 
-- Independent per-instance authorized-pusher identities for HA/
-  multi-signer deployments (each signer instance holding its own key,
-  none of them required to be a DNSSEC KSK or ZSK at all) -- a real but
-  materially different problem (authorization, not a DNSSEC key role)
-  from the KSK/ZSK split, worth its own pass rather than folding into
-  this one.
+- Per-key authorization scoping for HA/multi-signer deployments: every
+  registered key (KSK or ZSK) is authorized to do everything a
+  SIG(0)-authenticated push can do here -- push zone content, add or
+  retire a ZSK, manage the contact address -- with no way to restrict a
+  specific key to a narrower set of operations. A real but materially
+  different problem (authorization, not a DNSSEC key role) from the
+  KSK/ZSK split, worth its own pass rather than folding into this one.
 
 Six further, smaller gaps were found (not by design review this time,
 but by the Verification Dossier's own new cross-validation -- see

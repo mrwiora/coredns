@@ -932,7 +932,6 @@ func TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions(t *testi
 
 	// A successful onboarding.
 	key := onboardExampleOrg(t, addr, s)
-	_ = key
 
 	entries, err := s.DB.RecentTransactions("example.org.", 10)
 	if err != nil {
@@ -950,6 +949,12 @@ func TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions(t *testi
 	}
 	if entries[0].ID == entries[1].ID {
 		t.Fatalf("expected distinct transaction IDs, got the same one twice: %s", entries[0].ID)
+	}
+	if entries[0].KeyTag == nil || *entries[0].KeyTag != key.KeyTag() || entries[0].KeyRole != "KSK" {
+		t.Fatalf("expected the accepted onboarding to be attributed to the KSK that authenticated it, got %+v", entries[0])
+	}
+	if entries[1].KeyTag != nil || entries[1].KeyRole != "" {
+		t.Fatalf("expected the rejected (never-authenticated) attempt to carry no key attribution, got tag=%v role=%q", entries[1].KeyTag, entries[1].KeyRole)
 	}
 }
 

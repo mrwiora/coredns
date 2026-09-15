@@ -204,6 +204,95 @@ func TestZSKAuthenticatesFurtherTransactionsOnceRegistered(t *testing.T) {
 	}
 }
 
+// TestServeUpdateAuditTrailAttributesEachPushToItsOwnZSK proves the
+// audit trail's key-tag/key-role attribution (AuditEntry.KeyTag/
+// KeyRole) actually answers "which signer pushed this" for an HA/
+// multi-signer deployment: two independently registered ZSKs -- each
+// standing in for a different signer machine, holding its own key --
+// get their own content pushes attributed to their own key tag and
+// "ZSK" role, never confused with each other or with the KSK that
+// registered both.
+func TestServeUpdateAuditTrailAttributesEachPushToItsOwnZSK(t *testing.T) {
+	s := newTestSazu("example.org.")
+	s.DB = openTestDB(t)
+	addr := serveThroughRealServer(t, s)
+
+	ksk, kskPriv, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatalf("generating KSK: %v", err)
+	}
+	onboardWithKSK(t, addr, ksk, kskPriv)
+
+	zskA, zskAPriv, err := GenerateEd25519Key("example.org.", false)
+	if err != nil {
+		t.Fatalf("generating ZSK A: %v", err)
+	}
+	if resp := addZSK(t, addr, ksk, kskPriv, zskA); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("registering ZSK A rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	zskB, zskBPriv, err := GenerateEd25519Key("example.org.", false)
+	if err != nil {
+		t.Fatalf("generating ZSK B: %v", err)
+	}
+	if resp := addZSK(t, addr, ksk, kskPriv, zskB); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("registering ZSK B rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+
+	pushContent := func(zsk *dns.DNSKEY, zskPriv ed25519.PrivateKey, rr dns.RR) {
+		t.Helper()
+		now := time.Now()
+		signed, err := SignZoneContent([]dns.RR{rr}, zsk, zskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+		if err != nil {
+			t.Fatalf("SignZoneContent: %v", err)
+		}
+		m := new(dns.Msg)
+		m.SetQuestion("example.org.", dns.TypeSOA)
+		m.Opcode = dns.OpcodeUpdate
+		m.Insert(signed)
+		wire, err := SignUpdate(m, zsk, zskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("signing: %v", err)
+		}
+		if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
+			t.Fatalf("content push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+		}
+	}
+	pushContent(zskA, zskAPriv, testA("a.example.org.", net.IPv4(203, 0, 113, 10)))
+	pushContent(zskB, zskBPriv, testA("b.example.org.", net.IPv4(203, 0, 113, 20)))
+
+	entries, err := s.DB.RecentTransactions("example.org.", 10)
+	if err != nil {
+		t.Fatalf("RecentTransactions: %v", err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 audit entries (onboarding, 2 ZSK registrations, 2 content pushes), got %d: %+v", len(entries), entries)
+	}
+	// Newest first.
+	pushB, pushA, addB, addA, onboarding := entries[0], entries[1], entries[2], entries[3], entries[4]
+
+	if pushB.KeyTag == nil || *pushB.KeyTag != zskB.KeyTag() || pushB.KeyRole != "ZSK" {
+		t.Fatalf("expected the push signed by ZSK B to be attributed to its own key tag, got %+v", pushB)
+	}
+	if pushA.KeyTag == nil || *pushA.KeyTag != zskA.KeyTag() || pushA.KeyRole != "ZSK" {
+		t.Fatalf("expected the push signed by ZSK A to be attributed to its own key tag, got %+v", pushA)
+	}
+	if pushA.KeyTag != nil && pushB.KeyTag != nil && *pushA.KeyTag == *pushB.KeyTag {
+		t.Fatalf("expected ZSK A and ZSK B's pushes to carry distinct key tags, both got %d", *pushA.KeyTag)
+	}
+	// Both ZSK-registration pushes were authenticated by the KSK (the
+	// already-trusted key doing the registering), not by the new ZSK
+	// being registered -- a ZSK is never trusted to vouch for itself.
+	if addA.KeyTag == nil || *addA.KeyTag != ksk.KeyTag() || addA.KeyRole != "KSK" {
+		t.Fatalf("expected ZSK A's registration to be attributed to the KSK that authorized it, got %+v", addA)
+	}
+	if addB.KeyTag == nil || *addB.KeyTag != ksk.KeyTag() || addB.KeyRole != "KSK" {
+		t.Fatalf("expected ZSK B's registration to be attributed to the KSK that authorized it, got %+v", addB)
+	}
+	if onboarding.KeyTag == nil || *onboarding.KeyTag != ksk.KeyTag() || onboarding.KeyRole != "KSK" {
+		t.Fatalf("expected onboarding to be attributed to the KSK, got %+v", onboarding)
+	}
+}
+
 // TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs proves the ZSK is
 // a real content-signing key, not just a transaction-authentication
 // identity: content signed by the ZSK (rather than the KSK) still

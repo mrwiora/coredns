@@ -835,8 +835,16 @@ a real-world test isn't mistaken for a production trial run:
   keeping trust establishment and content genuinely separate (see
   keys.go's `KeyRole` doc comment); it's never a problem in practice
   since nothing serves traffic in that window anyway.
-* **No independent per-instance authorized-pusher identities.** The
-  KSK/ZSK split (above) is about DNSSEC key *roles*, not about
-  authorizing several independent signer machines to push under their
-  own separate identities for HA — a real but different problem,
-  deliberately not addressed by it; see SAZU-PLAN.md's KSK/ZSK section.
+* **No per-key authorization scoping.** Independent per-instance pusher
+  identities for HA/multi-signer deployments already work today: a zone
+  can register more than one ZSK (`add-zsk`/`retire-zsk`), each held by
+  a different signer machine, each independently revocable, and the
+  audit trail (`AuditEntry.KeyTag`/`KeyRole`) records which one
+  authenticated every transaction — "which signer pushed this" is
+  answerable after the fact. What's still genuinely unaddressed: every
+  registered key (KSK or ZSK alike) is authorized to do everything a
+  SIG(0)-authenticated push can do here — push zone content, register or
+  retire another ZSK, manage the contact address — with no way to scope
+  a specific key to a narrower set of operations. See SAZU-PLAN.md's
+  KSK/ZSK section for why that's a materially different problem
+  (authorization, not a DNSSEC key role) from the KSK/ZSK split itself.

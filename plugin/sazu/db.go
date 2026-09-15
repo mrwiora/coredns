@@ -68,13 +68,20 @@ CREATE INDEX IF NOT EXISTS rrs_zone_name_type ON rrs(zone, name, rrtype);
 -- unlike every other table here, an audit entry is written for a zone
 -- that was refused at first contact and so never got a zones row at all,
 -- which is exactly the kind of attempt an audit trail exists to remember.
+-- key_tag/key_role identify the key whose verified SIG(0) signature
+-- authenticated this transaction -- both NULL when it never got that far
+-- (see AuditEntry's own doc comment). A database created before these
+-- columns existed has neither; see migrateAuditLogTableIfNeeded for how
+-- that gets upgraded in place the first time such a database is opened.
 CREATE TABLE IF NOT EXISTS audit_log (
 	id          TEXT PRIMARY KEY,
 	zone        TEXT NOT NULL,
 	remote_addr TEXT NOT NULL,
 	rcode       TEXT NOT NULL,
 	status      TEXT NOT NULL,
-	at          INTEGER NOT NULL
+	at          INTEGER NOT NULL,
+	key_tag     INTEGER,
+	key_role    TEXT
 );
 CREATE INDEX IF NOT EXISTS audit_log_zone_at ON audit_log(zone, at);
 `
@@ -146,7 +153,36 @@ func Open(path string) (*DB, error) {
 		sqlDB.Close()
 		return nil, fmt.Errorf("creating keys_zone_role index in %s: %w", path, err)
 	}
+	if err := db.migrateAuditLogTableIfNeeded(); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("migrating audit_log table in %s: %w", path, err)
+	}
 	return db, nil
+}
+
+// migrateAuditLogTableIfNeeded upgrades an audit_log table written before
+// key_tag/key_role existed by adding both columns, defaulting to NULL on
+// every pre-existing row -- there is no key to attribute those rows to
+// after the fact, and NULL (rather than some sentinel) is exactly what
+// AuditEntry's own KeyTag already means for "not applicable." A plain
+// ALTER TABLE ADD COLUMN suffices here, unlike migrateKeysTableIfNeeded's
+// full rebuild: this only ever adds nullable columns, never changes what
+// the table's existing rows or primary key mean.
+func (db *DB) migrateAuditLogTableIfNeeded() error {
+	hasKeyTag, err := db.columnExists("audit_log", "key_tag")
+	if err != nil {
+		return fmt.Errorf("inspecting audit_log table: %w", err)
+	}
+	if hasKeyTag {
+		return nil
+	}
+	if _, err := db.sql.Exec(`ALTER TABLE audit_log ADD COLUMN key_tag INTEGER`); err != nil {
+		return fmt.Errorf("adding key_tag column: %w", err)
+	}
+	if _, err := db.sql.Exec(`ALTER TABLE audit_log ADD COLUMN key_role TEXT`); err != nil {
+		return fmt.Errorf("adding key_role column: %w", err)
+	}
+	return nil
 }
 
 // migrateKeysTableIfNeeded upgrades a keys table written before ZSK
@@ -641,10 +677,21 @@ func (db *DB) LoadContact(zone string) ([]string, bool, error) {
 // the client.
 func (db *DB) RecordTransaction(entry AuditEntry) error {
 	_, err := db.sql.Exec(
-		`INSERT INTO audit_log (id, zone, remote_addr, rcode, status, at) VALUES (?, ?, ?, ?, ?, ?)`,
-		entry.ID, entry.Zone, entry.RemoteAddr, entry.Rcode, entry.Status, entry.At.Unix(),
+		`INSERT INTO audit_log (id, zone, remote_addr, rcode, status, at, key_tag, key_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		entry.ID, entry.Zone, entry.RemoteAddr, entry.Rcode, entry.Status, entry.At.Unix(), entry.KeyTag, nullIfEmpty(entry.KeyRole),
 	)
 	return err
+}
+
+// nullIfEmpty maps "" to a real SQL NULL rather than storing it as a
+// zero-length string -- used for AuditEntry.KeyRole, which is only ever
+// "" in step with KeyTag being nil (see AuditEntry's doc comment), so
+// the two columns stay symmetric: both NULL, or both set.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // RecentTransactions returns up to limit audit-log entries for zone,
@@ -653,7 +700,7 @@ func (db *DB) RecordTransaction(entry AuditEntry) error {
 // pushes recently."
 func (db *DB) RecentTransactions(zone string, limit int) ([]AuditEntry, error) {
 	rows, err := db.sql.Query(
-		`SELECT id, zone, remote_addr, rcode, status, at FROM audit_log WHERE zone = ? ORDER BY at DESC, rowid DESC LIMIT ?`,
+		`SELECT id, zone, remote_addr, rcode, status, at, key_tag, key_role FROM audit_log WHERE zone = ? ORDER BY at DESC, rowid DESC LIMIT ?`,
 		zone, limit,
 	)
 	if err != nil {
@@ -665,10 +712,17 @@ func (db *DB) RecentTransactions(zone string, limit int) ([]AuditEntry, error) {
 	for rows.Next() {
 		var e AuditEntry
 		var at int64
-		if err := rows.Scan(&e.ID, &e.Zone, &e.RemoteAddr, &e.Rcode, &e.Status, &at); err != nil {
+		var keyTag sql.NullInt64
+		var keyRole sql.NullString
+		if err := rows.Scan(&e.ID, &e.Zone, &e.RemoteAddr, &e.Rcode, &e.Status, &at, &keyTag, &keyRole); err != nil {
 			return nil, err
 		}
 		e.At = time.Unix(at, 0)
+		if keyTag.Valid {
+			tag := uint16(keyTag.Int64)
+			e.KeyTag = &tag
+		}
+		e.KeyRole = keyRole.String
 		entries = append(entries, e)
 	}
 	return entries, rows.Err()
