@@ -3,7 +3,7 @@
 // private key, and this server only ever accepts already-signed zone
 // updates, authenticated via SIG(0) (RFC 2931) carried on RFC 2136 dynamic
 // UPDATE messages. See the design document (sazu-protocol.md) for the
-// full protocol, and this repo's own SAZU-PLAN.md for exactly what of it
+// full protocol, and this repo's own plugin/sazu/docs/SAZU-PLAN.md for exactly what of it
 // this port implements. Registered as a real CoreDNS plugin (plugin.cfg,
 // setup.go) -- `sazu ZONES...` in a Corefile.
 package sazu

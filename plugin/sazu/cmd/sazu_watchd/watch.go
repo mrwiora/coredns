@@ -9,7 +9,7 @@ import (
 // zoneState is this process's own, purely in-memory memory of whether a
 // zone's chain-of-trust check last succeeded, and which of its
 // registered ZSKs were last found present in the zone's live-served
-// DNSKEY RRset -- the "last known good" SAZU-PLAN.md's design for this
+// DNSKEY RRset -- the "last known good" plugin/sazu/docs/SAZU-PLAN.md's design for this
 // daemon compares against. Not persisted: a restart just re-establishes
 // a fresh baseline on its first pass rather than resuming exactly where
 // a previous run left off. That's a deliberate simplification for this

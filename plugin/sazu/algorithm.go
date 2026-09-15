@@ -23,7 +23,7 @@ import "github.com/miekg/dns"
 //
 // This is the Go port's counterpart to the earlier Rust/rDNS port's
 // meets_minimum_floor() check, which did not carry over when this
-// package was first written -- see SAZU-PLAN.md.
+// package was first written -- see plugin/sazu/docs/SAZU-PLAN.md.
 var algorithmFloor = map[uint8]bool{
 	dns.RSASHA256:       true,
 	dns.ECDSAP256SHA256: true,

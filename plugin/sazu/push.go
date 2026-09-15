@@ -200,7 +200,7 @@ func sameDNSKEY(a, b *dns.DNSKEY) bool {
 // built on this -- must present, and sign, the complete new membership
 // every time, not just the delta, or the signature ends up covering
 // content that no longer matches what's actually served (see
-// SAZU-PLAN.md for the concrete failure this was found from: a stale
+// plugin/sazu/docs/SAZU-PLAN.md for the concrete failure this was found from: a stale
 // RRSIG left covering a DNSKEY set that no longer existed, which a real
 // validating resolver would see as a bogus signature over the entire
 // zone).

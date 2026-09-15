@@ -10,7 +10,7 @@ account or API-key handshake. The server never holds a private key.
 See the design document (`sazu-protocol.md` in
 [github.com/mrwiora/sazu](https://github.com/mrwiora/sazu), the separate
 repo this port was built against) for the full protocol; see this repo's
-own `SAZU-PLAN.md` for exactly what of it this port implements today,
+own `plugin/sazu/docs/SAZU-PLAN.md` for exactly what of it this port implements today,
 including chain-of-trust bootstrap, full and partial pushes, key
 rollover, rate limiting, persistence, an audit trail, the §11
 delegation-change watch daemon, and pushing over UDP, TCP, or HTTPS
@@ -919,6 +919,6 @@ a real-world test isn't mistaken for a production trial run:
   registered key (KSK or ZSK alike) is authorized to do everything a
   SIG(0)-authenticated push can do here — push zone content, register or
   retire another ZSK, manage the contact address — with no way to scope
-  a specific key to a narrower set of operations. See SAZU-PLAN.md's
+  a specific key to a narrower set of operations. See plugin/sazu/docs/SAZU-PLAN.md's
   KSK/ZSK section for why that's a materially different problem
   (authorization, not a DNSSEC key role) from the KSK/ZSK split itself.

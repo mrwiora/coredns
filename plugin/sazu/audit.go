@@ -14,7 +14,7 @@ import (
 type AuditEntry struct {
 	// ID is a fresh, server-generated identifier for this transaction --
 	// not something the client supplies or sees on the wire today (see
-	// SAZU-PLAN.md for why this is deliberately server-side-only for
+	// plugin/sazu/docs/SAZU-PLAN.md for why this is deliberately server-side-only for
 	// now); it exists purely to let one accepted or rejected attempt be
 	// found again later in the audit log.
 	ID         string

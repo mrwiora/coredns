@@ -30,7 +30,7 @@ var log = clog.NewWithPlugin("sazu")
 // authenticated purely by SIG(0) (RFC 2931) riding on an RFC 2136 dynamic
 // UPDATE, with no separate account/API-key handshake (§10.1/§10.2), over
 // UDP, TCP, or HTTPS (§7.3). See sazu-protocol.md for the full design;
-// see SAZU-PLAN.md for exactly what of it this port implements today.
+// see plugin/sazu/docs/SAZU-PLAN.md for exactly what of it this port implements today.
 type Sazu struct {
 	Next plugin.Handler
 
@@ -940,7 +940,7 @@ func writeMsg(w dns.ResponseWriter, m *dns.Msg) (int, error) {
 // rides as a short diagnostic TXT record in the response's Additional
 // section." Every status code in §12's list is implemented at this
 // point (see the other statusErr* constants below and in prereq.go/
-// sign.go); see SAZU-PLAN.md for the full accounting.
+// sign.go); see plugin/sazu/docs/SAZU-PLAN.md for the full accounting.
 const statusErrNoDSPublished = "ERR_NO_DS_PUBLISHED"
 
 // statusErrUnknownSigner is another of §12's status codes: a DS record is

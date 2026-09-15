@@ -118,7 +118,7 @@ func dsGuidanceDataFor(zone string, key *dns.DNSKEY) dsGuidanceData {
 // (miekg/dns's MinMsgSize), and -- deliberately -- the real, actual
 // receive capacity of a CoreDNS UDP listener today, since core/dnsserver
 // does not raise it (an earlier Config.UDPSize override was tried and
-// removed; see SAZU-PLAN.md for why). This has to track that real
+// removed; see plugin/sazu/docs/SAZU-PLAN.md for why). This has to track that real
 // capacity exactly, not some larger "should be safe" value: a push
 // between 512 bytes and any bigger guess would still go out over UDP,
 // still get silently truncated to 512 bytes on receipt, and still fail

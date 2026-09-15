@@ -12,7 +12,7 @@ or test case. Every count and cross-reference in the rendered document
 from the data itself -- never hand-maintained -- specifically because
 hand-maintaining those numbers directly in the HTML is what caused
 several real mistakes during this dossier's early revisions (see
-SAZU-PLAN.md). validate() below additionally catches the two mistakes
+plugin/sazu/docs/SAZU-PLAN.md). validate() below additionally catches the two mistakes
 most likely to recur even with generation: a test case citing a
 requirement ID that doesn't exist, and a requirement no test case
 claims to verify.

@@ -16,7 +16,7 @@ import (
 // publish-trust` always generates a ZSK together with the KSK at
 // onboarding, precisely so an automation box running routine
 // `publish-zone` pushes never needs to hold the KSK at all -- see
-// SAZU-PLAN.md's KSK/ZSK section, and plugin/sazu/README.md's "Keys and
+// plugin/sazu/docs/SAZU-PLAN.md's KSK/ZSK section, and plugin/sazu/README.md's "Keys and
 // validity: quick reference", for why this split exists. A ZSK is never
 // DS-anchored itself; it's trusted transitively, solely because an
 // already-trusted key's SIG(0) authenticated the push that introduced
