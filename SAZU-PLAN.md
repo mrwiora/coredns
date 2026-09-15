@@ -1023,17 +1023,24 @@ pushes alike.
   authenticate-evaluate-apply *sequence* for one zone against itself, not
   guard those structures' own internals.
 
-  One deliberately un-addressed residual bottleneck, noted honestly
-  rather than silently left implied-fixed: `DB`'s single SQLite
-  connection (`SetMaxOpenConns(1)`) still serializes the `CommitUpdate`
-  step specifically across all zones, `database/sql` itself queuing
-  concurrent callers safely onto that one connection. This remains
-  correct and is a much smaller cost than the network round trip the
-  per-zone locking above actually targets (a short wait against local
-  disk, not a multi-second DNS walk), but a deployment pushing very high
-  concurrent write volume across many zones would eventually want
-  SQLite's WAL mode and/or more connections there too -- see the
-  README's own **Known limitations** section.
+  The residual bottleneck this left, noted at the time rather than
+  silently left implied-fixed -- `DB`'s single SQLite connection
+  (`SetMaxOpenConns(1)`) still serializing the `CommitUpdate` step
+  across all zones, via `database/sql` itself queuing concurrent callers
+  onto that one connection -- has since been addressed: `Open` now
+  connects with `_journal_mode=WAL` and a `_busy_timeout`, and hands out
+  up to `maxOpenConns` (8) connections rather than one. WAL mode is what
+  actually buys the concurrency here -- readers (`LoadZoneKeys`, the
+  audit trail) no longer block behind an in-flight writer, and more than
+  one connection can be open on the file at once -- with busy_timeout
+  making a second writer wait for SQLite's own lock instead of failing
+  outright with `SQLITE_BUSY`. What doesn't change, and can't: SQLite
+  allows exactly one writer at a time regardless of journal mode, so
+  concurrent zones' `CommitUpdate` calls still take their turn there --
+  just at SQLite's own lock now, not queued behind a single app-level
+  connection first. As before, this remains a short wait against local
+  disk, not the real outbound network round trip the per-zone locking
+  above actually targets.
 
   Verified with two new dedicated tests
   (`plugin/sazu/concurrency_test.go`): one proving a slow, in-flight

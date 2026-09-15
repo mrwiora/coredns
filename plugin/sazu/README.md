@@ -776,16 +776,6 @@ a real-world test isn't mistaken for a production trial run:
 * **In-memory only if `db` is omitted.** Persistence via `db PATH` (SQLite)
   is available and tested; without it, restarting the server loses every
   onboarded zone and pinned key.
-* **`db PATH` persistence still has one shared bottleneck**, even though
-  updates to different zones now run concurrently up to that point
-  (per-zone lock stripes, not one global lock): `DB` uses a single SQLite
-  connection (`SetMaxOpenConns(1)`, since SQLite is one-writer-at-a-time
-  regardless), so concurrent zones' `CommitUpdate` calls still take their
-  turn there. In practice this is a short wait against local disk, not
-  the real outbound network round trip a chain-of-trust walk can be — the
-  bottleneck the per-zone locking above actually targets — but a
-  deployment pushing very high concurrent write volume across many zones
-  would eventually want WAL mode and/or more connections here too.
 * **Onboarding is two round trips, not one.** `publish-trust` establishes
   the KSK/ZSK trust relationship and `publish-zone` pushes content
   separately — a zone is briefly "trusted but empty" in between, unable

@@ -97,22 +97,37 @@ type DB struct {
 	sql *sql.DB
 }
 
+// maxOpenConns bounds how many concurrent connections Open's *sql.DB pool
+// will hand out. SQLite (even in WAL mode) still allows only one writer at
+// a time -- this isn't an attempt to parallelize CommitUpdate itself, just
+// enough headroom that a burst of concurrent zones' writes, and any reads
+// (LoadZoneKeys, the audit trail) running alongside them, don't all pile
+// up behind Go's own single-connection queue the way a strict
+// SetMaxOpenConns(1) would. A modest, fixed cap rather than unlimited
+// (0): each one is a real OS file handle, and WAL's actual concurrency
+// benefit tops out long before that would matter.
+const maxOpenConns = 8
+
 // Open creates or opens a SQLite database at path and ensures its schema
 // exists.
 func Open(path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path)
+	// WAL mode lets readers (LoadZoneKeys, the audit trail) proceed
+	// without waiting behind an in-flight writer, and lets more than one
+	// connection be open on this file at once -- neither is true of
+	// SQLite's default rollback-journal mode, which is why this replaces
+	// the previous single-connection workaround. Concurrent writers
+	// (different zones' CommitUpdate calls, now free to race here since
+	// Sazu.updateLocks only ever serialized them per-zone) still take
+	// their turn at SQLite's own one-writer-at-a-time lock either way --
+	// WAL doesn't change that -- but busy_timeout makes them wait for it
+	// instead of failing immediately with SQLITE_BUSY; 5s is comfortably
+	// longer than a write against local disk should ever take.
+	dsn := path + "?_journal_mode=WAL&_busy_timeout=5000"
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
-	// SQLite handles one writer at a time; a single connection avoids
-	// SQLITE_BUSY without needing WAL-mode tuning for a first cut.
-	// database/sql itself safely queues concurrent callers onto that one
-	// connection (it's designed for exactly this), so this remains
-	// correct now that Sazu.updateLocks lets different zones' updates run
-	// concurrently up to this point -- their CommitUpdate calls simply
-	// take their turn here, a short wait against local disk rather than
-	// the real outbound network round trip a chain-of-trust walk can be.
-	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxOpenConns(maxOpenConns)
 	if _, err := sqlDB.Exec(schema); err != nil {
 		sqlDB.Close()
 		return nil, fmt.Errorf("creating schema in %s: %w", path, err)
