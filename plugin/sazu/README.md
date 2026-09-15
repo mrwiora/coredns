@@ -90,8 +90,8 @@ sazu ZONES... {
 * `rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY` overrides §12's per-zone
   push quotas, each enforced over a rolling 24h window: FULL_PER_DAY for a
   push that actually changes zone content (`publish-zone` — always a
-  complete replacement; see "Considered approaches for differential
-  updates" below for why there's no smaller alternative) and
+  complete replacement; see [`docs/SAZU-DIFFUPDATES.md`](docs/SAZU-DIFFUPDATES.md)
+  for why there's no smaller alternative) and
   KEY_MANAGEMENT_PER_DAY for a push that only changes key state
   (`publish-trust`, `add-zsk`, `retire-zsk`, `rotate-key`), which costs
   this server far less to process, tracked independently.
@@ -200,8 +200,8 @@ Subcommands:
   do). Either way this is a push-time choice the signer makes — the
   server just stores and serves whichever chain it was given. Every push
   is a fresh, full replacement of the zone's entire content — there is
-  no partial/differential update command; see "Considered approaches for
-  differential updates" below for why.
+  no partial/differential update command; see
+  [`docs/SAZU-DIFFUPDATES.md`](docs/SAZU-DIFFUPDATES.md) for why.
 * `sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-target host:port|url] [-json]` —
   the original minimal single-record demo, kept for quick protocol
   smoke-testing. It does **not** include a SOA, so it cannot by itself
@@ -819,17 +819,6 @@ it has to be pieced back together from the sections above.
 - **Content-signature verification is mandatory, unconditionally, with no way to turn it off.** Every pushed RRset must carry a covering RRSIG that actually verifies, or the push is rejected (`NOTAUTH` / `ERR_SIG_INVALID`) before anything is applied. There is no "trust SIG(0) alone" mode — SIG(0) proves who sent a push, never that the content itself would validate for a real resolver.
 - **`insecure_skip_chain_validation`** is the one remaining opt-in toggle anywhere in this plugin, and it's exactly what its name says: disables the §10.2 DS cross-check at first contact, for local testing only where there's no real parent zone to check against. **Never set this in production** — see [Syntax](#syntax) above. Nothing else in this plugin is optional in a way that weakens what gets verified.
 
-## Considered approaches for differential updates
-
-`publish-zone` always sends a zone's complete, authoritative content —
-there is no partial/differential update command, and every change,
-however small, is a fresh full push of the whole thing. That's a
-deliberate simplification, not an oversight: three different
-differential-update designs were tried across this project's
-development and each was rejected. See
-[`docs/SAZU-DIFFUPDATES.md`](docs/SAZU-DIFFUPDATES.md) for all three and
-why none were kept.
-
 ## Known limitations
 
 Worth being explicit about what this proof of concept does *not* cover, so
@@ -872,6 +861,18 @@ rediscover it:
 * **`docs/SAZU-PLAN.md`** — the running build log this port was
   developed against: what's done, why, and (its own final section) what
   was identified but deliberately left outstanding.
+* **`docs/SAZU-DIFFUPDATES.md`** — `publish-zone` always sends a zone's
+  complete, authoritative content; there is no partial/differential
+  update command. This document is why: three different
+  differential-update designs (a client-side chain cache, live
+  client-side discovery/reconciliation, server-side diffing) were tried
+  across this project's development, each working and tested at the
+  time, before all three were rejected as solving a bandwidth/CPU
+  problem the zones this protocol targets barely have, at the price of
+  real recurring correctness risk that a full push has none of. Unlike
+  the other documents in this list, this one isn't a planned item —
+  it's a closed decision, kept here so the tradeoff stays visible to
+  anyone tempted to rebuild one of the three later.
 * **`docs/SAZU-THREAT-MODEL.md`** — a consolidated, STRIDE-organized pass
   through this package's actual security posture: the parties involved,
   what's already mitigated and how (citing real code, not aspirational),
@@ -897,10 +898,9 @@ rediscover it:
   decommission/tombstones), including a short note on alternatives
   considered and rejected along the way (e.g. mTLS between instances).
   **This is currently a purely planned item, not being implemented** —
-  the same status as the differential-update mechanisms considered and
-  rejected (see "Considered approaches for differential updates" above),
-  with one difference: clustering hasn't been rejected, just not yet
-  built. The one piece of it that *does* exist today is
+  unlike `docs/SAZU-DIFFUPDATES.md` above, which is a closed, rejected
+  decision, clustering hasn't been rejected, just not yet built. The one
+  piece of it that *does* exist today is
   `sazuctl decommission-zone` (documented above), built as a genuine,
   independently useful prerequisite regardless of whether the rest of
   the cluster design is ever implemented.
