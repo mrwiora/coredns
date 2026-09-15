@@ -941,16 +941,30 @@ rediscover it:
   what's already mitigated and how (citing real code, not aspirational),
   and — called out explicitly rather than left implicit — the gaps that
   pass surfaced. Worth reading before relying on this in production; the
-  closest thing here to a single security overview.
+  closest thing here to a single security overview. Its most actionable
+  finding: every `sazuctl` command signs its SIG(0) transaction with a
+  fixed one-hour validity window, so a captured, still-valid push remains
+  replayable for that whole hour — unmitigated for key-management
+  operations (`add-zsk` specifically: a captured push for a
+  since-retired ZSK, replayed, silently un-retires it) regardless of
+  client behavior, and only caught for content pushes when the client
+  opts into `-previous-serial`. The proposed fix — a mandatory,
+  monotonically increasing per-zone key-management sequence number,
+  piggybacked on the live query `add-zsk`/`retire-zsk`/`rotate-key -role
+  ksk` already make before signing — is **not implemented**; see the
+  threat model's §5/§10 for the full reasoning, including why a
+  same-server replay-dedup cache alone doesn't close this once more than
+  one instance is authoritative for a zone.
 * **`docs/SAZU-CLUSTER.md`** — a specification for running more than one
   SAZU instance for the same zones, converged automatically (symmetric
   partner list, digest-comparison gossip, a shared cluster secret, zone
   decommission/tombstones), including a short note on alternatives
   considered and rejected along the way (e.g. mTLS between instances).
   **This is currently a purely planned item, not being implemented** —
-  the same status as the differential-update mechanisms described and
-  rejected above, with one difference: clustering hasn't been rejected,
-  just not yet built. The one piece of it that *does* exist today is
+  the same status as the differential-update mechanisms considered and
+  rejected (see "Considered approaches for differential updates" above),
+  with one difference: clustering hasn't been rejected, just not yet
+  built. The one piece of it that *does* exist today is
   `sazuctl decommission-zone` (documented above), built as a genuine,
   independently useful prerequisite regardless of whether the rest of
   the cluster design is ever implemented.
