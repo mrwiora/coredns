@@ -1,16 +1,39 @@
 # SAZU cluster replication: specification
 
 This is the decided design for running more than one SAZU-enabled CoreDNS
-instance for the same set of zones, converged automatically. It supersedes
-`SAZU-MULTIINSTANCE-CONCEPT.md` (kept as-is for the design history and the
-alternatives considered and rejected along the way -- TLS/mTLS between
-partners, a dedicated port, reusing the HTTPS/DoH carrier). This document
+instance for the same set of zones, converged automatically. This document
 states the result as a defined design, not a narrative of how it was
 reached.
 
 **Status: deferred.** Nothing in this document beyond `decommission-zone`
 (§5) is implemented yet. This is the specification to build from when work
 resumes, not a report of work done.
+
+**Alternatives considered and rejected along the way**, kept here briefly
+so they aren't relitigated from scratch later:
+
+- **Directional `replicate_to`/`sync_from` configuration**, distinguishing
+  which instance pushes to which and which pulls from which. Rejected for
+  the symmetric `partners` list (§2): a directional scheme means every
+  instance's Corefile encodes its specific role relative to every other
+  instance, and adding one more instance means revisiting all of them.
+- **mTLS between instances** (per-instance client certificates, verified
+  against a shared CA). Rejected in favor of the cluster secret (§4): mTLS
+  would need real PKI/certificate lifecycle management for a benefit the
+  AEAD-sealed cluster secret already provides (confidentiality and peer
+  authenticity) without it. The one thing mTLS uniquely offers -- distinct
+  per-partner identity, since a single shared secret can't tell which
+  partner sent a given message -- was judged not worth that operational
+  cost for this design; revisit if per-partner identity/revocation turns
+  out to matter more than expected in practice.
+- **A dedicated cluster port**, then **reusing the HTTPS/DoH carrier**,
+  before settling on plain DNS-over-TCP (§3). A dedicated port needs a
+  second listener with its own lifecycle; the HTTPS/DoH carrier drags in
+  HTTP semantics (POST bodies, content types, a JSON envelope option) that
+  buy nothing for server-to-server traffic and, worse, would make gossip
+  depend on an operator having configured DoH at all -- plenty of real
+  deployments run plain DNS only. Reserved-name DNS messages over the
+  existing plain listener need no new listener and no such dependency.
 
 ## 1. Overview
 

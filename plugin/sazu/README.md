@@ -942,17 +942,15 @@ rediscover it:
   and — called out explicitly rather than left implicit — the gaps that
   pass surfaced. Worth reading before relying on this in production; the
   closest thing here to a single security overview.
-* **`docs/SAZU-MULTIINSTANCE-CONCEPT.md`** and **`docs/SAZU-CLUSTER.md`**
-  — a design for running more than one SAZU instance for the same zones,
-  converged automatically (symmetric partner list, digest-comparison
-  gossip, a shared cluster secret, zone decommission/tombstones). The
-  concept document is the exploration (including alternatives considered
-  and rejected along the way, e.g. mTLS between instances); the cluster
-  document restates the result as a settled specification. **This is
-  currently a purely planned item, not being implemented** — the same
-  status as the differential-update mechanisms described and rejected
-  above, with one difference: clustering hasn't been rejected, just not
-  yet built. The one piece of it that *does* exist today is
+* **`docs/SAZU-CLUSTER.md`** — a specification for running more than one
+  SAZU instance for the same zones, converged automatically (symmetric
+  partner list, digest-comparison gossip, a shared cluster secret, zone
+  decommission/tombstones), including a short note on alternatives
+  considered and rejected along the way (e.g. mTLS between instances).
+  **This is currently a purely planned item, not being implemented** —
+  the same status as the differential-update mechanisms described and
+  rejected above, with one difference: clustering hasn't been rejected,
+  just not yet built. The one piece of it that *does* exist today is
   `sazuctl decommission-zone` (documented above), built as a genuine,
   independently useful prerequisite regardless of whether the rest of
   the cluster design is ever implemented.

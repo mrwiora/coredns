@@ -1251,8 +1251,8 @@ pushes alike.
 
 - **Added: `sazuctl decommission-zone`, the first way to fully remove a
   zone.** Surfaced as a prerequisite while designing multi-instance
-  replication (`SAZU-MULTIINSTANCE-CONCEPT.md`) -- gossip-based
-  reconciliation across instances needs a real "this zone is gone"
+  replication (`SAZU-CLUSTER.md`) -- gossip-based reconciliation across
+  instances needs a real "this zone is gone"
   operation to build tombstones on top of, and none existed at all,
   single-instance or not: every ordinary RFC 2136 delete-shaped op
   deliberately protects the apex SOA (`ZoneData.deleteRRsetLocked`/
