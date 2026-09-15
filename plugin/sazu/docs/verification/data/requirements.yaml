@@ -1,0 +1,668 @@
+document:
+  id: SAZU-REQ
+  version: '1.2'
+  title: Requirements Specification
+introduction:
+  purpose: |-
+    This document specifies the functional and non-functional requirements for
+    <strong>SAZU</strong> (Self-Authenticated Zone Update) as built: the <code
+    class="inline">plugin/sazu</code> CoreDNS plugin, its <code
+    class="inline">sazuctl</code> client and <code class="inline">sazu-watchd</code>
+    monitoring daemon, and the small set of CoreDNS-core (<code
+    class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code
+    class="inline">plugin/pkg/dnsutil</code>) extensions built to carry it over HTTPS. Every
+    requirement below is drawn from what the code and its own governing comments actually
+    assert, cross-checked against the RFCs it cites — this is a specification recovered from
+    an implementation, not the other way around.
+  scope: |-
+    In scope: authentication and authorization of zone-content pushes; DNSSEC content
+    signing and serving; key lifecycle (pinning, rollover, custody); the wire carriers a
+    push may arrive over; operational controls (rate limiting, audit trail); and the
+    separate delegation-change watch daemon. Out of scope: general DNS query
+    performance/caching, and CoreDNS's own unrelated plugin ecosystem.
+  conventions: |-
+    Requirement statements use <strong>SHALL</strong> / <strong>SHALL NOT</strong> for
+    mandatory behaviour and <strong>MAY</strong> for optional behaviour, in the sense of RFC
+    2119. Each requirement carries a stable identifier (<code
+    class="inline">AREA-NN</code>), its source (a design-doc section, an RFC, or a
+    documented engineering decision), and the test case(s) in the companion Test
+    Specification that verify it.
+normative_references:
+- rfc: RFC 1035
+  role: |-
+    Domain names — implementation and specification. UDP transport ceiling (512&nbsp;B),
+    wire format.
+- rfc: RFC 2136
+  role: |-
+    Dynamic Updates in the Domain Name System (DNS UPDATE). The push mechanism itself.
+- rfc: RFC 2308
+  role: |-
+    Negative Caching of DNS Queries. SOA-in-authority requirement for negative answers.
+- rfc: RFC 2931
+  role: |-
+    DNS Request and Transaction Signatures (SIG(0)). Transaction authentication.
+- rfc: RFC 4034 / 4035
+  role: |-
+    DNSSEC resource records / protocol modifications. RRSIG, NSEC, chain-of-trust
+    validation.
+- rfc: RFC 4122
+  role: UUID. Audit-trail transaction identifiers (v4).
+- rfc: RFC 5155
+  role: |-
+    DNSSEC Hashed Authenticated Denial of Existence (NSEC3). Implemented as an opt-in
+    alternative to NSEC (CONTENT-13).
+- rfc: RFC 9276
+  role: |-
+    Guidance for NSEC3 Parameter Settings. NSEC3Options' zero-iterations/no-salt defaults.
+- rfc: RFC 6068
+  role: |-
+    The 'mailto' URI Scheme. Contact-record email addressing.
+- rfc: RFC 6781
+  role: |-
+    DNSSEC Operational Practices. Key/algorithm rollover conventions (co-existing DS
+    records).
+- rfc: RFC 7766
+  role: |-
+    DNS Transport over TCP — Implementation Requirements. TCP as mandatory fallback.
+- rfc: RFC 8427
+  role: |-
+    Representing DNS Messages in JSON. Cited as the structural-JSON approach deliberately
+    <em>not</em> taken for the HTTPS carrier.
+- rfc: RFC 8484
+  role: |-
+    DNS Queries over HTTPS (DoH). Base convention reused for the HTTPS carrier.
+- rfc: RFC 8624
+  role: |-
+    Algorithm Implementation Requirements for DNSSEC. Basis for the algorithm floor.
+system_overview:
+- |-
+  SAZU is a split-signing DNSSEC scheme: a customer's own signer holds the zone's private
+  key and never transmits it; the server accepts only already-signed zone content,
+  delivered as an RFC 2136 dynamic UPDATE authenticated end-to-end by a SIG(0) transaction
+  signature. A single Ed25519 key, flagged as a KSK, serves both roles — SIG(0)
+  transaction signer and DNSSEC signer — so there is no separate account, API key, or
+  out-of-band handshake. The first UPDATE for a zone ("first contact") is validated by
+  walking the real DNSSEC chain of trust from the root down to the zone's delegating
+  parent; once a key is pinned this way, every later UPDATE is checked by signature alone,
+  unless it is a key rollover, which re-runs the same chain check for a new candidate key.
+- |-
+  The system comprises four deployable pieces: the <code class="inline">sazu</code>
+  CoreDNS plugin (server), <code class="inline">sazuctl</code> (customer-side push
+  client), <code class="inline">sazu-watchd</code> (standalone delegation-change monitor),
+  and a small set of upstream CoreDNS-core extensions that let the push arrive over
+  HTTPS/HTTP3 as well as UDP/TCP.
+areas:
+- id: auth
+  code: AUTH
+  title: SIG(0) transaction authentication
+  requirements:
+  - id: AUTH-01
+    text: |-
+      The server SHALL authenticate every RFC 2136 UPDATE using SIG(0) computed over the exact
+      wire bytes as transmitted, never a re-encoding of the parsed message.
+    source: RFC 2931 &middot; §9.1/§10.1
+  - id: AUTH-02
+    text: |-
+      The server SHALL reject an UPDATE with a missing, malformed, expired, not-yet-valid, or
+      cryptographically invalid SIG(0) with RCODE NOTAUTH.
+    source: RFC 2931
+  - id: AUTH-03
+    text: |-
+      The server SHALL obtain the literal request wire bytes independent of transport: UDP/TCP
+      via socket-read capture; HTTPS/HTTP3 via request-context propagation.
+    source: §7.2/§7.3
+  - id: AUTH-04
+    text: |-
+      If no wire bytes can be recovered for a request, the server SHALL fail closed with RCODE
+      SERVFAIL rather than authenticate against a re-encoding.
+    source: Engineering decision
+- id: chain
+  code: CHAIN
+  title: First-contact chain of trust
+  requirements:
+  - id: CHAIN-01
+    text: |-
+      On first contact (no key yet pinned for the zone), the UPDATE SHALL carry exactly one
+      candidate DNSKEY at the zone apex.
+    source: §10.2
+  - id: CHAIN-02
+    text: |-
+      The candidate key's SIG(0) SHALL verify before the key may be pinned.
+    source: §10.2
+  - id: CHAIN-03
+    text: |-
+      The server SHALL walk the DNSSEC chain of trust from a hardcoded root anchor to the
+      zone's delegating parent, verifying every DNSKEY/DS RRset and RRSIG traversed, and
+      confirm at least one parent-published DS matches the candidate key.
+    source: RFC 4034/4035 &middot; §10.2
+  - id: CHAIN-04
+    text: |-
+      First contact SHALL be refused (REFUSED, status <code
+      class="inline">ERR_NO_DS_PUBLISHED</code>) if the parent publishes no DS for the zone at
+      all.
+    source: §12
+  - id: CHAIN-05
+    text: |-
+      First contact SHALL be refused (REFUSED, status <code
+      class="inline">ERR_UNKNOWN_SIGNER</code>) if a DS is published but none matches the
+      candidate key.
+    source: §12
+  - id: CHAIN-06
+    text: |-
+      A first-contact UPDATE SHALL be accepted, and its candidate key pinned, whether or not
+      it also establishes a real SOA at the apex: <code class="inline">sazuctl
+      publish-trust</code> deliberately sends none, establishing the KSK/ZSK trust
+      relationship as a step separate from any zone content, which a subsequent <code
+      class="inline">publish-zone</code> push supplies.
+    source: Engineering decision
+  - id: CHAIN-07
+    text: |-
+      The chain-of-trust check MAY be disabled per instance (<code
+      class="inline">insecure_skip_chain_validation</code>) for non-production testing only.
+    source: Operational
+- id: key
+  code: KEY
+  title: Key pinning &amp; rollover
+  requirements:
+  - id: KEY-01
+    text: |-
+      Once pinned, the server SHALL accept only UPDATEs whose SIG(0) verifies against the
+      zone's KSK, against a registered ZSK authorized to authenticate transactions, or against
+      a new candidate undergoing a valid KSK rollover (KEY-03).
+    source: §10.2
+  - id: KEY-02
+    text: |-
+      A push signed by any other key SHALL be rejected with RCODE NOTAUTH.
+    source: §10.2
+  - id: KEY-03
+    text: |-
+      If none of a zone's currently authorized keys verify a transaction, but the UPDATE also
+      carries a different, SEP-flagged (KSK) candidate DNSKEY whose own SIG(0) verifies, the
+      server SHALL attempt a KSK rollover by subjecting that candidate to the identical
+      chain-of-trust check first contact requires (CHAIN-03..05).
+    source: §10.4
+  - id: KEY-04
+    text: |-
+      A KSK rollover UPDATE SHALL NOT be required to carry an apex SOA.
+    source: §10.4
+  - id: KEY-05
+    text: |-
+      On successful KSK rollover, the server SHALL replace the pinned KSK; the superseded KSK
+      SHALL cease to authenticate further UPDATEs; any already-registered ZSK SHALL remain
+      valid, unaffected by the rollover.
+    source: §10.4
+  - id: KEY-06
+    text: |-
+      Every onboarded zone SHALL have exactly one KSK, established at first contact and
+      anchored to a parent DS record (CHAIN-03). <code class="inline">sazuctl
+      publish-trust</code> SHALL always generate and present a ZSK together with the KSK at
+      first contact, so a zone MAY additionally register further ZSKs on top of that first
+      one. The single-key model (one Ed25519 key doing both SIG(0) authentication and DNSSEC
+      signing) remains a valid state at the <code class="inline">KeyRegistry</code> level for
+      a zone with no ZSK, but is no longer what any onboarding path <code
+      class="inline">sazuctl</code> offers produces by default.
+    source: §9.1 (design decision, extended)
+  - id: KEY-07
+    text: |-
+      A first-contact candidate key SHALL carry the SEP (KSK) flag; a candidate presented
+      without it SHALL be refused (REFUSED, status <code
+      class="inline">ERR_FIRST_CONTACT_REQUIRES_KSK</code>) without pinning anything.
+    source: Engineering decision
+  - id: KEY-08
+    text: |-
+      A ZSK SHALL be registered via an ordinary, already-authenticated push that adds a
+      non-SEP-flagged DNSKEY at the zone apex, checked against the same algorithm floor (ALGO)
+      as any other candidate key, with no chain-of-trust network walk.
+    source: Engineering decision
+  - id: KEY-09
+    text: |-
+      A ZSK SHALL be retirable via an RFC 2136 §2.5.4 "delete one RR" DNSKEY op naming its key
+      tag; an RFC 2136 §2.5.2 "delete RRset" op SHALL NOT be treated as ZSK retirement (it
+      would remove the KSK too).
+    source: |-
+      RFC 2136 §2.5.2/§2.5.4 &middot; Engineering decision
+  - id: KEY-10
+    text: |-
+      Content signed by any key currently valid for the zone — the KSK or any registered ZSK —
+      SHALL verify under §4's mandatory content-signature check.
+    source: CONTENT-04/05 &middot; Engineering decision
+  - id: KEY-11
+    text: |-
+      A ZSK MAY be granted the ability to authenticate transactions on its own, independent of
+      the KSK; every ZSK registered via an ordinary push SHALL default to this, since the
+      DNSKEY wire format (RFC 4034 §2.1.1) has no reserved bit to request otherwise.
+    source: RFC 4034 §2.1.1 &middot; Engineering decision
+  - id: KEY-12
+    text: |-
+      Any client-side change to a zone's served DNSKEY RRset membership (a ZSK registration or
+      retirement, or a KSK rollover) SHALL leave that RRset covered by a single RRSIG that
+      validates against its complete, current membership — never one computed over only the
+      record being added or removed — and SHALL explicitly remove any DNSKEY record no longer
+      part of that membership (an RFC 2136 §2.5.4 delete), rather than leaving it served
+      alongside a signature that no longer covers it.
+    source: |-
+      RFC 4034 §3 (an RRSIG covers its whole RRset) &middot; Engineering decision
+  - id: KEY-13
+    text: |-
+      A zone SHALL be fully removable — its KSK, every registered ZSK, all content and its
+      NSEC/NSEC3 chain, and its §10.6 contact registration — via a dedicated decommission
+      directive, authenticated by the zone's own currently-pinned KSK specifically (refused,
+      status <code class="inline">ERR_DECOMMISSION_REQUIRES_KSK</code>, if authenticated by
+      anything else, including an already-registered ZSK). The directive SHALL NOT be mixed
+      with any other op in the same transaction. A decommissioned zone's audit-trail history
+      SHALL survive the removal.
+    source: Engineering decision
+- id: algo
+  code: ALGO
+  title: Minimum algorithm floor
+  requirements:
+  - id: ALGO-01
+    text: |-
+      A first-contact or rollover candidate key whose algorithm RFC&nbsp;8624&nbsp;§3.1 rates
+      MUST&nbsp;NOT or NOT&nbsp;RECOMMENDED for zone signing SHALL be refused (REFUSED, status
+      <code class="inline">ERR_WEAK_ALGORITHM</code>).
+    source: RFC 8624 §3.1 &middot; §10.7
+  - id: ALGO-02
+    text: |-
+      The accepted set SHALL be an explicit allow-list — RSASHA256, ECDSAP256SHA256,
+      ECDSAP384SHA384, ED25519, ED448 — with any unrecognised algorithm rejected by default.
+    source: RFC 8624 §3.1
+  - id: ALGO-03
+    text: |-
+      The algorithm check SHALL run before any SIG(0) cryptographic verification or
+      chain-of-trust network activity for the candidate.
+    source: Engineering decision
+- id: content
+  code: CONTENT
+  title: RFC 2136 mechanics &amp; DNSSEC content
+  requirements:
+  - id: CONTENT-01
+    text: |-
+      All five RFC 2136 §2.4 prerequisite forms SHALL be evaluated correctly, returning the
+      §2.6 RCODE (NXRRSET/YXRRSET/NXDOMAIN/YXDOMAIN) on failure.
+    source: RFC 2136 §2.4/§2.6
+  - id: CONTENT-02
+    text: |-
+      All four RFC 2136 §2.5 update forms (add to RRset; delete RRset; delete all RRsets from
+      name; delete one RR) SHALL be applied correctly.
+    source: RFC 2136 §2.5
+  - id: CONTENT-03
+    text: |-
+      A full-zone push MAY carry an RFC 2136 §2.4.2 SOA-serial staleness guard; a stale push
+      SHALL be rejected (NXRRSET, status <code class="inline">ERR_STALE_SERIAL</code>).
+    source: RFC 2136 §2.4.2 &middot; §12
+  - id: CONTENT-04
+    text: |-
+      Content-signature verification SHALL be mandatory on every update, with no way to
+      disable it: an Add-shaped RRset with no covering, cryptographically valid RRSIG SHALL
+      be rejected (NOTAUTH, status <code class="inline">ERR_SIG_INVALID</code>).
+    source: §4 &middot; §12
+  - id: CONTENT-05
+    text: |-
+      A covering RRSIG that is cryptographically valid but outside its validity window SHALL
+      be reported distinctly (status <code class="inline">ERR_EXPIRED_SIGNATURE</code>) rather
+      than as CONTENT-04's generic case.
+    source: §12
+  - id: CONTENT-06
+    text: |-
+      Every server-produced RRSIG SHALL carry an <code class="inline">Hdr.Ttl</code> equal to
+      its covered RRset's TTL.
+    source: RFC 4034 §3
+  - id: CONTENT-07
+    text: |-
+      A full-zone push SHALL compute an RFC 4034/4035 NSEC chain covering every owner name,
+      served as an authenticated denial-of-existence proof (closest-encloser/wildcard-slot for
+      NXDOMAIN; direct NSEC for NODATA) when the querier sets the DO bit.
+    source: RFC 4034/4035 §3.1.3
+  - id: CONTENT-08
+    text: |-
+      Every negative response (NXDOMAIN or NODATA) SHALL carry the zone's SOA in the Authority
+      section.
+    source: RFC 2308 §3
+  - id: CONTENT-09
+    text: |-
+      A partial push carrying no valid patch of its own to an existing
+      NSEC/NSEC3 chain SHALL invalidate that chain until the next full push recomputes it,
+      rather than serve a proof that may now be incorrect.
+    source: Engineering decision
+  - id: CONTENT-10
+    text: |-
+      Signing, serving, and content verification SHALL be correct for arbitrary RR types with
+      no type-specific special-casing (verified at minimum for A, AAAA, CNAME, MX, TXT, NS,
+      SRV, PTR, CAA, NAPTR, DNAME).
+    source: RFC 4034 (generic RRSIG)
+  - id: CONTENT-11
+    text: |-
+      RRSIGs SHALL be included alongside an answer only when the querying client sets the
+      EDNS0 DO bit.
+    source: RFC 4035
+  - id: CONTENT-12
+    text: |-
+      The plugin's static Corefile zone scope (e.g. a wildcard root) SHALL be independent of
+      which specific zones have actually been onboarded; a name within scope but never
+      onboarded SHALL fall through to the next plugin rather than being swallowed.
+    source: Engineering decision (multi-tenant onboarding)
+  - id: CONTENT-13
+    text: |-
+      A full-zone push SHALL be able to compute an RFC 5155 NSEC3 chain, hiding the zone's
+      owner-name set from enumeration, as an opt-in alternative to plain NSEC (CONTENT-07);
+      the closest-encloser/next-closer-name/wildcard-cover proof for NXDOMAIN, and the
+      matching record for NODATA, SHALL be served when the querier sets the DO bit, exactly
+      as for plain NSEC.
+    source: RFC 5155 &middot; §7.2
+  - id: CONTENT-15
+    text: |-
+      A push that carries an apex DNSKEY but changes no other served content (a KSK/ZSK
+      rollover, or a ZSK registration/retirement) SHALL NOT invalidate an existing
+      NSEC/NSEC3 chain, nor any other served content -- only a push that actually changes
+      zone content SHALL.
+    source: Engineering decision
+  - id: CONTENT-16
+    text: |-
+      The client's zone definition (YAML or BIND-format zone file) SHALL be the single
+      source of truth for a zone's content: a content push (<code class="inline">sazuctl
+      publish-zone</code>) SHALL always carry the zone's complete, authoritative content,
+      and SHALL replace it entirely -- a record present in an earlier push but absent from
+      a later one SHALL no longer be served afterward. There SHALL be no
+      partial/differential content-update mechanism. Key-management records (DNSKEY) SHALL
+      never be affected by a content push.
+    source: Engineering decision
+  - id: CONTENT-17
+    text: |-
+      A query or update whose name falls outside the plugin's static Corefile scope (CLIENT-04
+      of an UPDATE's zone section) or names a zone never onboarded SHALL fall through to the
+      next plugin in the chain (CONTENT-12) when one is configured; when none is (a deployment
+      with no catch-all after this plugin), it SHALL be refused (REFUSED) rather than answered
+      with SERVFAIL — the same convention an authoritative-zone plugin acting as the end of its
+      own chain SHALL follow generally.
+    source: Engineering decision (matches plugin/auto's own established convention)
+- id: contact
+  code: CONTACT
+  title: Registration record
+  requirements:
+  - id: CONTACT-01
+    text: |-
+      A contact-address registration SHALL ride an ordinary authenticated UPDATE, addressed to
+      a reserved owner name <code class="inline">_sazu-contact.&lt;zone&gt;</code> as a TXT
+      RRset.
+    source: §10.6
+  - id: CONTACT-02
+    text: |-
+      A contact address SHALL use the <code class="inline">mailto:</code>, <code
+      class="inline">http://</code>, or <code class="inline">https://</code> scheme only.
+    source: RFC 6068 &middot; §10.6
+  - id: CONTACT-03
+    text: |-
+      The contact directive SHALL be stripped before the remaining ops are evaluated as zone
+      content, and SHALL NOT be servable as ordinary DNS data.
+    source: §10.6
+  - id: CONTACT-04
+    text: |-
+      An RRSIG accompanying a contact-record TXT SHALL be silently discarded, never persisted
+      or served.
+    source: Engineering decision
+  - id: CONTACT-05
+    text: |-
+      A contact registration SHALL persist across a restart when persistence is configured.
+    source: §10.6
+- id: custody
+  code: CUSTODY
+  title: Key custody hardening
+  requirements:
+  - id: CUSTODY-01
+    text: |-
+      The client SHALL write the private key in BIND9 private-key-file format by default,
+      interoperable with standard DNSSEC tooling.
+    source: §10.8
+  - id: CUSTODY-02
+    text: |-
+      The client SHALL support encrypting the key file at rest with a passphrase-derived
+      (scrypt) AES-256-GCM key, opt-in via a passphrase file argument.
+    source: §10.8
+  - id: CUSTODY-03
+    text: |-
+      An encrypted key file SHALL be distinguishable from a plain one without knowledge of the
+      passphrase.
+    source: §10.8
+  - id: CUSTODY-04
+    text: |-
+      Decryption with an incorrect passphrase SHALL fail the same way a corrupted file would
+      (AEAD authentication failure), never with a distinguishing error.
+    source: §10.8
+- id: carrier
+  code: CARRIER
+  title: Wire carriers
+  requirements:
+  - id: CARRIER-01
+    text: |-
+      UPDATE messages SHALL be accepted over UDP and TCP.
+    source: RFC 1035 &middot; RFC 7766
+  - id: CARRIER-02
+    text: |-
+      UPDATE messages SHALL be accepted over HTTPS and HTTP/3 wherever the serving Config has
+      opted the UPDATE opcode in.
+    source: §7.3
+  - id: CARRIER-03
+    text: |-
+      Opcode opt-in SHALL apply uniformly across UDP, TCP, DNS-over-TLS, HTTPS, and HTTP/3
+      listeners of one Config.
+    source: Engineering decision (core/dnsserver)
+  - id: CARRIER-04
+    text: |-
+      The HTTPS/HTTP3 carrier SHALL accept the body either as raw wire bytes (<code
+      class="inline">application/dns-message</code>, RFC 8484) or as a JSON envelope (<code
+      class="inline">{"wire":"&lt;base64&gt;"}</code>).
+    source: RFC 8484 &middot; §7.3
+  - id: CARRIER-05
+    text: |-
+      The JSON envelope SHALL carry the message's exact wire-byte encoding, never a structural
+      (RFC 8427-style) field representation, so SIG(0) wire-exactness is preserved.
+    source: RFC 8427 (rejected approach) &middot; RFC 2931
+  - id: CARRIER-06
+    text: |-
+      The client SHALL support sending a push to a <code class="inline">host:port</code>
+      target (UDP or TCP -- see CLIENT-06 for the transport default) or to an
+      <code class="inline">http(s)://</code> target in either wire form.
+    source: RFC 1035 &middot; §7.3
+- id: sec
+  code: SEC
+  title: Abuse &amp; flood hardening
+  requirements:
+  - id: SEC-01
+    text: |-
+      A first-contact or rollover attempt (the only operations triggering an outbound
+      chain-of-trust network walk) SHALL be accepted only over a connection-oriented transport
+      (TCP, HTTPS, HTTP/3); an attempt over plain UDP SHALL be refused (status <code
+      class="inline">ERR_TRANSPORT_NOT_ALLOWED</code>).
+    source: Engineering decision (spoofing hardening)
+  - id: SEC-02
+    text: |-
+      A global, per-source-address rate limit on UPDATE attempts SHALL be enforced independent
+      of the target zone, checked before SIG(0) verification; an excess SHALL be refused
+      (status <code class="inline">ERR_RATE_LIMITED</code>).
+    source: §12
+  - id: SEC-03
+    text: |-
+      A per-zone daily quota on full-zone and key-management pushes SHALL be enforced
+      independently over a rolling 24-hour window; an excess SHALL be refused (status <code
+      class="inline">ERR_QUOTA_EXCEEDED</code>).
+    source: §12
+  - id: SEC-04
+    text: |-
+      Rate-limiter internal state SHALL be periodically garbage-collected so memory is bounded
+      by recently active keys, not by every distinct key ever observed.
+    source: Engineering decision
+  - id: SEC-05
+    text: |-
+      Rejections caused by SEC-01 or SEC-02 SHALL NOT be persisted to the audit trail.
+    source: Engineering decision
+- id: ops
+  code: OPS
+  title: Audit trail &amp; status codes
+  requirements:
+  - id: OPS-01
+    text: |-
+      The server SHALL generate a fresh transaction identifier (UUIDv4) for every UPDATE
+      transaction.
+    source: RFC 4122 &middot; §12
+  - id: OPS-02
+    text: |-
+      With persistence configured, one audit-trail row per transaction (except as excluded by
+      SEC-05) SHALL be recorded — transaction ID, zone, remote address, RCODE, status,
+      timestamp, and (when SIG(0) verification succeeded) the authenticating key's tag and
+      role — regardless of accept/reject outcome. A transaction whose authentication never
+      succeeded SHALL carry no key attribution, since there is no proof of who sent it to
+      attribute.
+    source: §12
+  - id: OPS-03
+    text: |-
+      The N most recent audit-trail entries for a zone SHALL be retrievable via a query
+      interface.
+    source: §12
+  - id: OPS-04
+    text: |-
+      All nine §12 status codes SHALL be carried as a diagnostic TXT record in the response's
+      Additional section.
+    source: §12
+  - id: OPS-05
+    text: |-
+      Every configurable quota/limit SHALL default to a documented value when unset (5
+      full/day, 50 key-management/day, 30 updates/minute per address).
+    source: §12
+- id: watch
+  code: WATCH
+  title: Delegation-change monitoring
+  requirements:
+  - id: WATCH-01
+    text: |-
+      A standalone daemon, architecturally separate from the CoreDNS process, SHALL
+      periodically (default 5 minutes, configurable) re-run the chain-of-trust check for every
+      onboarded zone's pinned key.
+    source: §11
+  - id: WATCH-02
+    text: |-
+      The daemon SHALL read zone/key/contact state directly from the shared persistent store,
+      with no other coupling to the server process.
+    source: §11
+  - id: WATCH-03
+    text: |-
+      An alert SHALL fire only on a state transition (OK→failing or failing→OK) relative to
+      the previous check, never on a zone's first-ever observation.
+    source: §11
+  - id: WATCH-04
+    text: |-
+      Alerts SHALL dispatch via SMTP for <code class="inline">mailto:</code> contacts and via
+      an HTTP POST (JSON) for <code class="inline">http(s)://</code> contacts.
+    source: §11
+  - id: WATCH-05
+    text: |-
+      A single-pass mode SHALL be available for connectivity/configuration verification
+      without entering the long-running loop.
+    source: Operational
+- id: persist
+  code: PERSIST
+  title: Persistence
+  requirements:
+  - id: PERSIST-01
+    text: |-
+      An optional SQLite-backed store (pure Go, no cgo) MAY hold onboarded zones, pinned keys,
+      zone content, registered contacts, and the audit trail.
+    source: Engineering decision
+  - id: PERSIST-02
+    text: |-
+      Every accepted UPDATE SHALL commit to the persistent store transactionally, before
+      in-memory state is mutated.
+    source: Engineering decision
+  - id: PERSIST-03
+    text: |-
+      On startup with persistence configured, all persisted state SHALL be replayed into
+      memory before any request is served.
+    source: Engineering decision
+  - id: PERSIST-04
+    text: |-
+      Omitting persistence configuration SHALL yield purely in-memory operation, behaviourally
+      equivalent to no persistence layer existing.
+    source: Engineering decision
+  - id: PERSIST-05
+    text: |-
+      A database schema written before a later capability requires a shape change (e.g. the
+      optional-ZSK key-storage model) SHALL be transparently migrated in place the next time
+      it is opened, with no operator action and no forced re-onboarding.
+    source: Engineering decision
+- id: client
+  code: CLIENT
+  title: sazuctl
+  requirements:
+  - id: CLIENT-01
+    text: |-
+      The client SHALL provide subcommands to generate a key, print a registrar-ready DS
+      record, publish a zone's complete content, manage KSK/ZSK key state (first-contact
+      trust establishment, ZSK registration/retirement, key rotation), and register/clear a
+      zone's contact address.
+    source: §10 (client tooling)
+  - id: CLIENT-02
+    text: |-
+      The client SHALL self-verify a signed push's SIG(0) before transmitting it.
+    source: Engineering decision
+  - id: CLIENT-03
+    text: |-
+      The client SHALL print actionable, registrar-aware guidance when a push is denied with
+      <code class="inline">ERR_NO_DS_PUBLISHED</code> or <code
+      class="inline">ERR_UNKNOWN_SIGNER</code>.
+    source: §12 (operator experience)
+  - id: CLIENT-04
+    text: |-
+      The client SHALL provide a decision-support command for key rotation that, given no
+      explicit role, explains the KSK-vs-ZSK tradeoff and takes no action until the operator
+      chooses explicitly; given a role, it SHALL perform that rotation (registering a new ZSK
+      and retiring the old one, or an ordinary KSK rollover).
+    source: Engineering decision (operator experience)
+  - id: CLIENT-05
+    text: |-
+      The client SHALL choose a connection-oriented transport (TCP) for any first-contact- or
+      KSK-rollover-shaped push regardless of message size, since a compliant server refuses
+      either over plain UDP (SEC-01) irrespective of how small the message is.
+    source: SEC-01 (engineering decision)
+  - id: CLIENT-06
+    text: |-
+      The client SHALL default to TCP, unconditionally, for every push to a <code
+      class="inline">host:port</code> target — not chosen by message size — since TCP always
+      works regardless of size or path MTU; a push kind the server can actually accept over
+      UDP MAY opt back in via an explicit flag, which SHALL still fall back to TCP with a
+      clear warning if the resulting message would not fit in one safe UDP datagram.
+    source: Engineering decision (reconsidered default)
+  - id: CLIENT-07
+    text: |-
+      The client SHALL provide a way to create a starter zone definition for a new domain,
+      including an optional, friendlier format for the two SOA fields most commonly written
+      incorrectly by hand (the serial number and the responsible-party mailbox encoding),
+      convertible to and usable interchangeably with an ordinary BIND-format zone file.
+    source: Engineering decision (operator experience)
+non_functional_requirements:
+- id: NFR-01
+  text: |-
+    The server SHALL require no cgo dependency (pure-Go SQLite driver), preserving CoreDNS's
+    static-build/cross-compilation properties.
+  category: Portability
+- id: NFR-02
+  text: |-
+    UPDATE handling for a given zone SHALL be serialized against itself; UPDATEs for
+    different zones SHALL be able to proceed concurrently, via a fixed-size set of lock
+    stripes rather than one lock per zone name, so memory stays bounded regardless of how
+    many distinct zone names are presented.
+  category: Concurrency
+- id: NFR-03
+  text: |-
+    A persistence failure SHALL never leave in-memory and on-disk state disagreeing about
+    whether an update applied.
+  category: Consistency
+- id: NFR-04
+  text: |-
+    Adding HTTPS/HTTP3 opcode support SHALL NOT change behaviour for a Config that never
+    opts an extra opcode in.
+  category: Backward compatibility
+- id: NFR-05
+  text: |-
+    All defaults SHALL be safe-by-default; insecure modes SHALL require explicit,
+    clearly-named opt-in (<code class="inline">insecure_skip_chain_validation</code>).
+  category: Security posture

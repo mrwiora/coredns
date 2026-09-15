@@ -203,9 +203,9 @@ func (c *Config) AddPlugin(m plugin.Plugin) {
 }
 
 // AllowOpcode permits a non-default DNS opcode to reach this config's plugin chain
-// on UDP, TCP, and DNS-over-TLS listeners. Plugins should call it during setup.
-// The listener still requires exactly one question, and configs that do not opt in
-// continue to reject the opcode.
+// on UDP, TCP, DNS-over-TLS, DNS-over-HTTPS, and DNS-over-HTTP/3 listeners.
+// Plugins should call it during setup. The listener still requires exactly
+// one question, and configs that do not opt in continue to reject the opcode.
 func (c *Config) AllowOpcode(opcode int) {
 	if c.allowedOpcodes == nil {
 		c.allowedOpcodes = make(map[int]struct{})
@@ -314,6 +314,10 @@ func propagateConfigParams(configs []*Config) {
 		// Propagate UDPDecorateWriterFunc so a decorator configured once in a
 		// server block applies to the block's UDP listener(s).
 		c.UDPDecorateWriterFunc = c.firstConfigInBlock.UDPDecorateWriterFunc
+
+		// Propagate UDPDecorateReaderFunc/TCPDecorateReaderFunc the same way.
+		c.UDPDecorateReaderFunc = c.firstConfigInBlock.UDPDecorateReaderFunc
+		c.TCPDecorateReaderFunc = c.firstConfigInBlock.TCPDecorateReaderFunc
 
 		// Propagate MaxHTTPSStreams so a `https { max_streams N }` set once in a
 		// server block applies to the block's HTTPS key regardless of key order.

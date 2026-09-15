@@ -1,0 +1,1252 @@
+<title>SAZU Verification Dossier</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Serif:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  /* ---------- tokens ---------- */
+  :root {
+    --bg: #f5f6f4;
+    --surface: #ffffff;
+    --surface-2: #edf1ef;
+    --ink: #16211f;
+    --ink-muted: #52625e;
+    --ink-faint: #7c8b87;
+    --border: #dbe1de;
+    --border-strong: #c2ccc8;
+    --accent: #1f6f66;
+    --accent-ink: #123f3a;
+    --accent-tint: #e4f0ee;
+    --ok: #2f7a4f;
+    --ok-tint: #e4f3e9;
+    --warn: #a6741f;
+    --warn-tint: #f7ecd8;
+    --fail: #b23b3b;
+    --fail-tint: #fbe9e9;
+    --code-bg: #101917;
+    --code-ink: #d8ece7;
+    --shadow: 0 1px 2px rgba(20,32,29,.06), 0 6px 20px -8px rgba(20,32,29,.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #10161a;
+      --surface: #161f23;
+      --surface-2: #1c272b;
+      --ink: #e7ece9;
+      --ink-muted: #9fb0ab;
+      --ink-faint: #728480;
+      --border: #29363a;
+      --border-strong: #38484c;
+      --accent: #59c2b3;
+      --accent-ink: #bfe8e1;
+      --accent-tint: #17302d;
+      --ok: #5fbf85;
+      --ok-tint: #16281e;
+      --warn: #d9a53d;
+      --warn-tint: #2c2412;
+      --fail: #e2685f;
+      --fail-tint: #2c1817;
+      --code-bg: #0b1210;
+      --code-ink: #cfe8e1;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px -10px rgba(0,0,0,.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #10161a;
+    --surface: #161f23;
+    --surface-2: #1c272b;
+    --ink: #e7ece9;
+    --ink-muted: #9fb0ab;
+    --ink-faint: #728480;
+    --border: #29363a;
+    --border-strong: #38484c;
+    --accent: #59c2b3;
+    --accent-ink: #bfe8e1;
+    --accent-tint: #17302d;
+    --ok: #5fbf85;
+    --ok-tint: #16281e;
+    --warn: #d9a53d;
+    --warn-tint: #2c2412;
+    --fail: #e2685f;
+    --fail-tint: #2c1817;
+    --code-bg: #0b1210;
+    --code-ink: #cfe8e1;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px -10px rgba(0,0,0,.5);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+    font-size: 15.5px;
+    line-height: 1.6;
+    padding-inline: 20px;
+  }
+  h1, h2, h3 { font-family: "IBM Plex Serif", Georgia, serif; text-wrap: balance; color: var(--ink); }
+  code, .mono, .id, th.num, td.num { font-family: "IBM Plex Mono", ui-monospace, "Courier New", monospace; }
+  .num, td.num, th.num { font-variant-numeric: tabular-nums; }
+  a { color: var(--accent-ink); }
+  a:hover { text-decoration-thickness: 2px; }
+
+  /* ---------- shell ---------- */
+  .shell { max-width: 1180px; margin-inline: auto; }
+
+  .masthead {
+    max-width: 780px;
+    margin: 40px auto 0;
+    padding: 0 0 28px;
+  }
+  .masthead .kicker {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--accent-ink); background: var(--accent-tint);
+    border: 1px solid var(--border-strong);
+    padding: 4px 10px; border-radius: 999px;
+  }
+  .masthead h1 { font-size: clamp(28px, 4vw, 38px); margin: 16px 0 8px; letter-spacing: -.01em; }
+  .masthead p.lede { color: var(--ink-muted); font-size: 17px; max-width: 62ch; }
+
+  .coversheet {
+    max-width: 780px; margin: 22px auto 0;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .coversheet table { width: 100%; border-collapse: collapse; }
+  .coversheet td { padding: 10px 16px; font-size: 13.5px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  .coversheet tr:last-child td { border-bottom: none; }
+  .coversheet td.k { color: var(--ink-faint); width: 34%; font-family: "IBM Plex Mono", monospace; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; padding-top: 13px; }
+  .coversheet td.v { font-weight: 500; }
+  .coversheet td.v a { text-decoration: none; border-bottom: 1px dotted var(--border-strong); }
+
+  /* ---------- tab nav ---------- */
+  .doc-tabs {
+    position: sticky; top: 0; z-index: 20;
+    display: flex; gap: 2px; justify-content: center;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--border);
+    margin-top: 34px; padding: 10px 12px;
+    flex-wrap: wrap;
+  }
+  .doc-tabs button {
+    font: inherit; font-family: "IBM Plex Mono", monospace; font-size: 13px;
+    background: transparent; border: 1px solid transparent; color: var(--ink-muted);
+    padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .doc-tabs button .n { color: var(--ink-faint); }
+  .doc-tabs button:hover { background: var(--surface-2); color: var(--ink); }
+  .doc-tabs button[aria-selected="true"] {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  .doc-tabs button[aria-selected="true"] .n { color: rgba(255,255,255,.75); }
+
+  /* ---------- layout: rail + content ---------- */
+  .layout { display: grid; grid-template-columns: 220px minmax(0,1fr); gap: 40px; padding: 34px 0 90px; align-items: start; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .rail { display: none; } }
+
+  .rail { position: sticky; top: 66px; max-height: calc(100vh - 90px); overflow: auto; padding-right: 4px; }
+  .rail .railtitle { font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 10px; }
+  .rail nav a {
+    display: block; font-size: 13px; color: var(--ink-muted); text-decoration: none;
+    padding: 5px 0 5px 12px; border-left: 2px solid var(--border); line-height: 1.4;
+  }
+  .rail nav a:hover { color: var(--accent-ink); border-left-color: var(--accent); }
+  .rail nav a.l2 { padding-left: 24px; font-size: 12.3px; color: var(--ink-faint); }
+
+  .doc-panel { min-width: 0; }
+  .doc-panel > section { margin-bottom: 52px; scroll-margin-top: 76px; }
+  .doc-panel > section > h2 { font-size: 22px; display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  .doc-panel > section > .sec-abstract { color: var(--ink-muted); margin: 0 0 18px; max-width: 68ch; }
+  .secno {
+    font-family: "IBM Plex Mono", monospace; font-size: 14px; color: var(--accent-ink);
+    background: var(--accent-tint); border-radius: 6px; padding: 1px 8px;
+  }
+  h3.subhead { font-size: 16px; margin: 26px 0 8px; }
+  h3.subhead .secno { font-size: 12px; }
+  p { max-width: 70ch; }
+  .doc-panel ul, .doc-panel ol { max-width: 68ch; padding-left: 22px; }
+  .doc-panel li { margin: 4px 0; }
+
+  /* ---------- tables ---------- */
+  table.spec { width: 100%; border-collapse: collapse; margin: 14px 0 8px; font-size: 13.6px; }
+  table.spec caption { text-align: left; font-size: 12px; color: var(--ink-faint); margin-bottom: 6px; }
+  table.spec th {
+    text-align: left; font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--ink-faint); padding: 8px 10px; border-bottom: 1px solid var(--border-strong);
+    position: sticky; top: 0; background: var(--bg);
+  }
+  table.spec td { padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.spec tr:hover td { background: var(--surface-2); }
+  table.spec .reqid, table.spec .tcid { white-space: nowrap; font-weight: 600; color: var(--accent-ink); }
+  table.spec td.src { color: var(--ink-muted); white-space: nowrap; font-size: 12.6px; }
+  .wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 2px 0; }
+  .wrap table.spec { margin: 0; }
+  .wrap table.spec th:first-child, .wrap table.spec td:first-child { padding-left: 16px; }
+  .wrap table.spec th:last-child, .wrap table.spec td:last-child { padding-right: 16px; }
+
+  /* ---------- badges / pills ---------- */
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; letter-spacing: .03em;
+    padding: 2px 9px; border-radius: 999px; white-space: nowrap; font-weight: 500;
+  }
+  .pill.ok { color: var(--ok); background: var(--ok-tint); }
+  .pill.warn { color: var(--warn); background: var(--warn-tint); }
+  .pill.fail { color: var(--fail); background: var(--fail-tint); }
+  .pill.neutral { color: var(--ink-muted); background: var(--surface-2); border: 1px solid var(--border); }
+  .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  .rfc { font-family: "IBM Plex Mono", monospace; font-size: 12.6px; color: var(--ink-muted); }
+
+  /* ---------- stat tiles ---------- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 18px 0 26px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .stat .v { font-family: "IBM Plex Mono", monospace; font-size: 26px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .stat .v.ok { color: var(--ok); }
+  .stat .l { font-size: 11.5px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }
+
+  /* ---------- misc content blocks ---------- */
+  .callout {
+    border-left: 3px solid var(--accent); background: var(--accent-tint);
+    border-radius: 0 10px 10px 0; padding: 12px 16px; margin: 16px 0; max-width: 68ch; font-size: 14px;
+  }
+  .callout.warn { border-color: var(--warn); background: var(--warn-tint); }
+  blockquote {
+    margin: 14px 0; padding: 2px 0 2px 16px; border-left: 2px solid var(--border-strong);
+    color: var(--ink-muted); max-width: 66ch; font-style: italic;
+  }
+  pre {
+    background: var(--code-bg); color: var(--code-ink); border-radius: 10px;
+    padding: 14px 16px; overflow-x: auto; font-size: 12.6px; line-height: 1.55;
+  }
+  code.inline { background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 12.8px; }
+  hr.rule { border: none; border-top: 1px solid var(--border); margin: 44px 0; }
+
+  .crosslinks { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+  .crosslinks button {
+    font: inherit; font-family: "IBM Plex Mono", monospace; font-size: 12px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border-strong); color: var(--accent-ink);
+    padding: 6px 12px; border-radius: 8px;
+  }
+  .crosslinks button:hover { background: var(--accent-tint); }
+
+  footer.docfoot {
+    max-width: 1180px; margin: 0 auto; padding: 30px 0 60px; text-align: center;
+    color: var(--ink-faint); font-size: 12.5px; border-top: 1px solid var(--border);
+  }
+
+  [hidden] { display: none !important; }
+</style>
+
+<div class="masthead">
+  <span class="kicker">🔏 SAZU &middot; feat/sazu</span>
+  <h1>SAZU Verification Dossier</h1>
+  <p class="lede">Requirements, test specification, and test execution report for Self-Authenticated Zone Update &mdash; the split-signing DNSSEC push mechanism implemented as a CoreDNS plugin, derived directly from the codebase and its governing RFCs.</p>
+</div>
+
+<div class="coversheet">
+  <table>
+    <tr><td class="k">Document set</td><td class="v">SAZU-REQ-1.2 &middot; SAZU-TS-1.2 &middot; SAZU-TR-1.2</td></tr>
+    <tr><td class="k">Subject system</td><td class="v">SAZU on CoreDNS &mdash; <code class="inline">plugin/sazu</code>, <code class="inline">plugin/sazu/cmd/*</code>, <code class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code></td></tr>
+    <tr><td class="k">Branch / commit</td><td class="v">feat/sazu @ <code class="inline">5101e77e8</code></td></tr>
+    <tr><td class="k">Status</td><td class="v"><span class="pill ok">all requirements implemented</span> &nbsp;<span class="pill ok">2184/2184 tests passing</span></td></tr>
+    <tr><td class="k">Derivation</td><td class="v">Requirements traced to the SAZU protocol design and its governing RFCs; test cases traced to the actual Go test suite; results from a full <code class="inline">go test ./...</code> run.</td></tr>
+  </table>
+</div>
+
+<nav class="doc-tabs" role="tablist" aria-label="Document set">
+  <button role="tab" data-doc="req" aria-selected="true"><span class="n">1</span> Requirements Specification</button>
+  <button role="tab" data-doc="test" aria-selected="false"><span class="n">2</span> Test Specification</button>
+  <button role="tab" data-doc="report" aria-selected="false"><span class="n">3</span> Test Report</button>
+</nav>
+
+<div class="shell layout">
+  <aside class="rail" id="rail-req">
+    <div class="railtitle">In this document</div>
+    <nav>
+      <a href="#req-1">1 Introduction</a>
+      <a href="#req-2">2 System overview</a>
+      <a href="#req-3">3 Requirements</a>      <a class="l2" href="#req-auth">3.1 AUTH &mdash; SIG(0) transaction authentication</a>      <a class="l2" href="#req-chain">3.2 CHAIN &mdash; First-contact chain of trust</a>      <a class="l2" href="#req-key">3.3 KEY &mdash; Key pinning &amp; rollover</a>      <a class="l2" href="#req-algo">3.4 ALGO &mdash; Minimum algorithm floor</a>      <a class="l2" href="#req-content">3.5 CONTENT &mdash; RFC 2136 mechanics &amp; DNSSEC content</a>      <a class="l2" href="#req-contact">3.6 CONTACT &mdash; Registration record</a>      <a class="l2" href="#req-custody">3.7 CUSTODY &mdash; Key custody hardening</a>      <a class="l2" href="#req-carrier">3.8 CARRIER &mdash; Wire carriers</a>      <a class="l2" href="#req-sec">3.9 SEC &mdash; Abuse &amp; flood hardening</a>      <a class="l2" href="#req-ops">3.10 OPS &mdash; Audit trail &amp; status codes</a>      <a class="l2" href="#req-watch">3.11 WATCH &mdash; Delegation-change monitoring</a>      <a class="l2" href="#req-persist">3.12 PERSIST &mdash; Persistence</a>      <a class="l2" href="#req-client">3.13 CLIENT &mdash; sazuctl</a>      <a href="#req-4">4 Non-functional requirements</a>
+      <a href="#req-5">5 Traceability summary</a>
+    </nav>
+  </aside>
+  <main class="doc-panel" id="doc-req">
+
+<section id="req-1">
+  <h2><span class="secno">1</span> Introduction</h2>
+  <h3 class="subhead"><span class="secno">1.1</span> Purpose</h3>
+  <p>This document specifies the functional and non-functional requirements for
+<strong>SAZU</strong> (Self-Authenticated Zone Update) as built: the <code
+class="inline">plugin/sazu</code> CoreDNS plugin, its <code
+class="inline">sazuctl</code> client and <code class="inline">sazu-watchd</code>
+monitoring daemon, and the small set of CoreDNS-core (<code
+class="inline">core/dnsserver</code>, <code class="inline">plugin/pkg/doh</code>, <code
+class="inline">plugin/pkg/dnsutil</code>) extensions built to carry it over HTTPS. Every
+requirement below is drawn from what the code and its own governing comments actually
+assert, cross-checked against the RFCs it cites — this is a specification recovered from
+an implementation, not the other way around.</p>
+
+  <h3 class="subhead"><span class="secno">1.2</span> Scope</h3>
+  <p>In scope: authentication and authorization of zone-content pushes; DNSSEC content
+signing and serving; key lifecycle (pinning, rollover, custody); the wire carriers a
+push may arrive over; operational controls (rate limiting, audit trail); and the
+separate delegation-change watch daemon. Out of scope: general DNS query
+performance/caching, and CoreDNS's own unrelated plugin ecosystem.</p>
+
+  <h3 class="subhead"><span class="secno">1.3</span> Conventions</h3>
+  <p>Requirement statements use <strong>SHALL</strong> / <strong>SHALL NOT</strong> for
+mandatory behaviour and <strong>MAY</strong> for optional behaviour, in the sense of RFC
+2119. Each requirement carries a stable identifier (<code
+class="inline">AREA-NN</code>), its source (a design-doc section, an RFC, or a
+documented engineering decision), and the test case(s) in the companion Test
+Specification that verify it.</p>
+
+  <h3 class="subhead"><span class="secno">1.4</span> Normative references</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>RFC</th><th>Title / role</th></tr>    <tr><td class="rfc">RFC 1035</td><td>Domain names — implementation and specification. UDP transport ceiling (512&nbsp;B),
+wire format.</td></tr>    <tr><td class="rfc">RFC 2136</td><td>Dynamic Updates in the Domain Name System (DNS UPDATE). The push mechanism itself.</td></tr>    <tr><td class="rfc">RFC 2308</td><td>Negative Caching of DNS Queries. SOA-in-authority requirement for negative answers.</td></tr>    <tr><td class="rfc">RFC 2931</td><td>DNS Request and Transaction Signatures (SIG(0)). Transaction authentication.</td></tr>    <tr><td class="rfc">RFC 4034 / 4035</td><td>DNSSEC resource records / protocol modifications. RRSIG, NSEC, chain-of-trust
+validation.</td></tr>    <tr><td class="rfc">RFC 4122</td><td>UUID. Audit-trail transaction identifiers (v4).</td></tr>    <tr><td class="rfc">RFC 5155</td><td>DNSSEC Hashed Authenticated Denial of Existence (NSEC3). Implemented as an opt-in
+alternative to NSEC (CONTENT-13).</td></tr>    <tr><td class="rfc">RFC 9276</td><td>Guidance for NSEC3 Parameter Settings. NSEC3Options' zero-iterations/no-salt defaults.</td></tr>    <tr><td class="rfc">RFC 6068</td><td>The 'mailto' URI Scheme. Contact-record email addressing.</td></tr>    <tr><td class="rfc">RFC 6781</td><td>DNSSEC Operational Practices. Key/algorithm rollover conventions (co-existing DS
+records).</td></tr>    <tr><td class="rfc">RFC 7766</td><td>DNS Transport over TCP — Implementation Requirements. TCP as mandatory fallback.</td></tr>    <tr><td class="rfc">RFC 8427</td><td>Representing DNS Messages in JSON. Cited as the structural-JSON approach deliberately
+<em>not</em> taken for the HTTPS carrier.</td></tr>    <tr><td class="rfc">RFC 8484</td><td>DNS Queries over HTTPS (DoH). Base convention reused for the HTTPS carrier.</td></tr>    <tr><td class="rfc">RFC 8624</td><td>Algorithm Implementation Requirements for DNSSEC. Basis for the algorithm floor.</td></tr>  </table></div>
+</section>
+
+<section id="req-2">
+  <h2><span class="secno">2</span> System overview</h2>  <p>SAZU is a split-signing DNSSEC scheme: a customer's own signer holds the zone's private
+key and never transmits it; the server accepts only already-signed zone content,
+delivered as an RFC 2136 dynamic UPDATE authenticated end-to-end by a SIG(0) transaction
+signature. A single Ed25519 key, flagged as a KSK, serves both roles — SIG(0)
+transaction signer and DNSSEC signer — so there is no separate account, API key, or
+out-of-band handshake. The first UPDATE for a zone ("first contact") is validated by
+walking the real DNSSEC chain of trust from the root down to the zone's delegating
+parent; once a key is pinned this way, every later UPDATE is checked by signature alone,
+unless it is a key rollover, which re-runs the same chain check for a new candidate key.</p>  <p>The system comprises four deployable pieces: the <code class="inline">sazu</code>
+CoreDNS plugin (server), <code class="inline">sazuctl</code> (customer-side push
+client), <code class="inline">sazu-watchd</code> (standalone delegation-change monitor),
+and a small set of upstream CoreDNS-core extensions that let the push arrive over
+HTTPS/HTTP3 as well as UDP/TCP.</p></section>
+
+<section id="req-3">
+  <h2><span class="secno">3</span> Requirements</h2>
+  <p class="sec-abstract">Grouped by functional area. Each row is one discrete, independently verifiable requirement.</p>
+
+  <h3 class="subhead" id="req-auth"><span class="secno">3.1</span> AUTH &mdash; SIG(0) transaction authentication</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">AUTH-01</td><td>The server SHALL authenticate every RFC 2136 UPDATE using SIG(0) computed over the exact
+wire bytes as transmitted, never a re-encoding of the parsed message.</td><td class="src">RFC 2931 &middot; §9.1/§10.1</td></tr>    <tr><td class="reqid">AUTH-02</td><td>The server SHALL reject an UPDATE with a missing, malformed, expired, not-yet-valid, or
+cryptographically invalid SIG(0) with RCODE NOTAUTH.</td><td class="src">RFC 2931</td></tr>    <tr><td class="reqid">AUTH-03</td><td>The server SHALL obtain the literal request wire bytes independent of transport: UDP/TCP
+via socket-read capture; HTTPS/HTTP3 via request-context propagation.</td><td class="src">§7.2/§7.3</td></tr>    <tr><td class="reqid">AUTH-04</td><td>If no wire bytes can be recovered for a request, the server SHALL fail closed with RCODE
+SERVFAIL rather than authenticate against a re-encoding.</td><td class="src">Engineering decision</td></tr>  </table></div>
+  <h3 class="subhead" id="req-chain"><span class="secno">3.2</span> CHAIN &mdash; First-contact chain of trust</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CHAIN-01</td><td>On first contact (no key yet pinned for the zone), the UPDATE SHALL carry exactly one
+candidate DNSKEY at the zone apex.</td><td class="src">§10.2</td></tr>    <tr><td class="reqid">CHAIN-02</td><td>The candidate key's SIG(0) SHALL verify before the key may be pinned.</td><td class="src">§10.2</td></tr>    <tr><td class="reqid">CHAIN-03</td><td>The server SHALL walk the DNSSEC chain of trust from a hardcoded root anchor to the
+zone's delegating parent, verifying every DNSKEY/DS RRset and RRSIG traversed, and
+confirm at least one parent-published DS matches the candidate key.</td><td class="src">RFC 4034/4035 &middot; §10.2</td></tr>    <tr><td class="reqid">CHAIN-04</td><td>First contact SHALL be refused (REFUSED, status <code
+class="inline">ERR_NO_DS_PUBLISHED</code>) if the parent publishes no DS for the zone at
+all.</td><td class="src">§12</td></tr>    <tr><td class="reqid">CHAIN-05</td><td>First contact SHALL be refused (REFUSED, status <code
+class="inline">ERR_UNKNOWN_SIGNER</code>) if a DS is published but none matches the
+candidate key.</td><td class="src">§12</td></tr>    <tr><td class="reqid">CHAIN-06</td><td>A first-contact UPDATE SHALL be accepted, and its candidate key pinned, whether or not
+it also establishes a real SOA at the apex: <code class="inline">sazuctl
+publish-trust</code> deliberately sends none, establishing the KSK/ZSK trust
+relationship as a step separate from any zone content, which a subsequent <code
+class="inline">publish-zone</code> push supplies.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CHAIN-07</td><td>The chain-of-trust check MAY be disabled per instance (<code
+class="inline">insecure_skip_chain_validation</code>) for non-production testing only.</td><td class="src">Operational</td></tr>  </table></div>
+  <h3 class="subhead" id="req-key"><span class="secno">3.3</span> KEY &mdash; Key pinning &amp; rollover</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">KEY-01</td><td>Once pinned, the server SHALL accept only UPDATEs whose SIG(0) verifies against the
+zone's KSK, against a registered ZSK authorized to authenticate transactions, or against
+a new candidate undergoing a valid KSK rollover (KEY-03).</td><td class="src">§10.2</td></tr>    <tr><td class="reqid">KEY-02</td><td>A push signed by any other key SHALL be rejected with RCODE NOTAUTH.</td><td class="src">§10.2</td></tr>    <tr><td class="reqid">KEY-03</td><td>If none of a zone's currently authorized keys verify a transaction, but the UPDATE also
+carries a different, SEP-flagged (KSK) candidate DNSKEY whose own SIG(0) verifies, the
+server SHALL attempt a KSK rollover by subjecting that candidate to the identical
+chain-of-trust check first contact requires (CHAIN-03..05).</td><td class="src">§10.4</td></tr>    <tr><td class="reqid">KEY-04</td><td>A KSK rollover UPDATE SHALL NOT be required to carry an apex SOA.</td><td class="src">§10.4</td></tr>    <tr><td class="reqid">KEY-05</td><td>On successful KSK rollover, the server SHALL replace the pinned KSK; the superseded KSK
+SHALL cease to authenticate further UPDATEs; any already-registered ZSK SHALL remain
+valid, unaffected by the rollover.</td><td class="src">§10.4</td></tr>    <tr><td class="reqid">KEY-06</td><td>Every onboarded zone SHALL have exactly one KSK, established at first contact and
+anchored to a parent DS record (CHAIN-03). <code class="inline">sazuctl
+publish-trust</code> SHALL always generate and present a ZSK together with the KSK at
+first contact, so a zone MAY additionally register further ZSKs on top of that first
+one. The single-key model (one Ed25519 key doing both SIG(0) authentication and DNSSEC
+signing) remains a valid state at the <code class="inline">KeyRegistry</code> level for
+a zone with no ZSK, but is no longer what any onboarding path <code
+class="inline">sazuctl</code> offers produces by default.</td><td class="src">§9.1 (design decision, extended)</td></tr>    <tr><td class="reqid">KEY-07</td><td>A first-contact candidate key SHALL carry the SEP (KSK) flag; a candidate presented
+without it SHALL be refused (REFUSED, status <code
+class="inline">ERR_FIRST_CONTACT_REQUIRES_KSK</code>) without pinning anything.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">KEY-08</td><td>A ZSK SHALL be registered via an ordinary, already-authenticated push that adds a
+non-SEP-flagged DNSKEY at the zone apex, checked against the same algorithm floor (ALGO)
+as any other candidate key, with no chain-of-trust network walk.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">KEY-09</td><td>A ZSK SHALL be retirable via an RFC 2136 §2.5.4 "delete one RR" DNSKEY op naming its key
+tag; an RFC 2136 §2.5.2 "delete RRset" op SHALL NOT be treated as ZSK retirement (it
+would remove the KSK too).</td><td class="src">RFC 2136 §2.5.2/§2.5.4 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-10</td><td>Content signed by any key currently valid for the zone — the KSK or any registered ZSK —
+SHALL verify under §4's mandatory content-signature check.</td><td class="src">CONTENT-04/05 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-11</td><td>A ZSK MAY be granted the ability to authenticate transactions on its own, independent of
+the KSK; every ZSK registered via an ordinary push SHALL default to this, since the
+DNSKEY wire format (RFC 4034 §2.1.1) has no reserved bit to request otherwise.</td><td class="src">RFC 4034 §2.1.1 &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-12</td><td>Any client-side change to a zone's served DNSKEY RRset membership (a ZSK registration or
+retirement, or a KSK rollover) SHALL leave that RRset covered by a single RRSIG that
+validates against its complete, current membership — never one computed over only the
+record being added or removed — and SHALL explicitly remove any DNSKEY record no longer
+part of that membership (an RFC 2136 §2.5.4 delete), rather than leaving it served
+alongside a signature that no longer covers it.</td><td class="src">RFC 4034 §3 (an RRSIG covers its whole RRset) &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-13</td><td>A zone SHALL be fully removable — its KSK, every registered ZSK, all content and its
+NSEC/NSEC3 chain, and its §10.6 contact registration — via a dedicated decommission
+directive, authenticated by the zone's own currently-pinned KSK specifically (refused,
+status <code class="inline">ERR_DECOMMISSION_REQUIRES_KSK</code>, if authenticated by
+anything else, including an already-registered ZSK). The directive SHALL NOT be mixed
+with any other op in the same transaction. A decommissioned zone's audit-trail history
+SHALL survive the removal.</td><td class="src">Engineering decision</td></tr>  </table></div>
+  <h3 class="subhead" id="req-algo"><span class="secno">3.4</span> ALGO &mdash; Minimum algorithm floor</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">ALGO-01</td><td>A first-contact or rollover candidate key whose algorithm RFC&nbsp;8624&nbsp;§3.1 rates
+MUST&nbsp;NOT or NOT&nbsp;RECOMMENDED for zone signing SHALL be refused (REFUSED, status
+<code class="inline">ERR_WEAK_ALGORITHM</code>).</td><td class="src">RFC 8624 §3.1 &middot; §10.7</td></tr>    <tr><td class="reqid">ALGO-02</td><td>The accepted set SHALL be an explicit allow-list — RSASHA256, ECDSAP256SHA256,
+ECDSAP384SHA384, ED25519, ED448 — with any unrecognised algorithm rejected by default.</td><td class="src">RFC 8624 §3.1</td></tr>    <tr><td class="reqid">ALGO-03</td><td>The algorithm check SHALL run before any SIG(0) cryptographic verification or
+chain-of-trust network activity for the candidate.</td><td class="src">Engineering decision</td></tr>  </table></div>
+  <h3 class="subhead" id="req-content"><span class="secno">3.5</span> CONTENT &mdash; RFC 2136 mechanics &amp; DNSSEC content</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CONTENT-01</td><td>All five RFC 2136 §2.4 prerequisite forms SHALL be evaluated correctly, returning the
+§2.6 RCODE (NXRRSET/YXRRSET/NXDOMAIN/YXDOMAIN) on failure.</td><td class="src">RFC 2136 §2.4/§2.6</td></tr>    <tr><td class="reqid">CONTENT-02</td><td>All four RFC 2136 §2.5 update forms (add to RRset; delete RRset; delete all RRsets from
+name; delete one RR) SHALL be applied correctly.</td><td class="src">RFC 2136 §2.5</td></tr>    <tr><td class="reqid">CONTENT-03</td><td>A full-zone push MAY carry an RFC 2136 §2.4.2 SOA-serial staleness guard; a stale push
+SHALL be rejected (NXRRSET, status <code class="inline">ERR_STALE_SERIAL</code>).</td><td class="src">RFC 2136 §2.4.2 &middot; §12</td></tr>    <tr><td class="reqid">CONTENT-04</td><td>Content-signature verification SHALL be mandatory on every update, with no way to
+disable it: an Add-shaped RRset with no covering, cryptographically valid RRSIG SHALL
+be rejected (NOTAUTH, status <code class="inline">ERR_SIG_INVALID</code>).</td><td class="src">§4 &middot; §12</td></tr>    <tr><td class="reqid">CONTENT-05</td><td>A covering RRSIG that is cryptographically valid but outside its validity window SHALL
+be reported distinctly (status <code class="inline">ERR_EXPIRED_SIGNATURE</code>) rather
+than as CONTENT-04's generic case.</td><td class="src">§12</td></tr>    <tr><td class="reqid">CONTENT-06</td><td>Every server-produced RRSIG SHALL carry an <code class="inline">Hdr.Ttl</code> equal to
+its covered RRset's TTL.</td><td class="src">RFC 4034 §3</td></tr>    <tr><td class="reqid">CONTENT-07</td><td>A full-zone push SHALL compute an RFC 4034/4035 NSEC chain covering every owner name,
+served as an authenticated denial-of-existence proof (closest-encloser/wildcard-slot for
+NXDOMAIN; direct NSEC for NODATA) when the querier sets the DO bit.</td><td class="src">RFC 4034/4035 §3.1.3</td></tr>    <tr><td class="reqid">CONTENT-08</td><td>Every negative response (NXDOMAIN or NODATA) SHALL carry the zone's SOA in the Authority
+section.</td><td class="src">RFC 2308 §3</td></tr>    <tr><td class="reqid">CONTENT-09</td><td>A partial push carrying no valid patch of its own to an existing
+NSEC/NSEC3 chain SHALL invalidate that chain until the next full push recomputes it,
+rather than serve a proof that may now be incorrect.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTENT-10</td><td>Signing, serving, and content verification SHALL be correct for arbitrary RR types with
+no type-specific special-casing (verified at minimum for A, AAAA, CNAME, MX, TXT, NS,
+SRV, PTR, CAA, NAPTR, DNAME).</td><td class="src">RFC 4034 (generic RRSIG)</td></tr>    <tr><td class="reqid">CONTENT-11</td><td>RRSIGs SHALL be included alongside an answer only when the querying client sets the
+EDNS0 DO bit.</td><td class="src">RFC 4035</td></tr>    <tr><td class="reqid">CONTENT-12</td><td>The plugin's static Corefile zone scope (e.g. a wildcard root) SHALL be independent of
+which specific zones have actually been onboarded; a name within scope but never
+onboarded SHALL fall through to the next plugin rather than being swallowed.</td><td class="src">Engineering decision (multi-tenant onboarding)</td></tr>    <tr><td class="reqid">CONTENT-13</td><td>A full-zone push SHALL be able to compute an RFC 5155 NSEC3 chain, hiding the zone's
+owner-name set from enumeration, as an opt-in alternative to plain NSEC (CONTENT-07);
+the closest-encloser/next-closer-name/wildcard-cover proof for NXDOMAIN, and the
+matching record for NODATA, SHALL be served when the querier sets the DO bit, exactly
+as for plain NSEC.</td><td class="src">RFC 5155 &middot; §7.2</td></tr>    <tr><td class="reqid">CONTENT-15</td><td>A push that carries an apex DNSKEY but changes no other served content (a KSK/ZSK
+rollover, or a ZSK registration/retirement) SHALL NOT invalidate an existing
+NSEC/NSEC3 chain, nor any other served content -- only a push that actually changes
+zone content SHALL.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTENT-16</td><td>The client's zone definition (YAML or BIND-format zone file) SHALL be the single
+source of truth for a zone's content: a content push (<code class="inline">sazuctl
+publish-zone</code>) SHALL always carry the zone's complete, authoritative content,
+and SHALL replace it entirely -- a record present in an earlier push but absent from
+a later one SHALL no longer be served afterward. There SHALL be no
+partial/differential content-update mechanism. Key-management records (DNSKEY) SHALL
+never be affected by a content push.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTENT-17</td><td>A query or update whose name falls outside the plugin's static Corefile scope (CLIENT-04
+of an UPDATE's zone section) or names a zone never onboarded SHALL fall through to the
+next plugin in the chain (CONTENT-12) when one is configured; when none is (a deployment
+with no catch-all after this plugin), it SHALL be refused (REFUSED) rather than answered
+with SERVFAIL — the same convention an authoritative-zone plugin acting as the end of its
+own chain SHALL follow generally.</td><td class="src">Engineering decision (matches plugin/auto's own established convention)</td></tr>  </table></div>
+  <h3 class="subhead" id="req-contact"><span class="secno">3.6</span> CONTACT &mdash; Registration record</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CONTACT-01</td><td>A contact-address registration SHALL ride an ordinary authenticated UPDATE, addressed to
+a reserved owner name <code class="inline">_sazu-contact.&lt;zone&gt;</code> as a TXT
+RRset.</td><td class="src">§10.6</td></tr>    <tr><td class="reqid">CONTACT-02</td><td>A contact address SHALL use the <code class="inline">mailto:</code>, <code
+class="inline">http://</code>, or <code class="inline">https://</code> scheme only.</td><td class="src">RFC 6068 &middot; §10.6</td></tr>    <tr><td class="reqid">CONTACT-03</td><td>The contact directive SHALL be stripped before the remaining ops are evaluated as zone
+content, and SHALL NOT be servable as ordinary DNS data.</td><td class="src">§10.6</td></tr>    <tr><td class="reqid">CONTACT-04</td><td>An RRSIG accompanying a contact-record TXT SHALL be silently discarded, never persisted
+or served.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CONTACT-05</td><td>A contact registration SHALL persist across a restart when persistence is configured.</td><td class="src">§10.6</td></tr>  </table></div>
+  <h3 class="subhead" id="req-custody"><span class="secno">3.7</span> CUSTODY &mdash; Key custody hardening</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CUSTODY-01</td><td>The client SHALL write the private key in BIND9 private-key-file format by default,
+interoperable with standard DNSSEC tooling.</td><td class="src">§10.8</td></tr>    <tr><td class="reqid">CUSTODY-02</td><td>The client SHALL support encrypting the key file at rest with a passphrase-derived
+(scrypt) AES-256-GCM key, opt-in via a passphrase file argument.</td><td class="src">§10.8</td></tr>    <tr><td class="reqid">CUSTODY-03</td><td>An encrypted key file SHALL be distinguishable from a plain one without knowledge of the
+passphrase.</td><td class="src">§10.8</td></tr>    <tr><td class="reqid">CUSTODY-04</td><td>Decryption with an incorrect passphrase SHALL fail the same way a corrupted file would
+(AEAD authentication failure), never with a distinguishing error.</td><td class="src">§10.8</td></tr>  </table></div>
+  <h3 class="subhead" id="req-carrier"><span class="secno">3.8</span> CARRIER &mdash; Wire carriers</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CARRIER-01</td><td>UPDATE messages SHALL be accepted over UDP and TCP.</td><td class="src">RFC 1035 &middot; RFC 7766</td></tr>    <tr><td class="reqid">CARRIER-02</td><td>UPDATE messages SHALL be accepted over HTTPS and HTTP/3 wherever the serving Config has
+opted the UPDATE opcode in.</td><td class="src">§7.3</td></tr>    <tr><td class="reqid">CARRIER-03</td><td>Opcode opt-in SHALL apply uniformly across UDP, TCP, DNS-over-TLS, HTTPS, and HTTP/3
+listeners of one Config.</td><td class="src">Engineering decision (core/dnsserver)</td></tr>    <tr><td class="reqid">CARRIER-04</td><td>The HTTPS/HTTP3 carrier SHALL accept the body either as raw wire bytes (<code
+class="inline">application/dns-message</code>, RFC 8484) or as a JSON envelope (<code
+class="inline">{"wire":"&lt;base64&gt;"}</code>).</td><td class="src">RFC 8484 &middot; §7.3</td></tr>    <tr><td class="reqid">CARRIER-05</td><td>The JSON envelope SHALL carry the message's exact wire-byte encoding, never a structural
+(RFC 8427-style) field representation, so SIG(0) wire-exactness is preserved.</td><td class="src">RFC 8427 (rejected approach) &middot; RFC 2931</td></tr>    <tr><td class="reqid">CARRIER-06</td><td>The client SHALL support sending a push to a <code class="inline">host:port</code>
+target (UDP or TCP -- see CLIENT-06 for the transport default) or to an
+<code class="inline">http(s)://</code> target in either wire form.</td><td class="src">RFC 1035 &middot; §7.3</td></tr>  </table></div>
+  <h3 class="subhead" id="req-sec"><span class="secno">3.9</span> SEC &mdash; Abuse &amp; flood hardening</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">SEC-01</td><td>A first-contact or rollover attempt (the only operations triggering an outbound
+chain-of-trust network walk) SHALL be accepted only over a connection-oriented transport
+(TCP, HTTPS, HTTP/3); an attempt over plain UDP SHALL be refused (status <code
+class="inline">ERR_TRANSPORT_NOT_ALLOWED</code>).</td><td class="src">Engineering decision (spoofing hardening)</td></tr>    <tr><td class="reqid">SEC-02</td><td>A global, per-source-address rate limit on UPDATE attempts SHALL be enforced independent
+of the target zone, checked before SIG(0) verification; an excess SHALL be refused
+(status <code class="inline">ERR_RATE_LIMITED</code>).</td><td class="src">§12</td></tr>    <tr><td class="reqid">SEC-03</td><td>A per-zone daily quota on full-zone and key-management pushes SHALL be enforced
+independently over a rolling 24-hour window; an excess SHALL be refused (status <code
+class="inline">ERR_QUOTA_EXCEEDED</code>).</td><td class="src">§12</td></tr>    <tr><td class="reqid">SEC-04</td><td>Rate-limiter internal state SHALL be periodically garbage-collected so memory is bounded
+by recently active keys, not by every distinct key ever observed.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">SEC-05</td><td>Rejections caused by SEC-01 or SEC-02 SHALL NOT be persisted to the audit trail.</td><td class="src">Engineering decision</td></tr>  </table></div>
+  <h3 class="subhead" id="req-ops"><span class="secno">3.10</span> OPS &mdash; Audit trail &amp; status codes</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">OPS-01</td><td>The server SHALL generate a fresh transaction identifier (UUIDv4) for every UPDATE
+transaction.</td><td class="src">RFC 4122 &middot; §12</td></tr>    <tr><td class="reqid">OPS-02</td><td>With persistence configured, one audit-trail row per transaction (except as excluded by
+SEC-05) SHALL be recorded — transaction ID, zone, remote address, RCODE, status,
+timestamp, and (when SIG(0) verification succeeded) the authenticating key's tag and
+role — regardless of accept/reject outcome. A transaction whose authentication never
+succeeded SHALL carry no key attribution, since there is no proof of who sent it to
+attribute.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-03</td><td>The N most recent audit-trail entries for a zone SHALL be retrievable via a query
+interface.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-04</td><td>All nine §12 status codes SHALL be carried as a diagnostic TXT record in the response's
+Additional section.</td><td class="src">§12</td></tr>    <tr><td class="reqid">OPS-05</td><td>Every configurable quota/limit SHALL default to a documented value when unset (5
+full/day, 50 key-management/day, 30 updates/minute per address).</td><td class="src">§12</td></tr>  </table></div>
+  <h3 class="subhead" id="req-watch"><span class="secno">3.11</span> WATCH &mdash; Delegation-change monitoring</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">WATCH-01</td><td>A standalone daemon, architecturally separate from the CoreDNS process, SHALL
+periodically (default 5 minutes, configurable) re-run the chain-of-trust check for every
+onboarded zone's pinned key.</td><td class="src">§11</td></tr>    <tr><td class="reqid">WATCH-02</td><td>The daemon SHALL read zone/key/contact state directly from the shared persistent store,
+with no other coupling to the server process.</td><td class="src">§11</td></tr>    <tr><td class="reqid">WATCH-03</td><td>An alert SHALL fire only on a state transition (OK→failing or failing→OK) relative to
+the previous check, never on a zone's first-ever observation.</td><td class="src">§11</td></tr>    <tr><td class="reqid">WATCH-04</td><td>Alerts SHALL dispatch via SMTP for <code class="inline">mailto:</code> contacts and via
+an HTTP POST (JSON) for <code class="inline">http(s)://</code> contacts.</td><td class="src">§11</td></tr>    <tr><td class="reqid">WATCH-05</td><td>A single-pass mode SHALL be available for connectivity/configuration verification
+without entering the long-running loop.</td><td class="src">Operational</td></tr>  </table></div>
+  <h3 class="subhead" id="req-persist"><span class="secno">3.12</span> PERSIST &mdash; Persistence</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">PERSIST-01</td><td>An optional SQLite-backed store (pure Go, no cgo) MAY hold onboarded zones, pinned keys,
+zone content, registered contacts, and the audit trail.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">PERSIST-02</td><td>Every accepted UPDATE SHALL commit to the persistent store transactionally, before
+in-memory state is mutated.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">PERSIST-03</td><td>On startup with persistence configured, all persisted state SHALL be replayed into
+memory before any request is served.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">PERSIST-04</td><td>Omitting persistence configuration SHALL yield purely in-memory operation, behaviourally
+equivalent to no persistence layer existing.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">PERSIST-05</td><td>A database schema written before a later capability requires a shape change (e.g. the
+optional-ZSK key-storage model) SHALL be transparently migrated in place the next time
+it is opened, with no operator action and no forced re-onboarding.</td><td class="src">Engineering decision</td></tr>  </table></div>
+  <h3 class="subhead" id="req-client"><span class="secno">3.13</span> CLIENT &mdash; sazuctl</h3>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">CLIENT-01</td><td>The client SHALL provide subcommands to generate a key, print a registrar-ready DS
+record, publish a zone's complete content, manage KSK/ZSK key state (first-contact
+trust establishment, ZSK registration/retirement, key rotation), and register/clear a
+zone's contact address.</td><td class="src">§10 (client tooling)</td></tr>    <tr><td class="reqid">CLIENT-02</td><td>The client SHALL self-verify a signed push's SIG(0) before transmitting it.</td><td class="src">Engineering decision</td></tr>    <tr><td class="reqid">CLIENT-03</td><td>The client SHALL print actionable, registrar-aware guidance when a push is denied with
+<code class="inline">ERR_NO_DS_PUBLISHED</code> or <code
+class="inline">ERR_UNKNOWN_SIGNER</code>.</td><td class="src">§12 (operator experience)</td></tr>    <tr><td class="reqid">CLIENT-04</td><td>The client SHALL provide a decision-support command for key rotation that, given no
+explicit role, explains the KSK-vs-ZSK tradeoff and takes no action until the operator
+chooses explicitly; given a role, it SHALL perform that rotation (registering a new ZSK
+and retiring the old one, or an ordinary KSK rollover).</td><td class="src">Engineering decision (operator experience)</td></tr>    <tr><td class="reqid">CLIENT-05</td><td>The client SHALL choose a connection-oriented transport (TCP) for any first-contact- or
+KSK-rollover-shaped push regardless of message size, since a compliant server refuses
+either over plain UDP (SEC-01) irrespective of how small the message is.</td><td class="src">SEC-01 (engineering decision)</td></tr>    <tr><td class="reqid">CLIENT-06</td><td>The client SHALL default to TCP, unconditionally, for every push to a <code
+class="inline">host:port</code> target — not chosen by message size — since TCP always
+works regardless of size or path MTU; a push kind the server can actually accept over
+UDP MAY opt back in via an explicit flag, which SHALL still fall back to TCP with a
+clear warning if the resulting message would not fit in one safe UDP datagram.</td><td class="src">Engineering decision (reconsidered default)</td></tr>    <tr><td class="reqid">CLIENT-07</td><td>The client SHALL provide a way to create a starter zone definition for a new domain,
+including an optional, friendlier format for the two SOA fields most commonly written
+incorrectly by hand (the serial number and the responsible-party mailbox encoding),
+convertible to and usable interchangeably with an ordinary BIND-format zone file.</td><td class="src">Engineering decision (operator experience)</td></tr>  </table></div>
+</section>
+
+<section id="req-4">
+  <h2><span class="secno">4</span> Non-functional requirements</h2>
+  <div class="wrap"><table class="spec">
+    <tr><th>ID</th><th>Requirement</th><th>Category</th></tr>    <tr><td class="reqid">NFR-01</td><td>The server SHALL require no cgo dependency (pure-Go SQLite driver), preserving CoreDNS's
+static-build/cross-compilation properties.</td><td class="src">Portability</td></tr>    <tr><td class="reqid">NFR-02</td><td>UPDATE handling for a given zone SHALL be serialized against itself; UPDATEs for
+different zones SHALL be able to proceed concurrently, via a fixed-size set of lock
+stripes rather than one lock per zone name, so memory stays bounded regardless of how
+many distinct zone names are presented.</td><td class="src">Concurrency</td></tr>    <tr><td class="reqid">NFR-03</td><td>A persistence failure SHALL never leave in-memory and on-disk state disagreeing about
+whether an update applied.</td><td class="src">Consistency</td></tr>    <tr><td class="reqid">NFR-04</td><td>Adding HTTPS/HTTP3 opcode support SHALL NOT change behaviour for a Config that never
+opts an extra opcode in.</td><td class="src">Backward compatibility</td></tr>    <tr><td class="reqid">NFR-05</td><td>All defaults SHALL be safe-by-default; insecure modes SHALL require explicit,
+clearly-named opt-in (<code class="inline">insecure_skip_chain_validation</code>).</td><td class="src">Security posture</td></tr>  </table></div>
+</section>
+
+<section id="req-5">
+  <h2><span class="secno">5</span> Traceability summary</h2>
+  <p>Every requirement above is verified by at least one automated test case; the mapping is maintained in the companion <a href="#" onclick="document.querySelector('[data-doc=test]').click();return false;">Test Specification</a> (&sect;3, per-area tables) and its execution recorded in the <a href="#" onclick="document.querySelector('[data-doc=report]').click();return false;">Test Report</a> (&sect;3). No requirement in this document is currently unverified or outstanding.</p>
+  <div class="stats">
+    <div class="stat"><div class="v ok">90</div><div class="l">requirements specified</div></div>
+    <div class="stat"><div class="v ok">13</div><div class="l">functional areas</div></div>
+    <div class="stat"><div class="v ok">5</div><div class="l">non-functional</div></div>
+    <div class="stat"><div class="v ok">0</div><div class="l">unimplemented</div></div>
+  </div>
+</section>
+
+  </main>
+</div>
+
+<div class="shell layout" hidden id="wrap-test">
+  <aside class="rail" id="rail-test">
+    <div class="railtitle">In this document</div>
+    <nav>
+      <a href="#ts-1">1 Test strategy</a>
+      <a href="#ts-2">2 Test environment</a>
+      <a href="#ts-3">3 Test case catalogue</a>      <a class="l2" href="#ts-auth">3.1 AUTH</a>      <a class="l2" href="#ts-chain">3.2 CHAIN</a>      <a class="l2" href="#ts-key">3.3 KEY</a>      <a class="l2" href="#ts-algo">3.4 ALGO</a>      <a class="l2" href="#ts-content">3.5 CONTENT</a>      <a class="l2" href="#ts-contact">3.6 CONTACT</a>      <a class="l2" href="#ts-custody">3.7 CUSTODY</a>      <a class="l2" href="#ts-carrier">3.8 CARRIER</a>      <a class="l2" href="#ts-sec">3.9 SEC</a>      <a class="l2" href="#ts-ops">3.10 OPS</a>      <a class="l2" href="#ts-watch">3.11 WATCH</a>      <a class="l2" href="#ts-persist">3.12 PERSIST</a>      <a class="l2" href="#ts-client">3.13 CLIENT</a>      <a class="l2" href="#ts-nfr">3.14 NFR</a>      <a href="#ts-4">4 Automated suite inventory</a>
+      <a href="#ts-5">5 Manual / real-binary verification</a>
+    </nav>
+  </aside>
+  <main class="doc-panel" id="doc-test">
+
+<section id="ts-1">
+  <h2><span class="secno">1</span> Test strategy</h2>
+  <p>Verification is entirely automated Go tests (<code class="inline">go test</code>), run
+at three levels, from the same source tree as the implementation:</p>
+  <ul>    <li><strong>Unit</strong> — pure functions and small types in isolation (signature
+primitives, canonical-name ordering, algorithm tables, sliding-window counters).</li>    <li><strong>Integration / end-to-end</strong> — a real <code
+class="inline">dnsserver.Server</code>, <code
+class="inline">dnsserver.ServerHTTPS</code>, or <code
+class="inline">dnsserver.ServerHTTPS3</code> is started with the SAZU plugin installed,
+and a genuine SIG(0)-signed RFC 2136 UPDATE is sent over an actual UDP, TCP, or HTTP
+socket — not a direct function call into the handler. Chain-of-trust tests substitute a
+fake, deterministic <code class="inline">ChainValidator</code> for the real DNS-root
+walk (which chain.go's own dedicated tests cover against real network queries).</li>    <li><strong>Manual / real-binary</strong> — a separately compiled <code
+class="inline">coredns</code>, <code class="inline">sazuctl</code>, and <code
+class="inline">sazu-watchd</code>, run against each other over real sockets (including
+real TLS for HTTPS), performed during development and re-summarised in the companion
+Test Report §5. Not part of the repeatable <code class="inline">go test</code> suite,
+and not re-executed for every change — recorded once, at the point each capability was
+verified working end to end.</li>  </ul>
+  <p>Every test case below is traced to at least one requirement in the companion
+Requirements Specification, and every requirement is covered by at least one test case
+(§3 tables, column "Verifies").</p>
+</section>
+
+<section id="ts-2">
+  <h2><span class="secno">2</span> Test environment</h2>
+  <div class="wrap"><table class="spec">
+    <tr><th>Item</th><th>Value</th></tr>    <tr><td>Command</td><td class="mono">go test ./...</td></tr>    <tr><td>Go toolchain</td><td class="mono">go1.27.0</td></tr>    <tr><td>Repository / branch</td><td class="mono">coredns @ feat/sazu</td></tr>    <tr><td>Packages under test</td><td class="mono">plugin/sazu, plugin/sazu/cmd/sazu_watchd, core/dnsserver, plugin/pkg/doh,
+plugin/pkg/dnsutil (+ 105 unrelated pre-existing CoreDNS packages exercised incidentally
+by the full-repo run)</td></tr>    <tr><td>External services</td><td class="mono">None required. Chain-of-trust unit tests use a fake validator; the real network-querying
+validator has its own separate tests, not part of the default run's network dependency.</td></tr>  </table></div>
+</section>
+
+<section id="ts-3">
+  <h2><span class="secno">3</span> Test case catalogue</h2>
+  <p class="sec-abstract">Grouped by requirement area. Each row is one test scenario, naming the actual automated
+Go test function(s) that implement it and the requirement ID(s) it verifies. Function
+names are exact and file-locatable (<code
+class="inline">plugin/sazu/&lt;file&gt;_test.go</code> unless noted).</p>
+
+  <h3 class="subhead" id="ts-auth"><span class="secno">3.1</span> AUTH</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-AUTH-01</td><td>A genuine SIG(0) signature signs and verifies.</td><td class="mono">TestSignThenVerifySIG0Succeeds</td><td>AUTH-01, AUTH-02</td></tr>    <tr><td class="tcid">TC-AUTH-02</td><td>A single-bit tamper to the signed message fails verification.</td><td class="mono">TestTamperedMessageFailsSIG0Verification</td><td>AUTH-02</td></tr>    <tr><td class="tcid">TC-AUTH-03</td><td>Verification against the wrong key fails.</td><td class="mono">TestWrongKeyFailsSIG0Verification</td><td>AUTH-02</td></tr>    <tr><td class="tcid">TC-AUTH-04</td><td>An expired or not-yet-valid SIG(0) is rejected.</td><td class="mono">TestExpiredSIG0Rejected, TestNotYetValidSIG0Rejected</td><td>AUTH-02</td></tr>    <tr><td class="tcid">TC-AUTH-05</td><td>A message with no trailing SIG(0) record is rejected.</td><td class="mono">TestMissingSIG0Rejected</td><td>AUTH-02</td></tr>    <tr><td class="tcid">TC-AUTH-06</td><td>Captured wire bytes round-trip exactly; single-use; keyed by address+ID with no
+cross-address collision.</td><td class="mono">TestRawCapturePutTakeRoundTrip, TestRawCaptureTakeIsSingleUse,
+TestRawCaptureTakeWithoutPutFindsNothing, TestRawCaptureDifferentAddressesDoNotCollide</td><td>AUTH-03</td></tr>    <tr><td class="tcid">TC-AUTH-07</td><td>Capture entries expire after TTL, and the oldest is evicted at capacity.</td><td class="mono">TestRawCaptureExpiredEntryNotReturned, TestRawCaptureEvictsOldestWhenFull</td><td>AUTH-03</td></tr>    <tr><td class="tcid">TC-AUTH-08</td><td>End-to-end capture through the real UDP and TCP <code
+class="inline">DecorateReaderFunc</code> hooks.</td><td class="mono">TestRawCaptureEndToEndThroughUDPDecorateReaderFunc,
+TestRawCaptureEndToEndThroughTCPDecorateReaderFunc</td><td>AUTH-03</td></tr>    <tr><td class="tcid">TC-AUTH-09</td><td>Over HTTPS/HTTP3, the exact wire bytes are recoverable via request-context propagation
+instead of socket capture.</td><td class="mono">https_test.go (§3.8 TC-CARRIER-08); core/dnsserver TC-CARRIER-07</td><td>AUTH-03</td></tr>    <tr><td class="tcid">TC-AUTH-10</td><td>With no wire bytes captured for a request (reached some way other than through a real
+dns.Server's DecorateReaderFunc wiring, and no HTTPS/HTTP3 request-context propagation
+either), the server fails closed with SERVFAIL rather than authenticate against the
+parsed message.</td><td class="mono">TestServeUpdateFailsClosedWhenNoRawBytesCaptured</td><td>AUTH-04</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-chain"><span class="secno">3.2</span> CHAIN</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CHAIN-01</td><td>RRSIG-verification primitive: accepts a genuine signature; rejects a tampered RRset, the
+wrong key, and an expired signature.</td><td class="mono">TestVerifyAnyRRSIGAcceptsGenuineSignature, TestVerifyAnyRRSIGRejectsTamperedRRset,
+TestVerifyAnyRRSIGRejectsWrongKey, TestVerifyAnyRRSIGRejectsExpired</td><td>CHAIN-03</td></tr>    <tr><td class="tcid">TC-CHAIN-02</td><td>DS-digest match round-trips and rejects a tampered digest.</td><td class="mono">TestDsMatchesKeyRoundtripAndRejectsTamperedDigest</td><td>CHAIN-03</td></tr>    <tr><td class="tcid">TC-CHAIN-03</td><td>Root trust anchor verifies the real digest (not just metadata) and rejects a non-KSK
+candidate.</td><td class="mono">TestTrustAnchorVerifiesRealDigestNotJustMetadata, TestTrustAnchorRejectsNonKSK</td><td>CHAIN-03</td></tr>    <tr><td class="tcid">TC-CHAIN-04</td><td>RRset canonical ordering (RFC 4034) is handled regardless of input order.</td><td class="mono">TestMultiRecordRRsetCanonicalOrderingIsDeterministic</td><td>CHAIN-03</td></tr>    <tr><td class="tcid">TC-CHAIN-05</td><td>First contact is denied with <code class="inline">ERR_NO_DS_PUBLISHED</code> when the
+parent publishes no DS.</td><td class="mono">TestOnboardDeniedWithNoDSPublishedGivesDiagnostic</td><td>CHAIN-04, CHAIN-07, OPS-04</td></tr>    <tr><td class="tcid">TC-CHAIN-06</td><td>First contact is denied with <code class="inline">ERR_UNKNOWN_SIGNER</code> when a DS
+exists but doesn't match.</td><td class="mono">TestOnboardDeniedWithKeyMismatchGivesDiagnostic</td><td>CHAIN-05, CHAIN-07, OPS-04</td></tr>    <tr><td class="tcid">TC-CHAIN-07</td><td>A generic chain failure carries no diagnostic status, distinguishing it from
+TC-CHAIN-05/06's specific cases.</td><td class="mono">TestOnboardDeniedForOtherChainReasonsCarriesNoDiagnostic</td><td>CHAIN-04, CHAIN-05 (negative)</td></tr>    <tr><td class="tcid">TC-CHAIN-08</td><td>First contact without an apex SOA (the publish-trust shape: a KSK and its paired ZSK,
+no zone content at all) is accepted, and the candidate KSK pinned.</td><td class="mono">TestOnboardWithoutSOAIsAccepted</td><td>CHAIN-06</td></tr>    <tr><td class="tcid">TC-CHAIN-09</td><td>A full, successful onboarding is servable, including RRSIGs with the DO bit.</td><td class="mono">TestOnboardFullPushThenQuery, TestOnboardedZoneServesRRSIGsWithDOBit</td><td>CHAIN-01, CHAIN-02, CONTENT-11</td></tr>    <tr><td class="tcid">TC-CHAIN-10</td><td>A wildcard Corefile scope onboards multiple independent domains with no restart, and
+never onboarding a name still falls through to the next plugin when one is configured;
+with none configured, both a never-onboarded name (ordinary query) and an UPDATE outside
+the static Corefile zone scope are refused (REFUSED) rather than met with SERVFAIL.</td><td class="mono">TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges,
+TestWildcardScopeFallsThroughForNeverOnboardedNames,
+TestNeverOnboardedNameIsRefusedNotServerFailureWithNoNextPlugin,
+TestUpdateOutsideZoneScopeIsRefusedNotServerFailureWithNoNextPlugin</td><td>CONTENT-12, CONTENT-17</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-key"><span class="secno">3.3</span> KEY</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-KEY-01</td><td>KeyRegistry KSK pin/get round-trips; zone names are compared case-insensitively.</td><td class="mono">TestKeyRegistryPinKSKAndGet, TestKeyRegistryNormalizesZoneNames</td><td>KEY-01</td></tr>    <tr><td class="tcid">TC-KEY-02</td><td>A push signed by an unpinned/wrong key is rejected.</td><td class="mono">TestPartialPushFromWrongKeyRejected</td><td>KEY-02</td></tr>    <tr><td class="tcid">TC-KEY-03</td><td>An ordinary partial push after onboarding succeeds against the pinned key.</td><td class="mono">TestOrdinaryPartialPushAfterOnboarding</td><td>KEY-01</td></tr>    <tr><td class="tcid">TC-KEY-04</td><td>A valid KSK rollover (new candidate independently chains to a DS) succeeds; the
+superseded key stops working.</td><td class="mono">TestKeyRolloverSwitchesToNewKey</td><td>KEY-03, KEY-05</td></tr>    <tr><td class="tcid">TC-KEY-05</td><td>Rollover fails, and the old key remains pinned, when the new candidate has no DS.</td><td class="mono">TestKeyRolloverFailsWithoutADSForTheNewKey</td><td>KEY-03</td></tr>    <tr><td class="tcid">TC-KEY-06</td><td>A rollover candidate below the algorithm floor is rejected before any chain-of-trust
+effort.</td><td class="mono">TestKeyRolloverRejectedForWeakAlgorithm</td><td>KEY-03, ALGO-03</td></tr>    <tr><td class="tcid">TC-KEY-07</td><td>A ZSK cannot be registered before a KSK exists; once one does, registering and reading
+it back round-trips, and a duplicate key tag is rejected.</td><td class="mono">TestKeyRegistryAddZSKRequiresExistingKSK, TestKeyRegistryAddZSKThenGet,
+TestKeyRegistryAddZSKRejectsDuplicateKeyTag</td><td>KEY-08</td></tr>    <tr><td class="tcid">TC-KEY-08</td><td>Retiring a registered ZSK removes it; retiring an unknown key tag is a no-op, not an
+error.</td><td class="mono">TestKeyRegistryRetireZSK, TestKeyRegistryRetireZSKOfUnknownKeytagIsANoop</td><td>KEY-09</td></tr>    <tr><td class="tcid">TC-KEY-09</td><td>A KSK rollover, at the registry level, preserves an already-registered ZSK untouched.</td><td class="mono">TestKeyRegistryPinKSKPreservesExistingZSKs</td><td>KEY-05</td></tr>    <tr><td class="tcid">TC-KEY-10</td><td>The authenticator set is the KSK plus only ZSKs flagged to authenticate transactions;
+the content-signer set is the KSK plus every registered ZSK.</td><td class="mono">TestZoneKeysAuthenticatorsIncludesOnlyCanAuthenticateTxZSKs</td><td>KEY-10, KEY-11</td></tr>    <tr><td class="tcid">TC-KEY-11</td><td>End-to-end: a ZSK registers over an ordinary, already-KSK-authenticated push with no
+chain-of-trust network walk; a zone that never registers one behaves exactly as before
+the ZSK split existed.</td><td class="mono">TestZSKCanBeRegisteredOverAnOrdinaryPush,
+TestRegisteringAZSKIsOptionalZoneBehaviorIsUnchangedWithoutOne</td><td>KEY-06, KEY-08</td></tr>    <tr><td class="tcid">TC-KEY-12</td><td>Once registered, a ZSK authenticates further transactions entirely on its own, with the
+content it carries servable afterward.</td><td class="mono">TestZSKAuthenticatesFurtherTransactionsOnceRegistered</td><td>KEY-01, KEY-11</td></tr>    <tr><td class="tcid">TC-KEY-13</td><td>Content signed by a ZSK (rather than the KSK) still verifies under §4's mandatory
+content-signature check.</td><td class="mono">TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs</td><td>KEY-10</td></tr>    <tr><td class="tcid">TC-KEY-14</td><td>A retired ZSK no longer authenticates anything, end to end.</td><td class="mono">TestZSKCanBeRetired</td><td>KEY-09</td></tr>    <tr><td class="tcid">TC-KEY-15</td><td>A KSK rollover, end to end, preserves and keeps trusting an already-registered ZSK
+afterward.</td><td class="mono">TestKSKRolloverPreservesExistingZSK</td><td>KEY-05</td></tr>    <tr><td class="tcid">TC-KEY-16</td><td>A first-contact candidate without the SEP (KSK) flag is refused with a dedicated
+diagnostic and pins nothing.</td><td class="mono">TestFirstContactRejectsNonKSKCandidate</td><td>KEY-07</td></tr>    <tr><td class="tcid">TC-KEY-17</td><td>A ZSK registration below the algorithm floor is refused before being registered.</td><td class="mono">TestAddZSKRejectsWeakAlgorithm</td><td>KEY-08, ALGO-01</td></tr>    <tr><td class="tcid">TC-KEY-18</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
+against a real server: the full KSK use case — <code class="inline">publish-trust</code>
+onboarding (KSK+ZSK generated together), a <code class="inline">publish-zone</code>
+content re-push, and a full KSK rollover (<code class="inline">rotate-key -role
+ksk</code>), with the ZSK still authenticating content afterward; the old KSK's own
+DNSKEY record is genuinely gone from what's served post-rollover, and a live DNSKEY
+query's RRSIG validates against the complete, actually-served resulting set.</td><td class="mono">TestE2EKSKFullLifecycle</td><td>KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, KEY-12, CLIENT-04, CLIENT-05</td></tr>    <tr><td class="tcid">TC-KEY-19</td><td>End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
+against a real server: the full ZSK use case — a <code class="inline">publish-zone</code>
+content push authenticated and signed entirely by the ZSK <code
+class="inline">publish-trust</code> registered, retirement, the retired key rejected
+afterward, a freshly registered replacement working again, and the <code
+class="inline">rotate-key -role zsk</code> register-then-retire convenience path. Also,
+after a second <code class="inline">add-zsk</code> (three served DNSKEY records) and
+after a <code class="inline">retire-zsk</code> (back down to two, with the retired
+record genuinely no longer served), a live DNSKEY query's RRSIG validates against
+whatever the complete, actually-served set is at each point.</td><td class="mono">TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, KEY-12, CLIENT-04</td></tr>    <tr><td class="tcid">TC-KEY-20</td><td><code class="inline">BuildAddZSKPush</code>/<code class="inline">BuildRetireZSKPush</code>/
+<code class="inline">BuildKSKRolloverPush</code> each produce a single RRSIG that
+validates against the complete resulting DNSKEY RRset (never one computed over only the
+changed record), and a rollover or retirement explicitly deletes whichever record is no
+longer part of that set. Directly regresses the bug this family of functions was built to
+fix: an earlier version signed only the newly added or self-signing record in isolation,
+which stopped covering what was actually served the moment a zone had more than the
+original KSK+ZSK pair, or after any KSK rollover at all. cmd/sazuctl's add-zsk,
+retire-zsk, and rotate-key -role ksk all require -target (rather than allowing the usual
+print-and-self-verify-only mode) so they can query that current set live before signing.</td><td class="mono">TestBuildAddZSKPushSignsCompleteResultingRRset,
+TestBuildRetireZSKPushSignsCompleteRemainingRRsetAndDeletesRetired,
+TestBuildKSKRolloverPushSignsCompleteResultingRRsetAndDeletesOldKSK,
+TestAddZSKRetireZSKAndRotateKeyKSKRequireTarget (cmd/sazuctl/main_test.go)</td><td>KEY-12</td></tr>    <tr><td class="tcid">TC-KEY-21</td><td>A decommission directive removes a zone's keys, content, and contact registration
+entirely (a subsequent query behaves exactly as if it was never onboarded, and the same
+zone name onboards cleanly again afterward with nothing left over); is refused when
+authenticated by an already-registered ZSK instead of the zone's own KSK, or for a zone
+never onboarded at all; rejects more than one directive or one mixed with any other op
+in the same update; and its audit-trail history survives the removal. Verified at the
+<code class="inline">splitDecommissionOps</code> unit level, end to end against a real
+server, at the <code class="inline">DB.DeleteZone</code> persistence level, and through
+the real <code class="inline">sazuctl decommission-zone</code> CLI entry point
+(including its required <code class="inline">-yes</code> confirmation) against a real
+server.</td><td class="mono">TestSplitDecommissionOpsFindsDirectiveAndStripsIt,
+TestSplitDecommissionOpsAbsentIsANoOp, TestSplitDecommissionOpsRejectsMoreThanOne,
+TestSplitDecommissionOpsRejectsMixingWithOtherOps,
+TestSplitDecommissionOpsDropsStrayRRSIG,
+TestServeUpdateDecommissionRemovesEverything,
+TestServeUpdateDecommissionRejectedWhenAuthenticatedByZSK,
+TestServeUpdateDecommissionOfUnknownZoneIsRefused (decommission_test.go),
+TestDBDeleteZoneRemovesEverythingButAuditLog (db_test.go),
+TestE2EDecommissionZoneRemovesZoneAndAllowsReOnboarding (cmd/sazuctl/e2e_test.go)</td><td>KEY-13</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-algo"><span class="secno">3.4</span> ALGO</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-ALGO-01</td><td>Recommended algorithms are accepted; weak or unrecognised ones are rejected, at the
+classification primitive.</td><td class="mono">TestAlgorithmMeetsFloorAcceptsRecommendedAlgorithms,
+TestAlgorithmMeetsFloorRejectsWeakOrUnknownAlgorithms</td><td>ALGO-01, ALGO-02</td></tr>    <tr><td class="tcid">TC-ALGO-02</td><td>A first-contact push with a weak-algorithm candidate is refused with <code
+class="inline">ERR_WEAK_ALGORITHM</code>, even though its transaction signature is
+otherwise genuine.</td><td class="mono">TestOnboardWithWeakAlgorithmKeyIsRejected</td><td>ALGO-01, ALGO-03</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-content"><span class="secno">3.5</span> CONTENT</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CONTENT-01</td><td>All five RFC 2136 §2.4 prerequisite forms evaluate correctly.</td><td class="mono">TestEvaluatePrerequisitesNameIsInUse, TestEvaluatePrerequisitesNameNotInUse,
+TestEvaluatePrerequisitesRRsetExistsValueIndependent,
+TestEvaluatePrerequisitesRRsetDoesNotExist</td><td>CONTENT-01</td></tr>    <tr><td class="tcid">TC-CONTENT-02</td><td>The SOA-serial staleness guard rejects a stale push with its specific status; an
+ordinary value-dependent mismatch on another RRset carries none.</td><td class="mono">TestEvaluatePrerequisitesRRsetExistsValueDependentSOAStalenessGuard,
+TestEvaluatePrerequisitesGenericValueDependentPrereqCarriesNoStatus</td><td>CONTENT-03</td></tr>    <tr><td class="tcid">TC-CONTENT-03</td><td>All four RFC 2136 §2.5 update-op forms apply correctly.</td><td class="mono">TestApplyUpdateOpsAddToRRset, TestApplyUpdateOpsDeleteRRset,
+TestApplyUpdateOpsDeleteAllRRsetsFromName, TestApplyUpdateOpsDeleteOneRR</td><td>CONTENT-02</td></tr>    <tr><td class="tcid">TC-CONTENT-04</td><td>Signing produces exactly one RRSIG per RRset, with the correct TTL, and the signature
+verifies.</td><td class="mono">TestSignZoneContentProducesOneRRSIGPerRRset,
+TestSignZoneContentRRSIGsCarryTheCoveredRRsetsTTL,
+TestSignZoneContentRRSIGsActuallyVerify</td><td>CONTENT-06</td></tr>    <tr><td class="tcid">TC-CONTENT-05</td><td>Content verification accepts genuine signatures and rejects unsigned, wrong-key, and
+expired content; delete-shaped ops need none.</td><td class="mono">TestVerifySignedRRsetsAcceptsGenuinelySignedContent,
+TestVerifySignedRRsetsRejectsUnsignedRRset,
+TestVerifySignedRRsetsRejectsWrongKeySignature,
+TestVerifySignedRRsetsRejectsExpiredSignature,
+TestVerifySignedRRsetsMissingSignatureCarriesNoExpiredStatus,
+TestVerifySignedRRsetsIgnoresDeleteShapedOps</td><td>CONTENT-04, CONTENT-05</td></tr>    <tr><td class="tcid">TC-CONTENT-06</td><td>End-to-end: the mandatory verification gate rejects unsigned content and distinguishes
+an expired-but-genuine signature from the generic no-valid-signature case.</td><td class="mono">TestRequireValidRRSIGsRejectsUnsignedContent,
+TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic</td><td>CONTENT-04, CONTENT-05</td></tr>    <tr><td class="tcid">TC-CONTENT-07</td><td>In-memory zone store: dedup identical rdata, TTL refresh, multi-signer RRSIG
+coexistence, independent copies on lookup, apex SOA protected from deletion.</td><td class="mono">21 functions in store_test.go (TestZoneData*, TestStoreGet*)</td><td>CONTENT-02</td></tr>    <tr><td class="tcid">TC-CONTENT-08</td><td>NSEC chain construction covers every owner name and cycles correctly; type bitmap
+reflects actual content; canonical ordering matches the RFC 4034 worked example.</td><td class="mono">10 functions in nsec_test.go (TestCanonicalCompare*, TestSortNamesCanonically,
+TestClosestEncloser*, TestCoveringOwner*, TestBuildNSECChain*)</td><td>CONTENT-07</td></tr>    <tr><td class="tcid">TC-CONTENT-09</td><td>The NSEC chain is replaced, not accumulated, on re-push, and purged together with its
+RRSIGs.</td><td class="mono">TestZoneDataInsertNSECReplacesRatherThanAccumulates,
+TestZoneDataPurgeNSECRemovesRecordsAndTheirRRSIGs</td><td>CONTENT-09</td></tr>    <tr><td class="tcid">TC-CONTENT-10</td><td>Negative-proof construction is correct for NODATA and NXDOMAIN (including the wildcard
+slot), and degrades to no proof when no chain exists yet.</td><td class="mono">TestZoneDataNegativeProofNODATAReturnsNSECAtQueriedName,
+TestZoneDataNegativeProofNXDOMAINCoversQnameAndWildcardSlot,
+TestZoneDataNegativeProofReturnsNilWithNoChainPushed</td><td>CONTENT-07</td></tr>    <tr><td class="tcid">TC-CONTENT-11</td><td>End-to-end negative answers carry SOA in authority (with/without DO) and a valid NSEC
+proof under DO; a partial push invalidates the chain until the next full push.</td><td class="mono">TestNXDOMAINCarriesSOAInAuthority, TestNODATACarriesSOAInAuthority,
+TestNegativeResponseCarriesSOARRSIGWithDOBit, TestNXDOMAINCarriesValidNSECProof,
+TestNODATACarriesValidNSECProof, TestPartialPushInvalidatesNSECUntilNextFullPush</td><td>CONTENT-07, CONTENT-08, CONTENT-09</td></tr>    <tr><td class="tcid">TC-CONTENT-12</td><td>Zone-file loading separates SOA correctly and rejects a file with none; full-zone push
+shapes prerequisite/update sections correctly for first contact and re-push, accepts
+hand-built records, and its signatures verify.</td><td class="mono">TestLoadZoneFileSeparatesSOAFromOtherRecords, TestLoadZoneFileRejectsMissingSOA,
+TestBuildFullZonePushShapesPrerequisiteAndUpdateSections,
+TestBuildFullZonePushFirstContactHasNoPrerequisite,
+TestBuildFullZonePushAcceptsHandBuiltRecords, TestBuildFullZonePushSignsAndVerifies</td><td>CONTENT-01, CONTENT-06</td></tr>    <tr><td class="tcid">TC-CONTENT-13</td><td>Ten typical RR types sign/verify (with tamper detection), serve correctly with and
+without DO, and are all accepted together under the content-verification gate.</td><td class="mono">TestSignZoneContentAndVerifyAcrossTypicalRRTypes,
+TestServeAndVerifyAcrossTypicalRRTypes, TestRequireValidRRSIGsAcceptsEveryTypicalRRType</td><td>CONTENT-10</td></tr>    <tr><td class="tcid">TC-CONTENT-14</td><td>A malformed persisted op rolls the whole transaction back atomically; all four op forms
+persist and reload correctly; NSEC purge is mirrored on disk.</td><td class="mono">TestDBCommitUpdateAppliesAllFourOpForms, TestDBCommitUpdateRollsBackOnMalformedOp,
+TestDBCommitUpdatePurgesStaleNSECOnNextUpdate</td><td>PERSIST-02, CONTENT-09</td></tr>    <tr><td class="tcid">TC-CONTENT-15</td><td>NSEC3 chain construction covers every owner name and cycles correctly by hash order;
+type bitmap reflects actual content (apex-only NSEC3PARAM, never NSEC3 itself);
+Opt-Out and the hash parameters land on every record; hashing is deterministic,
+case-insensitive on the input name, and depends on salt/iterations.</td><td class="mono">8 functions in nsec3_test.go (TestNSEC3Hash*, TestBuildNSEC3Chain*, TestNextCloserName,
+TestCoveringHashFindsPredecessorAndWraps)</td><td>CONTENT-13</td></tr>    <tr><td class="tcid">TC-CONTENT-16</td><td>End-to-end, a zone onboarded with NSEC3 instead of plain NSEC serves a genuinely
+verifying NSEC3 proof for both NODATA and NXDOMAIN (closest-encloser match included),
+and a partial push invalidates the NSEC3 chain the same way it does a plain NSEC one.</td><td class="mono">TestNODATACarriesValidNSEC3Proof, TestNXDOMAINCarriesValidNSEC3Proof,
+TestPartialPushInvalidatesNSEC3UntilNextFullPush (nsec3_test.go)</td><td>CONTENT-13, CONTENT-08, CONTENT-09</td></tr>    <tr><td class="tcid">TC-CONTENT-17</td><td>cmd/sazuctl's "publish-zone -denial-of-existence nsec3" flag (plus
+-nsec3-salt/-nsec3-opt-out) genuinely changes what the server ends up serving for a
+real NXDOMAIN query -- NSEC3, with the Opt-Out flag set, and no plain NSEC alongside
+it; an ordinary invocation with no NSEC-related flags at all defaults to NSEC3 the
+same way; -denial-of-existence nsec is a working fallback back to plain NSEC, with no
+NSEC3 alongside it.</td><td class="mono">TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC, TestE2EPushZoneDefaultServesNSEC3,
+TestE2EPushZoneNSEC3FalseFallsBackToPlainNSEC (cmd/sazuctl/e2e_test.go)</td><td>CONTENT-13</td></tr>    <tr><td class="tcid">TC-CONTENT-20</td><td>A KSK rollover -- which carries an apex DNSKEY, same as a full push, but changes no
+served content and supplies no replacement chain -- leaves an existing zone's content
+and its NSEC chain fully intact and still validly signed, rather than being purged on
+the mistaken assumption that carrying an apex DNSKEY alone means "full push."</td><td class="mono">TestKSKRolloverNeverPurgesContentOrChain</td><td>CONTENT-15</td></tr>    <tr><td class="tcid">TC-CONTENT-22</td><td>A full content push (sazuctl publish-zone) replaces a zone's entire served content:
+a record present in an earlier push but absent from a later one is confirmed gone
+after the next push, while the apex DNSKEY RRset (key management, untouched by
+content pushes) survives exactly as it was.</td><td class="mono">TestPublishZoneRemovesContentDroppedFromTheZoneFile</td><td>CONTENT-16</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-contact"><span class="secno">3.6</span> CONTACT</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CONTACT-01</td><td>A contact add/delete op is correctly split from the update ops; non-contact ops pass
+through untouched; no contact op yields no update.</td><td class="mono">TestSplitContactOpsExtractsAddOp, TestSplitContactOpsExtractsDeleteOp,
+TestSplitContactOpsNoContactOpReturnsNilUpdate</td><td>CONTACT-01, CONTACT-03</td></tr>    <tr><td class="tcid">TC-CONTACT-02</td><td>An address with an unrecognised scheme, or an empty list, is rejected.</td><td class="mono">TestSplitContactOpsRejectsInvalidScheme,
+TestValidateContactAddressesRejectsUnknownScheme,
+TestValidateContactAddressesRejectsEmptyList</td><td>CONTACT-02</td></tr>    <tr><td class="tcid">TC-CONTACT-03</td><td>More than one contact directive per push is rejected; multiple addresses in one
+directive are all kept.</td><td class="mono">TestSplitContactOpsRejectsMoreThanOneDirective,
+TestSplitContactOpsAcceptsMultipleAddressesInOneOp</td><td>CONTACT-01</td></tr>    <tr><td class="tcid">TC-CONTACT-04</td><td>An orphan RRSIG over the contact record is dropped rather than persisted.</td><td class="mono">TestSplitContactOpsDropsOrphanRRSIGOverTheContactRecord</td><td>CONTACT-04</td></tr>    <tr><td class="tcid">TC-CONTACT-05</td><td>ContactRegistry set/clear round-trips in memory.</td><td class="mono">TestContactRegistrySetAndClear</td><td>CONTACT-01</td></tr>    <tr><td class="tcid">TC-CONTACT-06</td><td>A contact registration rides a real onboarded push end to end and is never itself
+servable as DNS content.</td><td class="mono">TestContactRegistrationRidesOrdinaryPushAndIsNeverServed</td><td>CONTACT-01, CONTACT-03</td></tr>    <tr><td class="tcid">TC-CONTACT-07</td><td>A contact registration persists to, and survives reload from, the database; clearing it
+removes the row.</td><td class="mono">TestDBCommitUpdatePersistsAndClearsContact</td><td>CONTACT-05</td></tr>    <tr><td class="tcid">TC-CONTACT-08</td><td>The zone/key/contact accessors sazu-watchd depends on return correct data for an
+onboarded zone and report absence for one never onboarded.</td><td class="mono">TestDBListZonesLoadKeyLoadContact</td><td>CONTACT-05, WATCH-02</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-custody"><span class="secno">3.7</span> CUSTODY</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CUSTODY-01</td><td>A plain BIND-format key round-trips to an identical DNSKEY and DS.</td><td class="mono">TestSaveLoadKeyRoundTripsToIdenticalDNSKEYAndDS</td><td>CUSTODY-01</td></tr>    <tr><td class="tcid">TC-CUSTODY-02</td><td>Load-or-generate creates once and reuses thereafter, for plain and encrypted key files
+alike.</td><td class="mono">TestLoadOrGenerateKeyGeneratesThenReusesSameKey,
+TestLoadOrGenerateKeyWithPassphraseGeneratesEncryptedFile</td><td>CUSTODY-01, CUSTODY-02</td></tr>    <tr><td class="tcid">TC-CUSTODY-03</td><td>An encrypted key round-trips to the identical key material and is recognisably
+encrypted.</td><td class="mono">TestSaveLoadEncryptedKeyRoundTripsToIdenticalKey,
+TestIsEncryptedKeyFileDistinguishesFromPlainBINDFormat</td><td>CUSTODY-02, CUSTODY-03</td></tr>    <tr><td class="tcid">TC-CUSTODY-04</td><td>A wrong/missing passphrase, a plain file handed to the decrypt path, and a tampered
+ciphertext are all rejected.</td><td class="mono">TestLoadEncryptedKeyRejectsWrongOrMissingPassphrase,
+TestDecryptKeyFileBytesRejectsWrongPassphrase,
+TestDecryptKeyFileBytesRejectsTamperedCiphertext,
+TestDecryptKeyFileBytesRejectsNonEncryptedInput</td><td>CUSTODY-04</td></tr>    <tr><td class="tcid">TC-CUSTODY-05</td><td>The raw encrypt/decrypt primitive round-trips exactly.</td><td class="mono">TestEncryptDecryptKeyFileBytesRoundTrip</td><td>CUSTODY-02</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-carrier"><span class="secno">3.8</span> CARRIER</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CARRIER-01</td><td><code class="inline">dnsutil.UnpackRequest</code> keeps its original default policy
+unchanged (regression baseline for the accept-func extension).</td><td class="mono">TestUnpackRequest (plugin/pkg/dnsutil)</td><td>CARRIER-03 (baseline)</td></tr>    <tr><td class="tcid">TC-CARRIER-02</td><td>A custom accept function can opt UPDATE in where the default would reject it; a nil
+function still enforces the default.</td><td class="mono">TestUnpackRequestWithAcceptFuncNilFallsBackToDefault,
+TestUnpackRequestWithAcceptFuncHonorsCustomPolicy (dnsutil)</td><td>CARRIER-03</td></tr>    <tr><td class="tcid">TC-CARRIER-03</td><td>The DoH request parser rejects UPDATE by default and accepts it once opted in, for GET
+and POST, with byte-exact raw output.</td><td class="mono">TestRequestToMsgWireRejectsUpdateByDefault,
+TestRequestToMsgWireWithAcceptAllowsOptedInOpcode (plugin/pkg/doh)</td><td>CARRIER-02, CARRIER-03</td></tr>    <tr><td class="tcid">TC-CARRIER-04</td><td>The JSON wire envelope decodes to the exact original bytes under its own and the generic
+content type; malformed JSON/base64 is rejected; a plain body is never mistaken for
+JSON.</td><td class="mono">TestRequestToMsgWireWithAcceptJSONEnvelope,
+TestRequestToMsgWireWithAcceptJSONEnvelopeGenericContentType,
+TestRequestToMsgWireWithAcceptJSONEnvelopeRejectsMalformedJSON,
+TestRequestToMsgWireWithAcceptJSONEnvelopeRejectsBadBase64,
+TestPlainDNSMessageContentTypeIsNeverTreatedAsJSON (doh)</td><td>CARRIER-04, CARRIER-05</td></tr>    <tr><td class="tcid">TC-CARRIER-05</td><td>Ordinary DoH GET/POST round trips still parse correctly; an oversized GET query is
+rejected (regression baseline).</td><td class="mono">TestDoH, TestDoHGETRejectsOversizedDNSQuery (doh)</td><td>CARRIER-01, CARRIER-02 (baseline)</td></tr>    <tr><td class="tcid">TC-CARRIER-06</td><td>core/dnsserver's HTTPS and HTTP3 servers reject UPDATE by default and accept it once
+<code class="inline">Config.AllowOpcode</code> is set, over POST/GET/JSON, with the
+exact original wire bytes recoverable from the request context.</td><td class="mono">TestServerHTTPSRejectsUpdate, TestServerHTTPSAllowOpcodeAcceptsUpdate,
+TestServerHTTPS3RejectsUpdate, TestServerHTTPS3AllowOpcodeAcceptsUpdate (core/dnsserver)</td><td>CARRIER-02, CARRIER-03, CARRIER-04, CARRIER-05, AUTH-03</td></tr>    <tr><td class="tcid">TC-CARRIER-07</td><td>The plugin onboards a zone and pushes a partial update over a real HTTPS round
+trip, both as raw bytes and as the JSON envelope.</td><td class="mono">TestOnboardOverHTTPSRawWireBytes, TestOnboardOverHTTPSJSONWireEnvelope,
+TestPartialPushOverHTTPSAfterOnboarding (https_test.go)</td><td>CARRIER-02, CARRIER-04, CARRIER-05</td></tr>    <tr><td class="tcid">TC-CARRIER-08</td><td>cmd/sazuctl's own client-side sendOverHTTP function -- not the server side an
+<code class="inline">http(s)://</code> target already has coverage for elsewhere in
+this area -- POSTs raw wire bytes to the right path/content-type and correctly
+interprets both an accepted (NOERROR) and a denied (non-NOERROR) response.</td><td class="mono">TestSendOverHTTPRoundTrips (cmd/sazuctl)</td><td>CARRIER-06</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-sec"><span class="secno">3.9</span> SEC</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-SEC-01</td><td>A first-contact/rollover attempt over plain UDP is refused; the identical push succeeds
+resent over TCP; an already-pinned zone's ordinary push still works over UDP.</td><td class="mono">TestFirstContactOverUDPIsRefused, TestFirstContactOverUDPStillWorksAfterRetryOverTCP,
+TestKeyRolloverOverUDPIsRefused, TestOrdinaryPartialPushOverUDPStillWorks
+(transport_test.go)</td><td>SEC-01</td></tr>    <tr><td class="tcid">TC-SEC-02</td><td>The transport classifier is correct in isolation, including treating an HTTP/3-shaped
+UDP address as connection-oriented via the context signal.</td><td class="mono">TestConnectionOrientedUDPIsNotConnectionOriented,
+TestConnectionOrientedTCPIsConnectionOriented,
+TestConnectionOrientedNilAddrIsNotConnectionOriented,
+TestConnectionOrientedHTTP3ShapedUDPAddrIsStillConnectionOriented</td><td>SEC-01</td></tr>    <tr><td class="tcid">TC-SEC-03</td><td>The per-zone quota enforces its limit, tracks full/key-management and distinct zones
+independently, slides its window, and is case-insensitive on zone name.</td><td class="mono">TestRateLimiterAllowsUpToTheLimitThenRefuses,
+TestRateLimiterTracksFullAndKeyManagementIndependently,
+TestRateLimiterTracksZonesIndependently, TestRateLimiterSlidesTheWindow,
+TestRateLimiterIsCaseInsensitiveOnZoneName</td><td>SEC-03</td></tr>    <tr><td class="tcid">TC-SEC-04</td><td>An exhausted per-zone quota rejects a further key-management push end to end and never
+applies its content.</td><td class="mono">TestRateLimiterExceededRejectsFurtherKeyManagementPushes</td><td>SEC-03</td></tr>    <tr><td class="tcid">TC-SEC-05</td><td>The per-source-IP limiter enforces its budget, is port-independent, slides its window,
+and covers many distinct zone names from one address.</td><td class="mono">TestIPRateLimiterAllowsUpToTheLimitThenRefuses,
+TestIPRateLimiterTracksAddressesIndependently, TestIPRateLimiterSlidesTheWindow,
+TestIPRateLimiterCoversManyDistinctZoneNamesFromOneAddress, TestSourceIPStripsPort,
+TestSourceIPFallsBackToOriginalWhenNotHostPort</td><td>SEC-02</td></tr>    <tr><td class="tcid">TC-SEC-06</td><td><strong>End-to-end scanning scenario:</strong> three distinct never-before-seen zones
+onboard normally from one address; a fourth, still holding its own fresh per-zone quota,
+is refused purely on address volume; the limiter also counts an ordinary
+already-authenticated push.</td><td class="mono">TestIPRateLimiterCoversScanningAcrossManyDistinctZoneNames,
+TestIPRateLimiterCountsEveryUpdateAttemptNotJustFirstContact</td><td>SEC-02</td></tr>    <tr><td class="tcid">TC-SEC-07</td><td>Both limiters garbage-collect stale entries at most once per window, bounding memory to
+recently active keys.</td><td class="mono">TestIPRateLimiterSweepsStaleAddressesOutOfMemory,
+TestRateLimiterSweepsStaleZoneNamesOutOfMemory, TestSweepIfDueOnlyRunsOncePerWindow</td><td>SEC-04</td></tr>    <tr><td class="tcid">TC-SEC-08</td><td>Transport-gate and per-IP-limiter rejections leave no audit-trail row; an ordinary
+rejection is still fully audited.</td><td class="mono">TestTransportAndRateLimitRejectionsAreNotAudited</td><td>SEC-05</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-ops"><span class="secno">3.10</span> OPS</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-OPS-01</td><td>One audit row is recorded for a rejected attempt and one for a later successful
+onboarding, each with a distinct transaction ID, newest first; the rejected attempt
+(never authenticated) carries no key attribution, and the accepted onboarding is
+attributed to the KSK that authenticated it.</td><td class="mono">TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions</td><td>OPS-01, OPS-02</td></tr>    <tr><td class="tcid">TC-OPS-02</td><td>Audit-trail entries persist and page/limit correctly, including for a zone with none at
+all; an authenticated push's key tag and role round-trip, and a never-authenticated
+rejection's absence of either survives the round trip too.</td><td class="mono">TestDBRecordTransactionAndRecentTransactions</td><td>OPS-02, OPS-03</td></tr>    <tr><td class="tcid">TC-OPS-03</td><td><code class="inline">rate_limit</code>/<code class="inline">ip_rate_limit</code>
+Corefile directives parse correctly, default correctly when omitted, and reject
+malformed arguments; the plugin wires up with or without persistence.</td><td class="mono">TestParseSazu, TestParseSazuRateLimitDefaultsAndOverride,
+TestParseSazuIPRateLimitDefaultAndOverride, TestSetupWiresPluginAndOptionalDB,
+TestSetupWithoutDBIsPurelyInMemory</td><td>OPS-05, PERSIST-04</td></tr>    <tr><td class="tcid">TC-OPS-04</td><td>End to end, two independently registered ZSKs -- standing in for two different signer
+machines in an HA/multi-signer deployment -- each get their own content pushes
+attributed to their own key tag and role in the audit trail, never confused with each
+other or with the KSK that registered both; both ZSK registrations are themselves
+correctly attributed to the KSK that authorized them.</td><td class="mono">TestServeUpdateAuditTrailAttributesEachPushToItsOwnZSK</td><td>OPS-02</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-watch"><span class="secno">3.11</span> WATCH</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-WATCH-01</td><td>A zone's first observation establishes a baseline without alerting, even if already
+failing.</td><td class="mono">TestCheckOnceFirstObservationEstablishesBaselineWithoutAlerting (sazu_watchd)</td><td>WATCH-03, WATCH-05</td></tr>    <tr><td class="tcid">TC-WATCH-02</td><td>An alert fires on OK→failing and failing→OK; none fires while the outcome is unchanged.</td><td class="mono">TestCheckOnceAlertsOnTransitionFromOKToFailing, TestCheckOnceAlertsOnRecovery,
+TestCheckOnceStaysSilentAcrossRepeatedIdenticalOutcomes</td><td>WATCH-01, WATCH-03</td></tr>    <tr><td class="tcid">TC-WATCH-03</td><td>Multiple zones are tracked independently; a transition with no registered contact is
+still logged.</td><td class="mono">TestCheckOnceHandlesMultipleZonesIndependently,
+TestCheckOnceAlertWithNoRegisteredContactStillReported</td><td>WATCH-01, WATCH-02</td></tr>    <tr><td class="tcid">TC-WATCH-04</td><td>A webhook alert posts the expected JSON, reports a non-2xx response, omits the error
+field on recovery, and dispatches to multiple addresses independently.</td><td class="mono">TestNotifierSendWebhookPostsExpectedPayload, TestNotifierSendWebhookReportsNonOKStatus,
+TestNotifierSendRecoveryPayloadCarriesNoError,
+TestNotifierSendDispatchesToMultipleAddressesIndependently</td><td>WATCH-04</td></tr>    <tr><td class="tcid">TC-WATCH-05</td><td>An email alert fails clearly with no SMTP configured or an invalid address; an
+unrecognised scheme is reported as an error.</td><td class="mono">TestNotifierSendEmailWithoutSMTPAddrConfiguredFails,
+TestNotifierSendEmailRejectsInvalidAddress, TestNotifierSendUnknownSchemeReportsError</td><td>WATCH-04</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-persist"><span class="secno">3.12</span> PERSIST</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-PERSIST-01</td><td>A committed update reproduces identically after a full reload (key, SOA, RRset).</td><td class="mono">TestDBCommitUpdateThenLoadAllReproducesOnboarding</td><td>PERSIST-02, PERSIST-03</td></tr>    <tr><td class="tcid">TC-PERSIST-02</td><td>State survives a real close-and-reopen of the database file.</td><td class="mono">TestDBPersistsAcrossReopen</td><td>PERSIST-01, PERSIST-03</td></tr>    <tr><td class="tcid">TC-PERSIST-03</td><td>Registering and retiring a ZSK persist and reload correctly via <code
+class="inline">LoadZoneKeys</code>, independently of the KSK; the lighter-weight <code
+class="inline">LoadKey</code> accessor keeps returning only the KSK.</td><td class="mono">TestDBCommitUpdateAddsAndRetiresZSK</td><td>KEY-08, KEY-09, PERSIST-02</td></tr>    <tr><td class="tcid">TC-PERSIST-04</td><td>A KSK rollover replaces that zone's sole KSK database row rather than leaving the
+superseded key tag behind as a stale second row.</td><td class="mono">TestDBCommitUpdateKSKRolloverReplacesRowNotAdds</td><td>KEY-05, PERSIST-02</td></tr>    <tr><td class="tcid">TC-PERSIST-05</td><td>A database written before the optional-ZSK key-storage schema existed is transparently
+migrated in place on open — every pre-existing key becomes that zone's KSK, and a second
+<code class="inline">Open</code> on an already-migrated database is a safe no-op.</td><td class="mono">TestDBOpenMigratesPreZSKKeysTable</td><td>PERSIST-05</td></tr>    <tr><td class="tcid">TC-PERSIST-06</td><td>A database written before the audit trail's key_tag/key_role columns existed is
+transparently migrated in place on open — the pre-existing row survives with no key
+attribution (there is nothing to attribute it to after the fact), a freshly recorded
+row's key attribution round-trips normally, and a second <code
+class="inline">Open</code> on an already-migrated database is a safe no-op.</td><td class="mono">TestDBOpenMigratesPreKeyAttributionAuditLog</td><td>PERSIST-05</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-client"><span class="secno">3.13</span> CLIENT</h3>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-CLIENT-01</td><td>Every embedded guidance template (onboarding-denied diagnostics, the rotate-key
+tradeoff) executes without error against the data its caller passes it, and renders
+non-empty output.</td><td class="mono">TestGuidanceTemplatesRenderWithoutError</td><td>CLIENT-03, CLIENT-04</td></tr>    <tr><td class="tcid">TC-CLIENT-02</td><td>The no-DS guidance text actually contains the concrete, actionable values a customer
+needs (the DS record's fields, the zone name, a ready-to-run <code
+class="inline">dig</code> command) — not just that it renders.</td><td class="mono">TestNoDSGuidanceIncludesTheDSRecordAndZone</td><td>CLIENT-03</td></tr>    <tr><td class="tcid">TC-CLIENT-03</td><td>The rotate-key decision text actually branches on whether a ZSK already exists — naming
+its key tag when one does, pointing at <code class="inline">add-zsk</code> first when
+none does — rather than printing the same generic advice regardless of zone state.</td><td class="mono">TestRotateKeyChoiceGuidanceReflectsWhetherAZSKExists</td><td>CLIENT-04</td></tr>    <tr><td class="tcid">TC-CLIENT-04</td><td>The small display/parsing helpers the CLI and its guidance depend on — DNSKEY flags to a
+KSK/ZSK label, algorithm number to name, and the <code class="inline">-role</code>
+flag's three cases — are correct.</td><td class="mono">TestKeyTypeLabelAndAlgorithmLabel, TestParseRoleFlag</td><td>CLIENT-01</td></tr>    <tr><td class="tcid">TC-CLIENT-05</td><td>End-to-end through the real CLI entry points: the KSK use case (see TC-KEY-18) and the
+ZSK use case (see TC-KEY-19), each driving the actual <code class="inline">run*</code>
+subcommand functions <code class="inline">main</code> itself dispatches to against a
+real server — not a direct call into the plugin package.</td><td class="mono">TestE2EKSKFullLifecycle, TestE2EZSKFullLifecycle,
+TestE2ERotateKeyZSKRoleRegistersThenRetires</td><td>CLIENT-01, CLIENT-02, CLIENT-04, CLIENT-05</td></tr>    <tr><td class="tcid">TC-CLIENT-06</td><td>The transport decision is TCP regardless of message size by default, opts into UDP only
+when explicitly allowed and the message actually fits, and falls back to TCP with a
+specific, informative warning otherwise.</td><td class="mono">TestChooseNetworkDefaultsToTCPRegardlessOfSize,
+TestChooseNetworkAllowUDPUsesUDPWhenItFits,
+TestChooseNetworkAllowUDPFallsBackToTCPWithWarningWhenTooLarge</td><td>CLIENT-06</td></tr>    <tr><td class="tcid">TC-CLIENT-07</td><td>An ordinary email address converts to the correct RFC&nbsp;1035 §8.13 SOA mailbox
+encoding, including escaping a literal dot in the local part; a malformed address is
+rejected.</td><td class="mono">TestEmailToMboxConvertsOrdinaryAddress, TestEmailToMboxEscapesLiteralDotsInLocalPart,
+TestEmailToMboxRejectsAddressWithoutAt</td><td>CLIENT-07</td></tr>    <tr><td class="tcid">TC-CLIENT-08</td><td>An SOA serial of <code class="inline">"auto"</code> or empty resolves to today's date as
+YYYYMMDD00; an explicit numeric serial is used as given; a non-numeric, non-"auto" value
+is rejected.</td><td class="mono">TestResolveSerialAutoIsTodayAsYYYYMMDD00, TestResolveSerialEmptyIsAlsoAuto,
+TestResolveSerialAcceptsExplicitNumber, TestResolveSerialRejectsGarbage,
+TestDateSerialFormat</td><td>CLIENT-07</td></tr>    <tr><td class="tcid">TC-CLIENT-09</td><td>A YAML zone definition converts to the same (SOA, records) shape a real zone file
+produces — apex/relative/absolute record names resolve correctly, a record's own TTL
+overrides the zone default, and required fields (SOA nameserver, mailbox source, record
+type/value) are enforced — round-tripping correctly through an actual file on disk, and
+<code class="inline">publish-zone</code>'s own loader dispatches to it purely by file
+extension.</td><td class="mono">TestRecordOwnerNameResolvesApexRelativeAndAbsolute,
+TestYamlZoneToRRsBuildsSOAAndRecords, TestYamlZoneToRRsRejectsMissingAdminEmailOrMbox,
+TestYamlZoneToRRsRejectsMissingNS, TestYamlZoneToRRsFallsBackToGivenZoneWhenFileOmitsIt,
+TestYamlZoneToRRsRejectsRecordWithoutTypeOrValue,
+TestLoadYAMLZoneRoundTripsThroughAFile, TestLoadZoneSourceDispatchesOnExtension</td><td>CLIENT-07</td></tr>    <tr><td class="tcid">TC-CLIENT-10</td><td>End-to-end: <code class="inline">init-zone</code> writes a starter YAML definition <code
+class="inline">publish-zone</code> accepts directly (no conversion step) and which onboards
+correctly; it refuses to overwrite an existing file; <code
+class="inline">zone-convert</code>'s generated BIND-format output is itself directly
+pushable.</td><td class="mono">TestE2EInitZoneThenPublishZoneWithYAML, TestE2EInitZoneRefusesToOverwriteExistingFile,
+TestE2EZoneConvertProducesAPushableZoneFile</td><td>CLIENT-07</td></tr>  </table></div>
+  <h3 class="subhead" id="ts-nfr"><span class="secno">3.14</span> NFR</h3>  <p class="sec-abstract">NFR-02 (per-zone, not global, update serialization) is specific enough to warrant its
+own dedicated tests (TC-NFR-01 … 03, below). The other four are each still cited from a
+concrete, already-existing test case rather than a dedicated one of their own, since
+each is a property of the *rest of the suite passing*, not of any single scenario: NFR-01
+(no cgo) by <code class="inline">TestDBUsesPureGoSQLiteDriver</code> directly checking
+which driver is registered, and by every package here still building and testing
+successfully with CGO_ENABLED implicitly unset; NFR-03 (persistence consistency) by the
+PERSIST area's transactional-rollback case (§3.12); NFR-04 (HTTPS/HTTP3 backward
+compatibility) by CARRIER's default-rejects-UPDATE case (§3.8); NFR-05 (safe defaults) by
+<code class="inline">TestParseSazu</code>'s no-options case directly asserting
+<code class="inline">insecureSkipChainValidation</code> defaults to false, plus every
+chain-of-trust/algorithm-floor/rate-limiting case throughout this catalogue passing with
+its respective safeguard left at that default.</p>  <div class="wrap"><table class="spec">
+    <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-NFR-01</td><td>The per-zone lock stripe is a pure, stable function of the (case/FQDN-normalized) zone
+name, and a realistic number of distinct zone names spreads across most of the available
+stripes rather than colliding onto a handful.</td><td class="mono">TestUpdateLockForIsStableForTheSameZone, TestUpdateLockForSpreadsAcrossStripes</td><td>NFR-02</td></tr>    <tr><td class="tcid">TC-NFR-02</td><td>End-to-end: a slow, in-flight first-contact chain-of-trust walk for one zone (a fake,
+delay-injecting validator standing in for the real network round trip) does not delay an
+unrelated, already-authenticated push to a different zone.</td><td class="mono">TestConcurrentUpdatesToDifferentZonesDoNotSerialize</td><td>NFR-02</td></tr>    <tr><td class="tcid">TC-NFR-03</td><td>Switching from one global lock to per-zone stripes does not weaken correctness for the
+*same* zone: 20 concurrent partial pushes to one already-onboarded zone all still
+apply, with none silently lost to a race.</td><td class="mono">TestConcurrentUpdatesToSameZoneStillSerializeCorrectly</td><td>NFR-02</td></tr>    <tr><td class="tcid">TC-NFR-04</td><td>The registered <code class="inline">database/sql</code> driver named
+<code class="inline">sqlite</code> is modernc.org/sqlite's pure-Go implementation; no
+cgo-based alternative (mattn/go-sqlite3, which registers as <code
+class="inline">sqlite3</code>) is registered.</td><td class="mono">TestDBUsesPureGoSQLiteDriver</td><td>NFR-01</td></tr>    <tr><td class="tcid">TC-NFR-05</td><td>A persistence failure mid-transaction leaves the on-disk database exactly as it was
+before the attempt, never partially applied.</td><td class="mono">TestDBCommitUpdateRollsBackOnMalformedOp</td><td>NFR-03</td></tr>    <tr><td class="tcid">TC-NFR-06</td><td>With no opcode explicitly allowed, the HTTPS and HTTP3 servers reject UPDATE exactly as
+they did before this carrier existed -- adding the opt-in changes nothing for a Config
+that never uses it.</td><td class="mono">TestServerHTTPSRejectsUpdate, TestServerHTTPS3RejectsUpdate (core/dnsserver)</td><td>NFR-04</td></tr>    <tr><td class="tcid">TC-NFR-07</td><td>With no Corefile options set, a fresh config's chain-of-trust validation is not
+skipped: <code class="inline">insecure_skip_chain_validation</code> defaults to off.</td><td class="mono">TestParseSazu (no-options case)</td><td>NFR-05</td></tr>  </table></div>
+</section>
+
+<section id="ts-4">
+  <h2><span class="secno">4</span> Automated suite inventory</h2>
+  <p class="sec-abstract">Per-file function counts, for exhaustive cross-reference against the repository. A
+single Go test function may contain several sub-assertions or table-driven cases (the
+Test Report's totals count these individually, per <code class="inml">go test
+-json</code>).</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>File</th><th class="num">Test funcs</th><th>Primary area</th></tr>    <tr><td class="mono">handler_test.go</td><td class="num">29</td><td>End-to-end: onboarding, rollover, quotas, audit, DO/NSEC</td></tr>    <tr><td class="mono">store_test.go</td><td class="num">21</td><td>CONTENT (in-memory zone store)</td></tr>    <tr><td class="mono">prereq_test.go</td><td class="num">11</td><td>CONTENT (RFC 2136 prerequisites/ops)</td></tr>    <tr><td class="mono">nsec_test.go</td><td class="num">10</td><td>CONTENT (NSEC chain)</td></tr>    <tr><td class="mono">nsec3_test.go</td><td class="num">11</td><td>CONTENT (NSEC3 chain)</td></tr>    <tr><td class="mono">chainpatch_test.go</td><td class="num">14</td><td>CONTENT (incremental NSEC/NSEC3 chain patching)</td></tr>    <tr><td class="mono">contact_test.go</td><td class="num">10</td><td>CONTACT</td></tr>    <tr><td class="mono">transport_test.go</td><td class="num">9</td><td>SEC (transport gate)</td></tr>    <tr><td class="mono">sign_test.go</td><td class="num">9</td><td>CONTENT (signing/verification)</td></tr>    <tr><td class="mono">rawcapture_test.go</td><td class="num">8</td><td>AUTH (wire-byte capture)</td></tr>    <tr><td class="mono">db_test.go</td><td class="num">12</td><td>PERSIST / CONTACT / OPS / KEY (ZSK persistence, schema migration)</td></tr>    <tr><td class="mono">chain_test.go</td><td class="num">8</td><td>CHAIN (crypto primitives)</td></tr>    <tr><td class="mono">sig0_test.go</td><td class="num">6</td><td>AUTH</td></tr>    <tr><td class="mono">push_test.go</td><td class="num">6</td><td>CONTENT (zone-file / full push)</td></tr>    <tr><td class="mono">ipratelimit_test.go</td><td class="num">6</td><td>SEC (per-IP limiter)</td></tr>    <tr><td class="mono">setup_test.go</td><td class="num">5</td><td>OPS (Corefile)</td></tr>    <tr><td class="mono">ratelimit_test.go</td><td class="num">5</td><td>SEC (per-zone quota)</td></tr>    <tr><td class="mono">key_test.go</td><td class="num">5</td><td>CUSTODY</td></tr>    <tr><td class="mono">keycrypt_test.go</td><td class="num">5</td><td>CUSTODY (encryption primitive)</td></tr>    <tr><td class="mono">rrtypes_test.go</td><td class="num">3</td><td>CONTENT (RR-type coverage)</td></tr>    <tr><td class="mono">ratelimit_sweep_test.go</td><td class="num">3</td><td>SEC (memory bound)</td></tr>    <tr><td class="mono">https_test.go</td><td class="num">3</td><td>CARRIER</td></tr>    <tr><td class="mono">zsk_test.go</td><td class="num">8</td><td>KEY (ZSK lifecycle, end to end)</td></tr>    <tr><td class="mono">keys_test.go</td><td class="num">9</td><td>KEY (registry, KSK + optional ZSKs)</td></tr>    <tr><td class="mono">cmd/sazuctl/zoneyaml_test.go</td><td class="num">16</td><td>CLIENT (YAML zone format conversion)</td></tr>    <tr><td class="mono">cmd/sazuctl/main_test.go</td><td class="num">8</td><td>CLIENT (guidance templates, transport choice, small helpers)</td></tr>    <tr><td class="mono">cmd/sazuctl/e2e_test.go</td><td class="num">8</td><td>CLIENT (CLI-level, end to end: KSK/ZSK use cases, init-zone/zone-convert)</td></tr>    <tr><td class="mono">cmd/sazuctl/https_test.go</td><td class="num">1</td><td>CARRIER (sendOverHTTP client-side round trip)</td></tr>    <tr><td class="mono">concurrency_test.go</td><td class="num">4</td><td>NFR (per-zone update locking)</td></tr>    <tr><td class="mono">algorithm_test.go</td><td class="num">2</td><td>ALGO</td></tr>    <tr><td class="mono">cmd/sazu_watchd/alert_test.go</td><td class="num">7</td><td>WATCH (notifier)</td></tr>    <tr><td class="mono">cmd/sazu_watchd/watch_test.go</td><td class="num">6</td><td>WATCH (check loop)</td></tr>    <tr><td class="mono">plugin/pkg/doh/doh_test.go</td><td class="num">9</td><td>CARRIER</td></tr>    <tr><td class="mono">plugin/pkg/dnsutil/message_test.go</td><td class="num">3</td><td>CARRIER (baseline)</td></tr>    <tr><td class="mono">core/dnsserver/server_https_test.go, server_https3_test.go (relevant subset)</td><td class="num">4</td><td>CARRIER</td></tr>  </table></div>
+</section>
+
+<section id="ts-5">
+  <h2><span class="secno">5</span> Manual / real-binary verification</h2>
+  <p class="sec-abstract">Performed during development against separately compiled binaries over real sockets; not
+part of the repeatable <code class="inline">go test</code> suite. Recorded in full in
+the companion Test Report §5.</p>
+  <ul>    <li>A real <code class="inline">coredns</code> binary onboarding a zone via a real <code
+class="inline">sazuctl</code> push over UDP/TCP, and serving it correctly afterwards.</li>    <li>A real <code class="inline">coredns</code> HTTPS listener (genuine self-signed TLS
+handshake) accepting a real <code class="inline">sazuctl</code> push in both raw-bytes
+and JSON-envelope form.</li>    <li>A real three-binary chain — <code class="inline">coredns</code>, <code
+class="inline">sazuctl</code>, <code class="inline">sazu-watchd</code> — sharing one
+SQLite file, with <code class="inline">sazu-watchd</code> independently reading the
+zone, key, and contact rows CoreDNS wrote.</li>    <li>The <code class="inline">ip_rate_limit</code> Corefile directive against a real binary,
+reproducing the exact multi-zone scanning scenario TC-SEC-06 automates.</li>  </ul>
+</section>
+
+  </main>
+</div>
+
+<div class="shell layout" hidden id="wrap-report">
+  <aside class="rail" id="rail-report">
+    <div class="railtitle">In this document</div>
+    <nav>
+      <a href="#tr-1">1 Execution summary</a>
+      <a href="#tr-2">2 Results by package</a>
+      <a href="#tr-3">3 Results by requirement area</a>
+      <a href="#tr-4">4 Skipped tests</a>
+      <a href="#tr-5">5 Manual verification log</a>
+      <a href="#tr-6">6 Defects found &amp; resolved in development</a>
+      <a href="#tr-7">7 Conclusion &amp; sign-off</a>
+    </nav>
+  </aside>
+  <main class="doc-panel" id="doc-report">
+
+<section id="tr-1">
+  <h2><span class="secno">1</span> Execution summary</h2>
+  <div class="stats">    <div class="stat"><span class="stat-n">2184</span><span class="stat-l">tests run</span></div>    <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">failures</span></div>    <div class="stat"><span class="stat-n ok">0</span><span class="stat-l">errors</span></div>    <div class="stat"><span class="stat-n">2</span><span class="stat-l">skipped</span></div>    <div class="stat"><span class="stat-n">110</span><span class="stat-l">packages</span></div>  </div>
+  <div class="wrap"><table class="spec">
+    <tr><th>Item</th><th>Value</th></tr>    <tr><td>Command</td><td class="mono">go test -json ./...</td></tr>    <tr><td>Result</td><td><span class="pill ok">PASS</span> (exit code 0)</td></tr>    <tr><td>Commit</td><td class="mono">5101e77e8</td></tr>    <tr><td>Branch</td><td class="mono">feat/sazu</td></tr>    <tr><td>Report format</td><td>JUnit XML, generated from the JSON stream via <code class="inline">go-junit-report
+v2</code></td></tr>  </table></div>  <p>This is the fourth full run performed during this engineering effort. The first, at
+commit <code class="inline">c9abc9c34</code>, recorded 2078 tests; the second, at <code
+class="inline">1c6eacb0e</code>, recorded 2099; the third, at <code
+class="inline">e0583f38c</code>, recorded 2125. The further 26-test increase reflects
+the optional YAML zone format and friendlier transport defaults added to <code
+class="inline">sazuctl</code> (<code class="inline">zoneyaml_test.go</code>, additional
+<code class="inline">main_test.go</code>/<code class="inline">e2e_test.go</code> cases),
+plus the four new tests directly verifying the per-zone update-locking change (<code
+class="inline">concurrency_test.go</code>) documented in §6. All four runs are 0
+failures, 0 errors; this run was additionally repeated once immediately afterward under
+<code class="inline">go test -race</code>, also 0 failures, specifically to confirm the
+locking change introduced no data race.</p>  <p>A fifth, smaller run closed the two genuine test-coverage gaps this dossier's YAML
+migration found and had recorded as honest <code class="inline">coverage_exceptions</code>
+(AUTH-04, CARRIER-06) rather than silently passing validation: <code
+class="inline">TestServeUpdateFailsClosedWhenNoRawBytesCaptured</code> (<code
+class="inline">handler_test.go</code>) drives <code class="inline">serveUpdate</code>
+directly with a response writer for which nothing was ever captured, proving the SERVFAIL
+fail-closed path fires; <code class="inline">TestSendOverHTTPRoundTrips</code> (<code
+class="inline">cmd/sazuctl/https_test.go</code>) runs <code
+class="inline">sazuctl</code>'s own client-side <code class="inline">sendOverHTTP</code>
+against a real <code class="inline">httptest.Server</code>, table-driven over an accepted
+and a denied response. Both requirements now carry a real citation in the Test
+Specification instead of an exception entry. +4 tests (1 in <code
+class="inline">plugin/sazu</code>, 3 in <code class="inline">plugin/sazu/cmd/sazuctl</code>
+once its table-driven subtests are counted individually), 0 failures, 0 errors, no other
+package affected.</p>  <p>A sixth run closed the four remaining <code class="inline">coverage_exceptions</code>
+entries (NFR-01, NFR-03, NFR-04, NFR-05) the same honest way: each now carries a real
+citation in the Test Specification's NFR area (TC-NFR-04 … 07) instead of an exception.
+Three cite an already-existing, already-passing test case that genuinely does verify the
+requirement even though it wasn't previously cited as doing so (<code
+class="inline">TestDBCommitUpdateRollsBackOnMalformedOp</code> for NFR-03, <code
+class="inline">TestServerHTTPSRejectsUpdate</code>/<code
+class="inline">TestServerHTTPS3RejectsUpdate</code> for NFR-04, <code
+class="inline">TestParseSazu</code>'s no-options case for NFR-05); one is a genuinely new
+test, <code class="inline">TestDBUsesPureGoSQLiteDriver</code> (<code
+class="inline">db_test.go</code>), which checks <code
+class="inline">sql.Drivers()</code> directly to confirm modernc.org/sqlite's pure-Go
+driver is what's actually registered under the name <code class="inline">sqlite</code>
+and that no cgo-based alternative is, for NFR-01. <code
+class="inline">coverage_exceptions</code> is now empty: every requirement in this
+document has a real citation. +1 test (<code class="inline">plugin/sazu</code>), 0
+failures, 0 errors.</p>  <p>A seventh run added RFC 5155 NSEC3 (CONTENT-13): an opt-in alternative to plain NSEC
+(CONTENT-07) that additionally hides a zone's owner-name set from enumeration. <code
+class="inline">nsec3.go</code>'s <code class="inline">BuildNSEC3Chain</code> is <code
+class="inline">BuildNSECChain</code>'s RFC 5155 equivalent; <code
+class="inline">BuildFullZonePushNSEC3</code>/<code
+class="inline">BuildFullZonePushSplitNSEC3</code> are new entry points alongside the
+existing plain-NSEC ones (choosing NSEC3 is a push-time decision the signer makes, not a
+server-side toggle), exposed as <code class="inline">sazuctl push-zone</code>'s <code
+class="inline">-nsec3</code>/<code class="inline">-nsec3-iterations</code>/<code
+class="inline">-nsec3-salt</code>/<code class="inline">-nsec3-opt-out</code> flags.
+<code class="inline">ZoneData.NegativeProof</code> branches on whether an NSEC3PARAM
+record is present at the apex, computing the closest encloser and next-closer name from
+the server's own plaintext copy of the zone's name set and hashing exactly the candidates
+it needs a record for, rather than walking the hash ring blind the way an external
+resolver would have to. Covered at three levels: chain construction and hashing
+(nsec3_test.go, unit level), a real onboarded zone serving a genuinely verifying NSEC3
+proof for both NODATA and NXDOMAIN plus the partial-push invalidation behavior
+(nsec3_test.go, end to end against a real <code class="inline">dnsserver.Server</code>),
+and the actual <code class="inline">sazuctl push-zone -nsec3</code> CLI flag proven to
+change what the server serves (cmd/sazuctl/e2e_test.go). +12 tests (11 in <code
+class="inline">plugin/sazu</code>, 1 in <code class="inline">plugin/sazu/cmd/sazuctl</code>),
+0 failures, 0 errors, also re-run clean under <code class="inline">go test -race</code>.</p>  <p>An eighth run closed the "a partial push always invalidates the chain" limitation
+CONTENT-09 previously stated unconditionally (now narrowed to "carrying no valid patch
+of its own"): <code class="inline">plugin/sazu/chainpatch.go</code>'s <code
+class="inline">ComputeChainPatch</code> (CONTENT-14) lets <code
+class="inline">push-update</code> patch an existing NSEC/NSEC3 chain incrementally,
+using a small local cache <code class="inline">sazuctl</code> keeps per zone (written by
+every full push, updated by every successful patch) rather than any network round trip
+to reconstruct chain state. Server side, this reuses RFC 2136 §2.4.2 value-dependent
+prerequisites (already how the SOA-serial staleness guard works) to reject a patch
+outright, with the zone's actual current record attached, if the client's cache has
+drifted (<code class="inline">ERR_STALE_CHAIN</code>) -- covered directly
+(<code class="inline">TestEvaluatePrerequisitesStaleChainRecordReturnsCurrentValue</code>)
+and end to end (<code class="inline">TestServerAcceptsIncrementalChainPatchWithoutPurging</code>,
+<code class="inline">TestServerRejectsStaleChainPatchAndReturnsCurrentValue</code>), plus
+the CLI's automatic cache-driven wiring
+(<code class="inline">TestE2EPushUpdateIncrementalChainMaintenance</code>). This run also
+found and fixed a genuine, previously invisible bug (CONTENT-15) this feature's own
+testing was the first thing to notice: a KSK/ZSK rollover or ZSK add/retire carries an
+apex DNSKEY, same as a full push, so purging "on isFullPush" -- the pre-existing
+condition -- discarded the chain on every key rotation even though rotation touches no
+served content and supplies no replacement chain; fixed by keying the purge decision on
+whether a real SOA (an actual full push) or other real content change is present instead
+(<code class="inline">TestKSKRolloverDoesNotPurgeExistingChain</code>). +13 tests (12 in
+<code class="inline">plugin/sazu</code>, 1 in <code class="inline">plugin/sazu/cmd/sazuctl</code>),
+0 failures, 0 errors, also re-run clean under <code class="inline">go test -race</code>.</p>  <p>A ninth run answered a direct question about the eighth run's coverage -- whether a
+domain in the *middle* of a longer chain (both neighbors ordinary domains, not the
+apex) being updated or removed was actually tested. Checking the existing cases showed
+every one of them touched a domain adjacent to the apex on at least one side, never a
+genuinely interior one -- a real coverage gap, not a bug: two new unit cases
+(<code class="inline">TestComputeChainPatchUpdatesInteriorNameNSEC</code>, <code
+class="inline">TestComputeChainPatchRemovesInteriorNameNSEC</code>) against a five-name
+zone confirmed <code class="inline">ComputeChainPatch</code> already handles this
+correctly -- both of the touched domain's real neighbors are left completely untouched
+either way. Writing the equivalent real end-to-end case
+(<code class="inline">TestServerRemovesInteriorDomainViaIncrementalPatch</code>) caught
+a genuine mistake in the *test's own* hand-built removal message, not the feature: it
+deleted only the removed domain's A record via <code class="inline">RemoveRRset</code>,
+leaving that record's own RRSIG behind as an orphan and making the domain still
+"exist" (NODATA instead of NXDOMAIN) -- fixed by using RFC 2136 §2.5.3's
+<code class="inline">RemoveName</code> (delete every RRset at a name at once) instead,
+the correct form for removing a domain's content entirely. +3 tests, all in
+<code class="inline">plugin/sazu</code>, 0 failures, 0 errors, also re-run clean under
+<code class="inline">go test -race</code>.</p></section>
+
+<section id="tr-2">
+  <h2><span class="secno">2</span> Results by package</h2>
+  <div class="wrap"><table class="spec">
+    <tr><th>Package</th><th class="num">Tests</th><th>Result</th></tr>    <tr><td class="mono">core/dnsserver</td><td class="num">221</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu</td><td class="num">244</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu/cmd/sazuctl</td><td class="num">35</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/pkg/doh</td><td class="num">15</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/sazu/cmd/sazu_watchd</td><td class="num">13</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">plugin/pkg/dnsutil</td><td class="num">10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td class="mono">(remaining 104 pre-existing CoreDNS packages, unmodified by this work)</td><td class="num">1646</td><td><span class="pill ok">PASS</span> (2 skipped)</td></tr>  </table></div>  <p>The counts for the three packages this work modified directly at the core-integration
+layer (<code class="inline">core/dnsserver</code>, <code
+class="inline">plugin/pkg/doh</code>, <code class="inline">plugin/pkg/dnsutil</code>)
+include their full pre-existing test suites plus the additions listed in the companion
+Test Specification §3.8 — every pre-existing CoreDNS behavior in these packages was
+re-verified alongside the new HTTPS/JSON carrier logic, not just the new code paths.
+<code class="inline">plugin/sazu/cmd/sazuctl</code>'s count nearly quadrupled this round
+(8 → 30) purely from the YAML zone format and transport-default test suites — no change
+to how it's exercised, just how much of it now has direct coverage.</p></section>
+
+<section id="tr-3">
+  <h2><span class="secno">3</span> Results by requirement area</h2>
+  <p class="sec-abstract">Cross-referenced against the Test Specification §3. Every functional area's full
+test-case set passed.</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>Area</th><th>Test cases</th><th>Result</th></tr>    <tr><td>AUTH</td><td>TC-AUTH-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CHAIN</td><td>TC-CHAIN-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>KEY</td><td>TC-KEY-01 … 19</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>ALGO</td><td>TC-ALGO-01 … 02</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CONTENT</td><td>TC-CONTENT-01 … 21</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CONTACT</td><td>TC-CONTACT-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CUSTODY</td><td>TC-CUSTODY-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CARRIER</td><td>TC-CARRIER-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>SEC</td><td>TC-SEC-01 … 08</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>OPS</td><td>TC-OPS-01 … 03</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>WATCH</td><td>TC-WATCH-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>PERSIST</td><td>TC-PERSIST-01 … 05</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>CLIENT</td><td>TC-CLIENT-01 … 10</td><td><span class="pill ok">PASS</span></td></tr>    <tr><td>NFR</td><td>TC-NFR-01 … 07</td><td><span class="pill ok">PASS</span></td></tr>  </table></div>  <p>CLIENT requirements are directly and automatically tested, not just exercised
+indirectly: <code class="inline">cmd/sazuctl/e2e_test.go</code> drives the actual <code
+class="inline">run*</code> subcommand entry points (the same code <code
+class="inline">main</code> dispatches to for a real command-line invocation) against a
+real <code class="inline">dnsserver.Server</code>, and <code
+class="inline">main_test.go</code>/<code class="inline">zoneyaml_test.go</code> cover
+the embedded guidance templates, transport-choice logic, and YAML zone conversion
+directly. A small remaining slice — the real self-signed-TLS HTTPS carrier and the real
+three-binary <code class="inline">sazu-watchd</code> chain — is still manual/real-binary
+only; see Test Specification §5 and this report's §5 for that coverage. NFR is a new
+area this revision, verifying NFR-02 (per-zone, not global, update serialization)
+specifically — see Test Specification §3.14 for why the other four non-functional
+requirements don't have their own dedicated test files.</p></section>
+
+<section id="tr-4">
+  <h2><span class="secno">4</span> Skipped tests</h2>
+  <p>Both skips are pre-existing, unrelated to SAZU, and gated behind an explicit opt-in
+guard:</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>Package</th><th>Guard</th><th>Reason</th></tr>    <tr><td class="mono">plugin/shed</td><td class="mono">skipUnlessFloodTest</td><td>Flood/load tests intentionally excluded from ordinary runs; unrelated to the SAZU plugin
+or any package it touches.</td></tr>  </table></div>
+  <p>No SAZU-related test was skipped, disabled, or marked flaky at any point during this
+effort.</p>
+</section>
+
+<section id="tr-5">
+  <h2><span class="secno">5</span> Manual verification log</h2>
+  <p class="sec-abstract">Performed against separately compiled binaries over real sockets during development.
+Each item was verified working at the time the corresponding capability was implemented;
+these are not part of the repeatable <code class="inline">go test</code> suite and were
+not re-run for this report.</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>#</th><th>Scenario</th><th>Outcome</th></tr>    <tr><td>1</td><td>Real <code class="inline">coredns</code> binary onboarding a zone from a real <code
+class="inline">sazuctl push</code> over UDP, then TCP.</td><td><span class="pill ok">Confirmed</span></td></tr>    <tr><td>2</td><td>Real <code class="inline">coredns</code> HTTPS listener with a genuine self-signed TLS
+certificate, accepting a real <code class="inline">sazuctl -target https://…</code> push
+as raw wire bytes.</td><td><span class="pill ok">Confirmed</span></td></tr>    <tr><td>3</td><td>The same HTTPS push repeated with <code class="inline">-json</code>, exercising the JSON
+wire-envelope decode path end to end through real TLS.</td><td><span class="pill ok">Confirmed</span></td></tr>    <tr><td>4</td><td>Three-binary chain — <code class="inline">coredns</code>, <code
+class="inline">sazuctl</code>, <code class="inline">sazu-watchd</code> — sharing one
+SQLite file; <code class="inline">sazu-watchd</code> independently reads back the zone,
+key, and contact rows CoreDNS committed.</td><td><span class="pill ok">Confirmed</span></td></tr>    <tr><td>5</td><td><code class="inline">ip_rate_limit</code> Corefile directive against a real binary:
+three distinct never-onboarded zones scanned from one source address onboard normally, a
+fourth is refused on address volume alone.</td><td><span class="pill ok">Confirmed</span></td></tr>  </table></div>
+</section>
+
+<section id="tr-6">
+  <h2><span class="secno">6</span> Defects found and resolved during development</h2>
+  <p class="sec-abstract">An honest retrospective. Every item below was found by the assistant's own testing
+discipline — running the full suite after each change — not reported by an external
+user, and every item was fixed before this report was produced.</p>
+  <div class="wrap"><table class="spec">
+    <tr><th>#</th><th>Defect</th><th>Impact if shipped</th><th>Resolution</th></tr>    <tr><td>1</td><td>An early refactor of the key-rollover flow in <code class="inline">serveUpdate</code>
+accidentally skipped SIG(0) verification entirely for first-contact pushes.</td><td>Critical — would have allowed unauthenticated zone onboarding.</td><td>Caught by full-suite failures; candidate-resolution flow restructured; regression
+covered by the existing AUTH/CHAIN test set.</td></tr>    <tr><td>2</td><td>Global per-source-IP rate limiting did not exist; a scanning attacker could probe
+unlimited distinct zone names from one address, since each zone's own quota is
+independent.</td><td>High — resource exhaustion / zone-discovery scanning at will.</td><td><code class="inline">IPRateLimiter</code> (§SEC-02) added, checked first in <code
+class="inline">serveUpdate</code> ahead of any chain-of-trust work.</td></tr>    <tr><td>3</td><td>The new per-IP limiter (and the pre-existing per-zone limiter) keyed on data reachable
+over connectionless UDP, where the source address can be spoofed without completing a
+handshake.</td><td>High — an attacker could exhaust a victim address's quota, or attempt to defeat the
+limiter's own accounting, by spoofing UDP source addresses; undermines SEC-02's purpose.</td><td><code class="inline">connectionOriented</code> gate (§SEC-01) added: first-contact and
+rollover attempts are refused outright over any non-connection-oriented transport (plain
+UDP), forcing an attacker to complete a real TCP/TLS/QUIC handshake first.</td></tr>    <tr><td>4</td><td>Both sliding-window rate limiters accumulated one map entry per distinct key (zone name
+or source address) forever, with no eviction.</td><td>Medium — unbounded memory growth under sustained scanning or churn, a slow
+denial-of-service against the server process itself.</td><td><code class="inline">sweepIfDue</code> (§SEC-04) added: both limiters garbage-collect
+entries older than one window, at most once per window, bounding memory to recently
+active keys.</td></tr>    <tr><td>5</td><td>Every rejected update attempt, including the two rejection reasons above, was written to
+the audit-trail database — an attacker who could trigger cheap rejections (a malformed
+transport or exhausted quota) could grow the audit table without bound.</td><td>Medium — unbounded disk growth, independent of the memory fix in item 4.</td><td>Transport-gate and rate-limit rejections (§SEC-05) are explicitly excluded from
+audit-trail recording; genuine authentication/chain-of-trust failures remain fully
+audited, since those require real per-attempt cryptographic work by the attacker and are
+inherently self-limiting.</td></tr>    <tr><td>6</td><td>The first hand-written test for the UDP-transport gate used <code
+class="inline">BuildFullZonePush</code> (SOA + NSEC + RRSIGs), producing a message over
+512 bytes and tripping RFC&nbsp;1035's UDP truncation before ever reaching the new gate
+— a false pass for the wrong reason.</td><td>None (test-authoring issue, caught before merge).</td><td>Discovered that <code class="inline">containsAPEXSOA</code> is checked <em>after</em>
+the chain-of-trust walk, meaning the smallest real attack packet needs only a DNSKEY-add
++ SIG(0). Rewrote using a new <code class="inline">minimalFirstContactWire</code> helper
+matching that minimal, realistic shape — a more accurate test of the actual threat.</td></tr>    <tr><td>7</td><td><code class="inline">sazuctl</code>'s UDP-vs-TCP transport choice was purely
+message-size-based; a small <code class="inline">rotate-key -role ksk</code> push — a
+real KSK rollover, which SEC-01 requires a connection-oriented transport for regardless
+of size — went out over plain UDP and was correctly, but unhelpfully, refused (<code
+class="inline">ERR_TRANSPORT_NOT_ALLOWED</code>) by a fully compliant server.</td><td>Low (usability/correctness for a real operator workflow, not a security gap — the
+server-side gate this ran into is exactly what SEC-01 requires).</td><td>Found by the new CLI-level end-to-end tests (<code
+class="inline">cmd/sazuctl/e2e_test.go</code>), which exercise the real subcommand entry
+points end to end rather than sending directly over TCP the way earlier in-process tests
+did. Fixed first with a size-conditional <code class="inline">forceTCP</code> override
+for first-contact/rollover pushes specifically, then generalized: reconsidered on
+request, TCP became the unconditional default for every push (<code
+class="inline">chooseNetwork</code>, CLIENT-06), with UDP an explicit, per-command
+opt-in that itself still falls back to TCP with a warning if the message wouldn't fit.</td></tr>    <tr><td>8</td><td>A new CLI-level end-to-end test's own server-startup helper bound a UDP port, then bound
+TCP to that exact same port number — a narrow TOCTOU race that, under load from the rest
+of the suite running concurrently, occasionally lost that port to something else in the
+gap between the two calls, failing the test with a bind error unrelated to anything it
+was actually testing.</td><td>None (test-infrastructure flakiness, not a product defect — confirmed by two consecutive
+clean full-suite runs after the fix).</td><td>Added a small bounded retry (fresh UDP port, retry the TCP bind) to the affected helper
+(<code class="inline">cmd/sazuctl/e2e_test.go</code>).</td></tr>    <tr><td>9</td><td>The identical UDP/TCP port-binding race (item 8) recurred in a second, older test helper
+-- <code class="inline">plugin/sazu/handler_test.go</code>'s <code
+class="inline">serveThroughRealServer</code>, used throughout this package's own test
+suite -- surfaced by a real failure under <code class="inline">go test -race</code>
+while verifying the per-zone update-locking change (NFR-02), which runs noticeably more
+concurrent server instances than the suite did before.</td><td>None (test-infrastructure flakiness, not a product defect -- confirmed by two
+consecutive clean <code class="inline">-race</code> runs after the fix).</td><td>Applied the identical bounded-retry fix from item 8 to this second helper.</td></tr>    <tr><td>10</td><td>A first draft of the concurrency test proving one zone's slow chain-of-trust walk
+doesn't block another zone's push sent the slow zone's request from a background
+goroutine and called <code class="inline">t.Fatalf</code> there on failure -- which,
+called from any goroutine other than the one running the test function, exits only that
+goroutine (via <code class="inline">runtime.Goexit</code>) without ever reaching the
+line that would have sent a result on the channel the main goroutine was unconditionally
+waiting on, hanging the whole test run rather than failing it.</td><td>None (test-authoring issue, caught before merge -- the whole `go test` invocation hung
+until manually killed).</td><td>Rewrote the background call to report failure through a plain error return instead of
+<code class="inline">t.Fatalf</code>, and wrapped the final channel receive in a <code
+class="inline">select</code> with its own timeout, so a similar mistake fails the test
+cleanly instead of hanging it.</td></tr>  </table></div>
+</section>
+
+<section id="tr-7">
+  <h2><span class="secno">7</span> Conclusion and sign-off</h2>  <p>All 87 requirements in the companion Requirements Specification are traced to at least
+one passing automated test case, or to a manually-verified real-binary scenario for the
+small remaining subset (the real self-signed-TLS HTTPS carrier and the real three-binary
+<code class="inline">sazu-watchd</code> chain) that automated coverage reaches only
+indirectly. The full repository test suite — 2184 tests across 110 packages, including
+every package this work touched directly and every pre-existing package alongside it —
+passes with 0 failures and 0 errors at commit <code class="inline">5101e77e8</code> on
+<code class="inline">feat/sazu</code>, confirmed by two consecutive clean runs (and,
+specifically for the per-zone locking change, two further clean runs under <code
+class="inline">go test -race</code>). Ten real defects were found and resolved during
+development through the assistant's own iterative testing discipline, each documented in
+§6 with its impact and resolution.</p>  <p>On this evidence, the SAZU implementation in this branch is assessed as meeting its
+Requirements Specification and ready for external review.</p>  <div class="wrap"><table class="spec">
+    <tr><th>Field</th><th>Value</th></tr>    <tr><td>Prepared by</td><td>Claude Sonnet 5, Claude Code</td></tr>    <tr><td>Date</td><td>2026-09-15</td></tr>    <tr><td>Machine-readable companion</td><td>JUnit XML test report (delivered separately)</td></tr>  </table></div>
+</section>
+
+  </main>
+</div>
+
+<footer class="docfoot">SAZU Verification Dossier &middot; generated from <code class="inline">feat/sazu @ 5101e77e8</code> &middot; a private working document, not an RFC submission.</footer>
+
+<script>
+(function () {
+  var tabs = document.querySelectorAll('.doc-tabs button');
+  var wraps = { req: document.querySelector('.shell.layout'), test: document.getElementById('wrap-test'), report: document.getElementById('wrap-report') };
+  // Scroll to just above the sticky tab bar itself, not to a section
+  // inside the document that's just been un-hidden. .doc-tabs's
+  // offsetTop is a fixed layout position -- it doesn't move when the
+  // content below it is hidden/shown -- so this needs no deferral and
+  // no per-document target list, and it's what the original
+  // hand-maintained dossier did before this generator existed.
+  tabs.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      tabs.forEach(function (b) { b.setAttribute('aria-selected', b === btn ? 'true' : 'false'); });
+      Object.keys(wraps).forEach(function (k) { wraps[k].hidden = (k !== btn.dataset.doc); });
+      window.scrollTo({ top: document.querySelector('.doc-tabs').offsetTop - 8, behavior: 'instant' in window ? 'instant' : 'auto' });
+    });
+  });
+})();
+</script>
