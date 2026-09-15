@@ -1,7 +1,6 @@
 package sazu
 
 import (
-	"crypto/ed25519"
 	"net"
 	"strings"
 	"testing"
@@ -189,10 +188,8 @@ func TestCoveringHashFindsPredecessorAndWraps(t *testing.T) {
 }
 
 // onboardExampleOrgNSEC3 mirrors onboardExampleOrg (handler_test.go) but
-// pushes with BuildFullZonePushNSEC3 instead of plain NSEC. Returns the
-// private key too (unlike onboardExampleOrg) since chain-patch tests
-// need to sign a follow-up partial push with it.
-func onboardExampleOrgNSEC3(t *testing.T, addr string, opts NSEC3Options) (*dns.DNSKEY, ed25519.PrivateKey) {
+// pushes with BuildFullZonePushNSEC3 instead of plain NSEC.
+func onboardExampleOrgNSEC3(t *testing.T, addr string, opts NSEC3Options) *dns.DNSKEY {
 	t.Helper()
 	key, priv, err := GenerateEd25519Key("example.org.", true)
 	if err != nil {
@@ -212,7 +209,7 @@ func onboardExampleOrgNSEC3(t *testing.T, addr string, opts NSEC3Options) (*dns.
 	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	return key, priv
+	return key
 }
 
 func splitNSEC3AndRRSIGs(rrs []dns.RR) ([]*dns.NSEC3, map[string]*dns.RRSIG) {
@@ -238,7 +235,7 @@ func splitNSEC3AndRRSIGs(rrs []dns.RR) ([]*dns.NSEC3, map[string]*dns.RRSIG) {
 func TestNODATACarriesValidNSEC3Proof(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
-	key, _ := onboardExampleOrgNSEC3(t, addr, NSEC3Options{})
+	key := onboardExampleOrgNSEC3(t, addr, NSEC3Options{})
 
 	resp := queryDO(t, addr, "www.example.org.", dns.TypeTXT)
 	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
@@ -268,7 +265,7 @@ func TestNODATACarriesValidNSEC3Proof(t *testing.T) {
 func TestNXDOMAINCarriesValidNSEC3Proof(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
-	key, _ := onboardExampleOrgNSEC3(t, addr, NSEC3Options{})
+	key := onboardExampleOrgNSEC3(t, addr, NSEC3Options{})
 
 	resp := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
 	if resp.Rcode != dns.RcodeNameError {

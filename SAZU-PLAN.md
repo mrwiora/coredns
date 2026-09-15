@@ -634,18 +634,21 @@ pushes alike.
   contact) -- the zone already has real content from before, and a
   rollover may legitimately carry nothing but the new key itself.
 
-- **Optional KSK/ZSK split.** §9.1's single-key model (one Ed25519 key
-  doing both SIG(0) authentication and DNSSEC signing) remains the
-  default -- a zone that never registers a ZSK behaves exactly as SAZU
-  always has, byte-for-byte, with nothing new to configure or reason
-  about. What changed: a customer MAY now additionally register one or
-  more optional ZSKs on top of their zone's mandatory KSK, specifically
-  to avoid a registrar DS update every time they want to re-sign content
-  with a fresh key. The KSK itself keeps its one job unchanged and
-  unavoidable: it is the only key ever anchored to a parent DS record,
-  so rotating *it* still requires exactly what it always has (publish a
-  new DS, wait for propagation) -- there was never a way around that,
-  and this work doesn't try to remove it.
+- **KSK/ZSK split.** §9.1's single-key model (one Ed25519 key doing both
+  SIG(0) authentication and DNSSEC signing) remains the default at the
+  `KeyRegistry` level -- nothing requires a zone to ever have a ZSK.
+  What changed: a customer MAY register one or more ZSKs on top of
+  their zone's mandatory KSK, specifically to avoid a registrar DS
+  update every time they want to re-sign content with a fresh key. (At
+  the time this was written, `sazuctl` only ever registered a ZSK if a
+  customer separately chose to, later than first contact -- see
+  "Decision: no differential/partial update command," above, for why
+  that's since changed to `publish-trust` always creating both
+  together.) The KSK itself keeps its one job unchanged and unavoidable:
+  it is the only key ever anchored to a parent DS record, so rotating
+  *it* still requires exactly what it always has (publish a new DS,
+  wait for propagation) -- there was never a way around that, and this
+  work doesn't try to remove it.
 
   `KeyRegistry` (`keys.go`) changed from a single pinned key per zone to
   a `ZoneKeys{KSK, ZSKs}` set: exactly one `ManagedKey` role `RoleKSK`

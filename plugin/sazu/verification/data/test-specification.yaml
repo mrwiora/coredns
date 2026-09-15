@@ -166,8 +166,9 @@ areas:
     verifies: CHAIN-04, CHAIN-05 (negative)
   - id: TC-CHAIN-08
     objective: |-
-      First contact without an apex SOA is rejected without pinning a key.
-    functions: TestOnboardWithoutSOAIsRejected
+      First contact without an apex SOA (the publish-trust shape: a KSK and its paired ZSK,
+      no zone content at all) is accepted, and the candidate KSK pinned.
+    functions: TestOnboardWithoutSOAIsAccepted
     verifies: CHAIN-06
   - id: TC-CHAIN-09
     objective: |-
@@ -264,7 +265,7 @@ areas:
     verifies: KEY-01, KEY-11
   - id: TC-KEY-13
     objective: |-
-      Content signed by a ZSK (rather than the KSK) still verifies under §4's Level-2
+      Content signed by a ZSK (rather than the KSK) still verifies under §4's mandatory
       content-signature check.
     functions: |-
       TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs
@@ -294,18 +295,21 @@ areas:
   - id: TC-KEY-18
     objective: |-
       End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
-      against a real server: the full KSK use case — onboarding, a differential push, and a
-      full KSK rollover, with the superseded key rejected and the new one accepted afterward.
+      against a real server: the full KSK use case — <code class="inline">publish-trust</code>
+      onboarding (KSK+ZSK generated together), a <code class="inline">publish-zone</code>
+      content re-push, and a full KSK rollover (<code class="inline">rotate-key -role
+      ksk</code>), with the ZSK still authenticating content afterward.
     functions: TestE2EKSKFullLifecycle
     verifies: |-
       KEY-01, KEY-02, KEY-03, KEY-04, KEY-05, KEY-06, CLIENT-04, CLIENT-05
   - id: TC-KEY-19
     objective: |-
       End-to-end, through the real <code class="inline">sazuctl</code> CLI entry points
-      against a real server: the full ZSK use case — registration, ZSK-only authentication,
-      KSK-authenticated-but-ZSK-signed content, retirement, the retired key rejected
-      afterward, and the <code class="inline">rotate-key -role zsk</code> register-then-retire
-      convenience path.
+      against a real server: the full ZSK use case — a <code class="inline">publish-zone</code>
+      content push authenticated and signed entirely by the ZSK <code
+      class="inline">publish-trust</code> registered, retirement, the retired key rejected
+      afterward, a freshly registered replacement working again, and the <code
+      class="inline">rotate-key -role zsk</code> register-then-retire convenience path.
     functions: |-
       TestE2EZSKFullLifecycle, TestE2ERotateKeyZSKRoleRegistersThenRetires
     verifies: KEY-06, KEY-08, KEY-09, KEY-10, KEY-11, CLIENT-04
@@ -926,7 +930,7 @@ areas:
       class="inline">zone-convert</code>'s generated BIND-format output is itself directly
       pushable.
     functions: |-
-      TestE2EInitZoneThenPushZoneWithYAML, TestE2EInitZoneRefusesToOverwriteExistingFile,
+      TestE2EInitZoneThenPublishZoneWithYAML, TestE2EInitZoneRefusesToOverwriteExistingFile,
       TestE2EZoneConvertProducesAPushableZoneFile
     verifies: CLIENT-07
 - id: nfr

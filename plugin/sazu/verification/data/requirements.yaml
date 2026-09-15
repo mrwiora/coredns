@@ -149,8 +149,11 @@ areas:
     source: §12
   - id: CHAIN-06
     text: |-
-      A first-contact UPDATE that does not also establish a real SOA at the apex SHALL be
-      rejected (FORMERR) without pinning any key.
+      A first-contact UPDATE SHALL be accepted, and its candidate key pinned, whether or not
+      it also establishes a real SOA at the apex: <code class="inline">sazuctl
+      publish-trust</code> deliberately sends none, establishing the KSK/ZSK trust
+      relationship as a step separate from any zone content, which a subsequent <code
+      class="inline">publish-zone</code> push supplies.
     source: Engineering decision
   - id: CHAIN-07
     text: |-
@@ -191,10 +194,13 @@ areas:
   - id: KEY-06
     text: |-
       Every onboarded zone SHALL have exactly one KSK, established at first contact and
-      anchored to a parent DS record (CHAIN-03); a zone MAY additionally register zero or more
-      optional ZSKs on top of it. The single-key model (one Ed25519 key doing both SIG(0)
-      authentication and DNSSEC signing) remains fully supported as the default for a zone
-      that never registers a ZSK.
+      anchored to a parent DS record (CHAIN-03). <code class="inline">sazuctl
+      publish-trust</code> SHALL always generate and present a ZSK together with the KSK at
+      first contact, so a zone MAY additionally register further ZSKs on top of that first
+      one. The single-key model (one Ed25519 key doing both SIG(0) authentication and DNSSEC
+      signing) remains a valid state at the <code class="inline">KeyRegistry</code> level for
+      a zone with no ZSK, but is no longer what any onboarding path <code
+      class="inline">sazuctl</code> offers produces by default.
     source: §9.1 (design decision, extended)
   - id: KEY-07
     text: |-
@@ -218,7 +224,7 @@ areas:
   - id: KEY-10
     text: |-
       Content signed by any key currently valid for the zone — the KSK or any registered ZSK —
-      SHALL verify under §4's Level-2 content-signature check.
+      SHALL verify under §4's mandatory content-signature check.
     source: CONTENT-04/05 &middot; Engineering decision
   - id: KEY-11
     text: |-

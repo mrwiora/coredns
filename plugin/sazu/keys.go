@@ -8,24 +8,26 @@ import (
 	"github.com/miekg/dns"
 )
 
-// KeyRole distinguishes a zone's key-signing key (KSK) from an optional
+// KeyRole distinguishes a zone's key-signing key (KSK) from its
 // zone-signing key (ZSK). Every onboarded zone has exactly one KSK --
 // it is what the §10.2 chain-of-trust walk anchors to a parent DS
 // record, and there is no other way a key becomes trusted for a zone in
-// the first place, so SAZU never supports a ZSK-only zone. A ZSK is a
-// purely optional addition a customer may register later (see AddZSK):
-// it is never DS-anchored itself, and is trusted transitively -- solely
-// because an already-trusted key's SIG(0) authenticated the push that
-// introduced it. See SAZU-PLAN.md's KSK/ZSK section for why this split
-// exists at all: §9.1's single-key model (one Ed25519 key doing both
-// SIG(0) authentication and DNSSEC signing) remains the default and
-// fully supported for a zone that never registers a ZSK, but every
-// rotation of that lone key is necessarily a KSK rotation, which means
-// a registrar DS update every time. A ZSK exists so a customer who signs
-// zone content often can rotate that key on their own schedule, with no
-// registrar involvement and no outbound chain-of-trust network walk on
-// this server's side -- at the cost of the DS-anchored guarantee a KSK
-// carries, which is exactly why a ZSK is optional and a KSK is not.
+// the first place, so SAZU never supports a ZSK-only zone. `sazuctl
+// publish-trust` always generates a ZSK together with the KSK at
+// onboarding, precisely so an automation box running routine
+// `publish-zone` pushes never needs to hold the KSK at all -- see
+// SAZU-PLAN.md's KSK/ZSK section, and plugin/sazu/README.md's "Keys and
+// validity: quick reference", for why this split exists. A ZSK is never
+// DS-anchored itself; it's trusted transitively, solely because an
+// already-trusted key's SIG(0) authenticated the push that introduced
+// it, which is also what lets a customer register an *additional* ZSK,
+// or replace one, at any point (AddZSK/RetireZSK) with no registrar
+// interaction and no outbound chain-of-trust network walk. Nothing in
+// KeyRegistry itself requires a zone to ever have one -- a KSK-only
+// zone is still a mechanically valid state (single-key model: the same
+// key does SIG(0) authentication and all DNSSEC signing) -- but every
+// onboarding path `sazuctl` actually offers today establishes both
+// together from the start.
 type KeyRole int
 
 const (

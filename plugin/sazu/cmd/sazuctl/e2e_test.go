@@ -365,13 +365,13 @@ func TestE2ERotateKeyZSKRoleRegistersThenRetires(t *testing.T) {
 	}
 }
 
-// TestE2EInitZoneThenPushZoneWithYAML exercises the "how do I even get
+// TestE2EInitZoneThenPublishZoneWithYAML exercises the "how do I even get
 // a zone file to push" onboarding path end to end: init-zone writes a
 // starter YAML zone definition, and publish-zone accepts it directly as
 // -zonefile (no separate conversion step) -- proving the YAML front end
 // (zoneyaml.go) produces real, servable zone content through the actual
 // CLI commands a customer would run.
-func TestE2EInitZoneThenPushZoneWithYAML(t *testing.T) {
+func TestE2EInitZoneThenPublishZoneWithYAML(t *testing.T) {
 	addr := startTestServer(t)
 	zone := "e2e-yaml-zone.example."
 	dir := t.TempDir()

@@ -299,12 +299,12 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	var sigErr error
 	if alreadyPinned {
 		// Ordinary push: try every key currently trusted to authenticate
-		// a transaction for this zone -- the KSK, plus any optional ZSK
-		// registered with CanAuthenticateTx (see keys.go's KeyRole doc
-		// comment for what that split is for). The overwhelming common
-		// case is exactly one authenticator (a zone that never
-		// registered a ZSK), so this is a single VerifySIG0 call just
-		// like before that feature existed.
+		// a transaction for this zone -- the KSK, plus any registered
+		// ZSK with CanAuthenticateTx (see keys.go's KeyRole doc comment
+		// for what that split is for). A zone onboarded via publish-trust
+		// always has at least the KSK and its paired ZSK here; a routine
+		// publish-zone push only ever verifies against the ZSK, so this
+		// loop's second iteration is the common case, not a fallback.
 		for _, auth := range zk.Authenticators() {
 			if err := VerifySIG0(raw, auth.DNSKEY); err == nil {
 				candidate, sigErr = auth.DNSKEY, nil
@@ -744,12 +744,15 @@ func findCandidateKey(updateOps []dns.RR, zone string) (*dns.DNSKEY, error) {
 
 // findNewZSKCandidate looks for exactly one Add-shaped, ZSK-shaped (not
 // SEP-flagged) DNSKEY at zone's apex among updateOps that isn't already
-// registered in zk -- the shape an ordinary, already-authenticated push
-// uses to register a new optional ZSK (see keys.go's KeyRole doc
+// registered in zk -- the shape both an ordinary, already-authenticated
+// push (add-zsk, or rotate-key -role zsk) and a first-contact push
+// (sazuctl publish-trust, which always presents a KSK and its paired
+// ZSK together) use to register a new ZSK (see keys.go's KeyRole doc
 // comment). zk may be nil (treated as "no zone keys yet," so nothing is
-// ever already registered); returns ok with a nil key, no error, when
-// no such candidate is present, which is the overwhelmingly common case
-// for a push that isn't about key management at all.
+// ever already registered) -- which is exactly the first-contact case.
+// Returns ok with a nil key, no error, when no such candidate is
+// present, which is the overwhelmingly common case for a push that
+// isn't about key management at all.
 func findNewZSKCandidate(updateOps []dns.RR, zone string, zk *ZoneKeys) (*dns.DNSKEY, error) {
 	zoneLower := strings.ToLower(dns.Fqdn(zone))
 	var found *dns.DNSKEY
@@ -891,7 +894,7 @@ const statusErrSigInvalid = "ERR_SIG_INVALID"
 const statusErrWeakAlgorithm = "ERR_WEAK_ALGORITHM"
 
 // statusErrQuotaExceeded is another of §12's status codes: this zone has
-// already used up its full-zone or differential push quota for the
+// already used up its content-push or key-management-push quota for the
 // current rolling 24h window -- see RateLimiter and containsAPEXSOA.
 // §12 also names a distinct ERR_RATE_LIMITED code (see
 // statusErrRateLimited) -- that one is a separate, faster-timescale,

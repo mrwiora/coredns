@@ -40,9 +40,9 @@ func SignZoneContent(rrs []dns.RR, dnskeyRR *dns.DNSKEY, signer crypto.Signer, i
 // reproduces SignZoneContent's original behavior exactly (byte-for-byte:
 // it's the same code path with the same key on both sides), which is
 // what SignZoneContent itself now does. rrs need not actually contain a
-// DNSKEY RRset -- an ordinary differential push signed entirely with the
-// active ZSK, for instance, never does -- in which case kskSigner is
-// simply never used.
+// DNSKEY RRset -- an ordinary publish-zone content push, signed entirely
+// with the active ZSK, never does -- in which case kskSigner is simply
+// never used.
 func SignZoneContentSplit(rrs []dns.RR, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY, zskSigner crypto.Signer, inception, expiration time.Time) ([]dns.RR, error) {
 	groups := groupRRsets(rrs)
 	out := make([]dns.RR, 0, len(rrs)+len(groups))

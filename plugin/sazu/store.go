@@ -245,17 +245,23 @@ func (z *ZoneData) deleteRRLocked(rr dns.RR) {
 
 // PurgeNSEC removes every stored NSEC or NSEC3(PARAM) record (and their
 // covering RRSIGs) across the whole zone -- whichever scheme, if either,
-// the zone was last pushed with. Called before applying any update (see
-// handler.go's serveUpdate): SAZU's split-signing model means only a
-// freshly, completely recomputed chain -- from a full push, the only
-// kind that sees the zone's entire name set at once -- can be trusted as
-// correct, so any existing chain is invalidated up front rather than
-// risked going stale. Serving no negative-existence proof is safe;
-// serving a stale one that contradicts what the zone actually contains
-// now is not. A full push's own NSEC or NSEC3 records (see
-// BuildNSECChain / BuildNSEC3Chain) repopulate the chain in the same
-// update, immediately afterward; a partial push that doesn't include any
-// leaves the zone with none until the next full push does.
+// the zone was last pushed with. Called from handler.go's serveUpdate
+// for an update that changes chain-relevant content without being a
+// full content push (see changesChainRelevantContent) -- nothing
+// sazuctl itself builds reaches this today (publish-zone is the only
+// command that ever changes ordinary content, and it's always a full
+// push handled by PurgeContentAndApply instead), but the protocol
+// doesn't forbid a different, arbitrary SIG(0)-signed client from
+// sending one. SAZU's split-signing model means only a freshly,
+// completely recomputed chain -- from a full push, the only kind that
+// sees the zone's entire name set at once -- can be trusted as correct,
+// so any existing chain is invalidated up front rather than risked
+// going stale. Serving no negative-existence proof is safe; serving a
+// stale one that contradicts what the zone actually contains now is
+// not. A subsequent full push's own NSEC or NSEC3 records (see
+// BuildNSECChain / BuildNSEC3Chain) repopulate the chain; a push that
+// changed chain-relevant content without supplying a replacement chain
+// leaves the zone with none until then.
 func (z *ZoneData) PurgeNSEC() {
 	z.mu.Lock()
 	defer z.mu.Unlock()
@@ -431,9 +437,10 @@ func (z *ZoneData) ownerNames() []string {
 //
 // Returns nil if the zone has no chain at all -- either nothing was ever
 // pushed with one (an older push, from before this feature), or a
-// partial push invalidated it (see PurgeNSEC) and no full push has
-// repopulated it since. A negative response simply carries no
-// authenticated denial in that case, the same as before this existed.
+// non-full-push update changed chain-relevant content and invalidated
+// it (see PurgeNSEC) with no full push having repopulated it since. A
+// negative response simply carries no authenticated denial in that
+// case, the same as before this existed.
 func (z *ZoneData) NegativeProof(qname string, nameExists bool) []dns.RR {
 	qname = strings.ToLower(dns.Fqdn(qname))
 
