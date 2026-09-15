@@ -31,12 +31,6 @@ func decommissionOwnerName(zone string) string {
 	return decommissionOwnerPrefix + normalizeZone(zone)
 }
 
-// DecommissionOwnerName returns the reserved owner name a client
-// addresses a decommission directive to for zone. Exported so a client
-// can construct the op itself -- see BuildDecommissionOp for the common
-// case.
-func DecommissionOwnerName(zone string) string { return decommissionOwnerName(zone) }
-
 // BuildDecommissionOp builds the TXT record a client sends, as an
 // ordinary Insert-shaped RFC 2136 Add op, to request zone's removal. Like
 // BuildContactOp, this is deliberately NOT run through SignZoneContent: a

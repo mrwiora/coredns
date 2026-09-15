@@ -64,7 +64,7 @@ func TestSplitDecommissionOpsRejectsMixingWithOtherOps(t *testing.T) {
 func TestSplitDecommissionOpsDropsStrayRRSIG(t *testing.T) {
 	op := BuildDecommissionOp("example.org.")
 	sig := &dns.RRSIG{
-		Hdr:         dns.RR_Header{Name: DecommissionOwnerName("example.org."), Rrtype: dns.TypeRRSIG, Class: dns.ClassINET},
+		Hdr:         dns.RR_Header{Name: decommissionOwnerName("example.org."), Rrtype: dns.TypeRRSIG, Class: dns.ClassINET},
 		TypeCovered: dns.TypeTXT,
 	}
 	rest, decommission, err := splitDecommissionOps(asAddOps(t, []dns.RR{op, sig}), "example.org.")
