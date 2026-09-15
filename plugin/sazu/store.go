@@ -593,6 +593,19 @@ func (s *Store) GetOrCreate(origin string) *ZoneData {
 	return z
 }
 
+// DeleteZone removes origin entirely -- every RRset, the SOA, all of
+// it -- so a subsequent Get/FindZoneForName sees no trace of it, the same
+// as a zone this Store has never heard of. Called only for a decommission
+// directive (decommission.go); nothing else in this package ever fully
+// removes a zone (an ordinary RFC 2136 delete-shaped op always protects
+// the apex SOA, deliberately -- see deleteRRsetLocked/deleteNameLocked).
+func (s *Store) DeleteZone(origin string) {
+	origin = dns.Fqdn(strings.ToLower(origin))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.zones, origin)
+}
+
 // FindZoneForName returns the most specific onboarded zone name falls
 // under, if any -- a longest-suffix match over every zone this Store
 // currently holds, independent of any static configuration. This is what

@@ -208,6 +208,18 @@ func (r *KeyRegistry) RetireZSK(zone string, keytag uint16) bool {
 	return false
 }
 
+// DeleteZone removes zone's entire key set -- KSK and every ZSK -- so a
+// subsequent Get sees no trace of it, the same as a zone this registry
+// has never heard of. Called only for a decommission directive
+// (decommission.go); nothing else in this package ever fully removes a
+// zone's KSK (a rollover replaces it via PinKSK, never removes it
+// outright).
+func (r *KeyRegistry) DeleteZone(zone string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.zones, normalizeZone(zone))
+}
+
 func normalizeZone(zone string) string {
 	return strings.ToLower(dns.Fqdn(zone))
 }

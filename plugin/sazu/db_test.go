@@ -648,3 +648,62 @@ func TestDBOpenMigratesPreZSKKeysTable(t *testing.T) {
 		t.Fatalf("expected the migrated data to still be there after a second Open: ok=%v err=%v zk=%+v", ok, err, zk2)
 	}
 }
+
+// TestDBDeleteZoneRemovesEverythingButAuditLog proves DeleteZone's exact
+// scope: the zone's keys, content, and contact registration are all
+// gone, ListZones no longer names it, but its audit-trail history
+// (including, in a real decommission, the decommission transaction
+// itself) survives -- an operator investigating "what happened to this
+// zone" needs that history at least as much for a zone that no longer
+// exists as for one that still does.
+func TestDBDeleteZoneRemovesEverythingButAuditLog(t *testing.T) {
+	db := openTestDB(t)
+	ksk, _, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatalf("generating KSK: %v", err)
+	}
+	soa := testSOA(1)
+	soa.Hdr.Class = dns.ClassINET
+	if err := db.CommitUpdate("example.org.", &KeyChange{PinKSK: ksk}, []dns.RR{soa}, dns.ClassINET,
+		&ContactUpdate{Addresses: []string{"mailto:ops@example.org"}}); err != nil {
+		t.Fatalf("onboarding CommitUpdate: %v", err)
+	}
+	if err := db.RecordTransaction(AuditEntry{ID: "tx-1", Zone: "example.org.", RemoteAddr: "203.0.113.1:5353", Rcode: "NOERROR", At: time.Now()}); err != nil {
+		t.Fatalf("RecordTransaction: %v", err)
+	}
+
+	if err := db.DeleteZone("example.org."); err != nil {
+		t.Fatalf("DeleteZone: %v", err)
+	}
+
+	if _, ok, err := db.LoadZoneKeys("example.org."); err != nil || ok {
+		t.Fatalf("expected no keys after DeleteZone: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := db.LoadContact("example.org."); err != nil || ok {
+		t.Fatalf("expected no contact after DeleteZone: ok=%v err=%v", ok, err)
+	}
+	zones, err := db.ListZones()
+	if err != nil {
+		t.Fatalf("ListZones: %v", err)
+	}
+	for _, z := range zones {
+		if z == "example.org." {
+			t.Fatalf("expected example.org. to no longer be listed after DeleteZone, got %v", zones)
+		}
+	}
+	store, _, _, err := db.LoadAll()
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	if _, ok := store.Get("example.org."); ok {
+		t.Fatalf("expected no zone content after DeleteZone")
+	}
+
+	entries, err := db.RecentTransactions("example.org.", 10)
+	if err != nil {
+		t.Fatalf("RecentTransactions: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != "tx-1" {
+		t.Fatalf("expected the audit-trail history to survive DeleteZone, got %+v", entries)
+	}
+}

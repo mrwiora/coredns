@@ -498,6 +498,39 @@ func (db *DB) CommitUpdate(zone string, keyChange *KeyChange, ops []dns.RR, zcla
 	return tx.Commit()
 }
 
+// DeleteZone removes every persisted trace of zone -- its zones row,
+// every keys row, every rrs row, and its contacts row, if any -- so a
+// subsequent LoadAll sees no trace of it. Deliberately never touches
+// audit_log: a decommissioned zone's transaction history (including the
+// decommission transaction itself) stays available for an operator
+// investigating "what happened to this zone," the same reason audit_log
+// was never a foreign key against zones(origin) to begin with -- it
+// already has to survive a zone existing only briefly, or never having
+// existed at all (a rejected first-contact attempt), let alone one that
+// existed and was later removed.
+func (db *DB) DeleteZone(zone string) error {
+	zone = normalizeZone(zone)
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+
+	if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ?`, zone); err != nil {
+		return fmt.Errorf("deleting rrs: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM keys WHERE zone = ?`, zone); err != nil {
+		return fmt.Errorf("deleting keys: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM contacts WHERE zone = ?`, zone); err != nil {
+		return fmt.Errorf("deleting contact: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM zones WHERE origin = ?`, zone); err != nil {
+		return fmt.Errorf("deleting zone: %w", err)
+	}
+	return tx.Commit()
+}
+
 // LoadAll reads every persisted zone, key, and registered contact back
 // into fresh in-memory Store/KeyRegistry/ContactRegistry instances, for
 // hydrating a plugin instance at startup.

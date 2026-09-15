@@ -280,6 +280,59 @@ func anyRRSIGValidates(sigs []*dns.RRSIG, rrset []dns.RR) bool {
 	return false
 }
 
+// TestE2EDecommissionZoneRemovesZoneAndAllowsReOnboarding exercises
+// decommission-zone end to end through the actual sazuctl CLI entry
+// points against a real server: -yes is required up front, the zone's
+// content and keys are genuinely gone afterward (a query returns no
+// answer and publish-zone with the old ZSK is refused), and the exact
+// same zone name can be onboarded again from scratch afterward with no
+// leftover state to conflict with it.
+func TestE2EDecommissionZoneRemovesZoneAndAllowsReOnboarding(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-decommission.example."
+	dir := filepath.Join(t.TempDir())
+	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
+
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+	zoneFile := writeTestZoneFile(t, zone)
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
+		t.Fatalf("publish-zone: %v", err)
+	}
+	if answer := queryA(t, addr, "www."+zone); len(answer) != 1 {
+		t.Fatalf("expected the onboarded zone to be servable before decommissioning, got %d answers", len(answer))
+	}
+
+	if err := runDecommissionZone([]string{"-zone", zone, "-ksk-key", kskPath, "-target", addr}); err == nil {
+		t.Fatalf("expected decommission-zone without -yes to be refused up front")
+	}
+	if err := runDecommissionZone([]string{"-zone", zone, "-ksk-key", kskPath, "-yes", "-target", addr}); err != nil {
+		t.Fatalf("decommission-zone: %v", err)
+	}
+
+	if answer := queryA(t, addr, "www."+zone); len(answer) != 0 {
+		t.Fatalf("expected no answer for a decommissioned zone, got %+v", answer)
+	}
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", zskPath, "-zonefile", zoneFile, "-target", addr}); err == nil {
+		t.Fatalf("expected the old ZSK to no longer authenticate anything after decommissioning")
+	}
+
+	// The exact same zone name onboards cleanly again, from scratch.
+	newKSKPath := filepath.Join(dir, "new-ksk.private")
+	newZSKPath := filepath.Join(dir, "new-zsk.private")
+	if err := runPublishTrust([]string{"-zone", zone, "-key", newKSKPath, "-zsk-key", newZSKPath, "-target", addr}); err != nil {
+		t.Fatalf("re-onboarding publish-trust after decommission: %v", err)
+	}
+	if err := runPublishZone([]string{"-zone", zone, "-zsk-key", newZSKPath, "-zonefile", zoneFile, "-target", addr}); err != nil {
+		t.Fatalf("re-onboarding publish-zone after decommission: %v", err)
+	}
+	if answer := queryA(t, addr, "www."+zone); len(answer) != 1 {
+		t.Fatalf("expected the re-onboarded zone to be servable, got %d answers", len(answer))
+	}
+}
+
 // TestE2EPushZoneNSEC3FlagServesNSEC3NotNSEC exercises publish-zone's
 // -denial-of-existence=nsec3/-nsec3-salt/-nsec3-opt-out flags end to end
 // through the actual CLI entry point: proves the flag genuinely changes

@@ -241,21 +241,22 @@ things this design doesn't have yet: a way to remove a zone at all, and a
 way for that removal to survive gossip rather than being silently undone by
 it.
 
-**There is currently no "remove a zone" operation, single-instance or
-not.** Every existing delete-shaped operation in this codebase deliberately
-protects the apex SOA -- `ZoneData.deleteRRsetLocked`'s own comment is
-explicit: *"a zone's SOA is never removable this way, only replaced."*
-Nothing in `handler.go`/`push.go` today lets an authenticated push say "this
-zone is gone," and that has to exist before a cluster can agree on it. The
-natural shape, matching every other key-management operation here: a new
-`sazuctl decommission-zone -zone <zone> -ksk-key <path> -target ...`,
-authenticated by the KSK specifically (this is at least as consequential as
-a rollover, arguably more so), that tells the receiving instance to drop
-the zone's KSK, every registered ZSK, all content, its NSEC/NSEC3 chain,
-and its registration/contact record -- from `Store`, `KeyRegistry`,
-`Contacts`, and `db` alike. As with a KSK rollover, this says nothing about
-the parent DS record -- removing that at the registrar stays the customer's
-own out-of-band step, the same way publishing one always has been.
+**This prerequisite is now built:** `sazuctl decommission-zone -zone <zone>
+-ksk-key <path> -yes -target ...` (`decommission.go`/`push.go`'s
+`BuildDecommissionPush`) removes a zone entirely -- KSK, every ZSK, all
+content, its NSEC/NSEC3 chain, and its contact registration -- from
+`Store`, `KeyRegistry`, `Contacts`, and `db` alike, authenticated by the
+KSK specifically (refused otherwise, including from an already-registered
+ZSK, with a dedicated status code). It rides the same
+piggyback-on-a-reserved-owner-name convention `contact.go` already
+established, may not be mixed with any other op in the same push, requires
+an explicit `-yes` confirmation, and says nothing about the parent DS
+record -- removing that at the registrar stays the customer's own
+out-of-band step, the same way publishing one always has been. What it
+does *not* yet do is anything about a group of instances agreeing on the
+removal -- a single instance's own local `DeleteZone` (`Store`/
+`KeyRegistry`/`db` alike) has no concept of partners at all, which is
+exactly the gap the rest of this section is about.
 
 **Naively deleting it locally is actively wrong once gossip is in the
 picture.** Digest comparison as designed so far can't tell "I've never

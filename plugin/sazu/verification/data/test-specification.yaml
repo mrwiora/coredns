@@ -341,6 +341,30 @@ areas:
       TestBuildKSKRolloverPushSignsCompleteResultingRRsetAndDeletesOldKSK,
       TestAddZSKRetireZSKAndRotateKeyKSKRequireTarget (cmd/sazuctl/main_test.go)
     verifies: KEY-12
+  - id: TC-KEY-21
+    objective: |-
+      A decommission directive removes a zone's keys, content, and contact registration
+      entirely (a subsequent query behaves exactly as if it was never onboarded, and the same
+      zone name onboards cleanly again afterward with nothing left over); is refused when
+      authenticated by an already-registered ZSK instead of the zone's own KSK, or for a zone
+      never onboarded at all; rejects more than one directive or one mixed with any other op
+      in the same update; and its audit-trail history survives the removal. Verified at the
+      <code class="inline">splitDecommissionOps</code> unit level, end to end against a real
+      server, at the <code class="inline">DB.DeleteZone</code> persistence level, and through
+      the real <code class="inline">sazuctl decommission-zone</code> CLI entry point
+      (including its required <code class="inline">-yes</code> confirmation) against a real
+      server.
+    functions: |-
+      TestSplitDecommissionOpsFindsDirectiveAndStripsIt,
+      TestSplitDecommissionOpsAbsentIsANoOp, TestSplitDecommissionOpsRejectsMoreThanOne,
+      TestSplitDecommissionOpsRejectsMixingWithOtherOps,
+      TestSplitDecommissionOpsDropsStrayRRSIG,
+      TestServeUpdateDecommissionRemovesEverything,
+      TestServeUpdateDecommissionRejectedWhenAuthenticatedByZSK,
+      TestServeUpdateDecommissionOfUnknownZoneIsRefused (decommission_test.go),
+      TestDBDeleteZoneRemovesEverythingButAuditLog (db_test.go),
+      TestE2EDecommissionZoneRemovesZoneAndAllowsReOnboarding (cmd/sazuctl/e2e_test.go)
+    verifies: KEY-13
 - id: algo
   title: ALGO
   cases:

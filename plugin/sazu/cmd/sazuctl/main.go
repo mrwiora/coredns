@@ -164,6 +164,8 @@ func main() {
 		err = runRetireZSK(os.Args[2:])
 	case "rotate-key":
 		err = runRotateKey(os.Args[2:])
+	case "decommission-zone":
+		err = runDecommissionZone(os.Args[2:])
 	case "init-zone":
 		err = runInitZone(os.Args[2:])
 	case "zone-convert":
@@ -179,7 +181,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: sazuctl <keygen|ds|init-zone|zone-convert|push|publish-trust|publish-zone|contact|add-zsk|retire-zsk|rotate-key> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: sazuctl <keygen|ds|init-zone|zone-convert|push|publish-trust|publish-zone|contact|add-zsk|retire-zsk|rotate-key|decommission-zone> [flags]")
 	fmt.Fprintln(os.Stderr, "  sazuctl init-zone -zone <zone> [-out <path>] [-format yaml|bind]")
 	fmt.Fprintln(os.Stderr, "  sazuctl zone-convert -in <path.yaml> -out <path.zone> [-zone <zone>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl keygen -out <path> [-zone <owner>] [-role ksk|zsk] [-key-passphrase-file <path>]")
@@ -191,12 +193,14 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-udp] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-udp] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl rotate-key -zone <zone> [-role ksk|zsk] -target host:port|url [-udp (role zsk only)] ... (run with no -role for an explanation of the choice)")
+	fmt.Fprintln(os.Stderr, "  sazuctl decommission-zone -zone <zone> -ksk-key <path> -yes [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "-key-passphrase-file encrypts/decrypts the key file at rest (§10.8); omit it for a plain BIND-format key file (the default).")
 	fmt.Fprintln(os.Stderr, "-target accepts an http(s):// URL to push over §7.3's HTTPS carrier instead of TCP; -json then sends a JSON wire envelope instead of raw bytes. Required (not optional) for add-zsk, retire-zsk, and rotate-key: each needs to query the zone's current DNSKEY set live before it can correctly re-sign the complete resulting set -- see fetchCurrentDNSKEYs' own doc comment.")
 	fmt.Fprintln(os.Stderr, "TCP is the default and always used for push/publish-trust/publish-zone/rotate-key -role ksk (a compliant server refuses those over UDP regardless of size); -udp, where offered, opts other pushes back into UDP, falling back to TCP with a warning if the push is too large for one safe datagram.")
 	fmt.Fprintln(os.Stderr, "-denial-of-existence (publish-zone) picks the authenticated denial-of-existence proof for this push: nsec3 (the default) additionally hides the zone's name set from enumeration; nsec falls back to plain RFC 4034 NSEC. -nsec3-iterations and -nsec3-salt (hex, e.g. AABBCCDD) default to RFC 9276's current guidance (0, none) if omitted, and -nsec3-opt-out sets the Opt-Out flag; all three are ignored under -denial-of-existence=nsec.")
 	fmt.Fprintln(os.Stderr, "-zonefile (publish-zone) accepts a YAML zone definition (.yaml/.yml) as a drop-in alternative to a raw zone file -- see 'sazuctl init-zone' to create a starter one.")
+	fmt.Fprintln(os.Stderr, "decommission-zone permanently removes a zone -- its KSK, every ZSK, all content, and its contact registration -- from the server; -yes is required as an explicit confirmation, and -ksk-key must already be the zone's own real KSK (never generated here).")
 	fmt.Fprintln(os.Stderr, "A zone's KSK and ZSK are generated together, once, by 'sazuctl publish-trust': the KSK anchors the chain of trust at your registrar (see 'sazuctl ds') and is never needed again except for a future rollover; the ZSK it registers alongside it authenticates and signs every routine 'sazuctl publish-zone' push from then on. See keys.go's KeyRole doc comment (plugin/sazu) for the reasoning.")
 	fmt.Fprintln(os.Stderr, "There is no partial/differential update command: publish-zone's zone file is the zone's complete, authoritative content, and every change -- however small -- is a fresh full push of the whole thing. See plugin/sazu/README.md's \"Considered approaches for differential updates\" for why.")
 }
@@ -766,6 +770,50 @@ func runContact(args []string) error {
 		return err
 	}
 	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, *udp)
+}
+
+// runDecommissionZone requests a zone's complete removal -- see
+// sazu.BuildDecommissionPush's own doc comment for exactly what that
+// means server-side. Authenticated by the zone's own KSK, which must
+// already exist (never generated here -- a freshly generated key could
+// never match what the server actually has pinned, guaranteeing this
+// fails rather than doing anything).
+func runDecommissionZone(args []string) error {
+	fs := flag.NewFlagSet("decommission-zone", flag.ExitOnError)
+	zone := fs.String("zone", "", "zone to remove entirely")
+	kskPath := fs.String("ksk-key", "", "path to the zone's own KSK (must already exist)")
+	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
+	jsonCarrier := addJSONCarrierFlag(fs)
+	passphraseFile := addPassphraseFlag(fs)
+	confirm := fs.Bool("yes", false, "confirm this zone should really be removed entirely (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *zone == "" || *kskPath == "" {
+		return fmt.Errorf("-zone and -ksk-key are required")
+	}
+	if !*confirm {
+		return fmt.Errorf("this permanently removes %s -- its KSK, every ZSK, all content, and its contact registration -- from the server; re-run with -yes to confirm", *zone)
+	}
+	passphrase, err := readPassphraseFile(*passphraseFile)
+	if err != nil {
+		return err
+	}
+	kskPriv, err := sazu.LoadPrivateKey(*kskPath, passphrase)
+	if err != nil {
+		return fmt.Errorf("-ksk-key %s: %w (the zone's own KSK must already exist -- this flag never generates one)", *kskPath, err)
+	}
+	ksk := sazu.DNSKEYFor(*zone, kskPriv, true)
+	printKeyInfo(*kskPath, ksk)
+
+	m := sazu.BuildDecommissionPush(*zone)
+	now := time.Now()
+	wire, err := sazu.SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Decommissioning %s, authenticated by KSK key tag %d\n", *zone, ksk.KeyTag())
+	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier, false)
 }
 
 // runAddZSK registers a new, optional ZSK for a zone that already has a

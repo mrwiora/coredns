@@ -303,6 +303,26 @@ func BuildKSKRolloverPush(zone string, current []*dns.DNSKEY, oldKSK, newKSK *dn
 	return buildDNSKEYRRsetPush(zone, current, want, newKSK, newKSKPriv)
 }
 
+// BuildDecommissionPush builds an RFC 2136 UPDATE message that requests a
+// zone's complete removal -- KSK, every ZSK, all content and its chain,
+// and the contact registration -- rather than a change to any of them.
+// It carries nothing but the decommission.go marker: no DNSKEY, no
+// content, since nothing about the zone's key state or content is being
+// modified, it's simply ceasing to exist. Like BuildContactOp, this is
+// deliberately not run through SignZoneContent -- the directive isn't
+// zone content and is never itself DNSSEC-signed. The transaction itself
+// (SIG(0), via SignUpdate, by the caller) must be signed by the zone's
+// KSK specifically -- handler.go refuses a decommission directive
+// authenticated by anything else, the same requirement first contact and
+// a rollover already have.
+func BuildDecommissionPush(zone string) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
+	m.Opcode = dns.OpcodeUpdate
+	m.Insert([]dns.RR{BuildDecommissionOp(zone)})
+	return m
+}
+
 // BuildContentPush builds an RFC 2136 UPDATE message for a routine,
 // ZSK-only zone-content push: the zone's complete content (soa, rrs, and
 // a freshly computed denial-of-existence chain), signed entirely by zsk

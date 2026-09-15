@@ -384,7 +384,13 @@ retirement, or a KSK rollover) SHALL leave that RRset covered by a single RRSIG 
 validates against its complete, current membership — never one computed over only the
 record being added or removed — and SHALL explicitly remove any DNSKEY record no longer
 part of that membership (an RFC 2136 §2.5.4 delete), rather than leaving it served
-alongside a signature that no longer covers it.</td><td class="src">RFC 4034 §3 (an RRSIG covers its whole RRset) &middot; Engineering decision</td></tr>  </table></div>
+alongside a signature that no longer covers it.</td><td class="src">RFC 4034 §3 (an RRSIG covers its whole RRset) &middot; Engineering decision</td></tr>    <tr><td class="reqid">KEY-13</td><td>A zone SHALL be fully removable — its KSK, every registered ZSK, all content and its
+NSEC/NSEC3 chain, and its §10.6 contact registration — via a dedicated decommission
+directive, authenticated by the zone's own currently-pinned KSK specifically (refused,
+status <code class="inline">ERR_DECOMMISSION_REQUIRES_KSK</code>, if authenticated by
+anything else, including an already-registered ZSK). The directive SHALL NOT be mixed
+with any other op in the same transaction. A decommissioned zone's audit-trail history
+SHALL survive the removal.</td><td class="src">Engineering decision</td></tr>  </table></div>
   <h3 class="subhead" id="req-algo"><span class="secno">3.4</span> ALGO &mdash; Minimum algorithm floor</h3>
   <div class="wrap"><table class="spec">
     <tr><th>ID</th><th>Requirement</th><th>Source</th></tr>    <tr><td class="reqid">ALGO-01</td><td>A first-contact or rollover candidate key whose algorithm RFC&nbsp;8624&nbsp;§3.1 rates
@@ -536,7 +542,7 @@ clearly-named opt-in (<code class="inline">insecure_skip_chain_validation</code>
   <h2><span class="secno">5</span> Traceability summary</h2>
   <p>Every requirement above is verified by at least one automated test case; the mapping is maintained in the companion <a href="#" onclick="document.querySelector('[data-doc=test]').click();return false;">Test Specification</a> (&sect;3, per-area tables) and its execution recorded in the <a href="#" onclick="document.querySelector('[data-doc=report]').click();return false;">Test Report</a> (&sect;3). No requirement in this document is currently unverified or outstanding.</p>
   <div class="stats">
-    <div class="stat"><div class="v ok">89</div><div class="l">requirements specified</div></div>
+    <div class="stat"><div class="v ok">90</div><div class="l">requirements specified</div></div>
     <div class="stat"><div class="v ok">13</div><div class="l">functional areas</div></div>
     <div class="stat"><div class="v ok">5</div><div class="l">non-functional</div></div>
     <div class="stat"><div class="v ok">0</div><div class="l">unimplemented</div></div>
@@ -664,7 +670,25 @@ retire-zsk, and rotate-key -role ksk all require -target (rather than allowing t
 print-and-self-verify-only mode) so they can query that current set live before signing.</td><td class="mono">TestBuildAddZSKPushSignsCompleteResultingRRset,
 TestBuildRetireZSKPushSignsCompleteRemainingRRsetAndDeletesRetired,
 TestBuildKSKRolloverPushSignsCompleteResultingRRsetAndDeletesOldKSK,
-TestAddZSKRetireZSKAndRotateKeyKSKRequireTarget (cmd/sazuctl/main_test.go)</td><td>KEY-12</td></tr>  </table></div>
+TestAddZSKRetireZSKAndRotateKeyKSKRequireTarget (cmd/sazuctl/main_test.go)</td><td>KEY-12</td></tr>    <tr><td class="tcid">TC-KEY-21</td><td>A decommission directive removes a zone's keys, content, and contact registration
+entirely (a subsequent query behaves exactly as if it was never onboarded, and the same
+zone name onboards cleanly again afterward with nothing left over); is refused when
+authenticated by an already-registered ZSK instead of the zone's own KSK, or for a zone
+never onboarded at all; rejects more than one directive or one mixed with any other op
+in the same update; and its audit-trail history survives the removal. Verified at the
+<code class="inline">splitDecommissionOps</code> unit level, end to end against a real
+server, at the <code class="inline">DB.DeleteZone</code> persistence level, and through
+the real <code class="inline">sazuctl decommission-zone</code> CLI entry point
+(including its required <code class="inline">-yes</code> confirmation) against a real
+server.</td><td class="mono">TestSplitDecommissionOpsFindsDirectiveAndStripsIt,
+TestSplitDecommissionOpsAbsentIsANoOp, TestSplitDecommissionOpsRejectsMoreThanOne,
+TestSplitDecommissionOpsRejectsMixingWithOtherOps,
+TestSplitDecommissionOpsDropsStrayRRSIG,
+TestServeUpdateDecommissionRemovesEverything,
+TestServeUpdateDecommissionRejectedWhenAuthenticatedByZSK,
+TestServeUpdateDecommissionOfUnknownZoneIsRefused (decommission_test.go),
+TestDBDeleteZoneRemovesEverythingButAuditLog (db_test.go),
+TestE2EDecommissionZoneRemovesZoneAndAllowsReOnboarding (cmd/sazuctl/e2e_test.go)</td><td>KEY-13</td></tr>  </table></div>
   <h3 class="subhead" id="ts-algo"><span class="secno">3.4</span> ALGO</h3>  <div class="wrap"><table class="spec">
     <tr><th>TC</th><th>Objective</th><th>Test function(s)</th><th>Verifies</th></tr>    <tr><td class="tcid">TC-ALGO-01</td><td>Recommended algorithms are accepted; weak or unrecognised ones are rejected, at the
 classification primitive.</td><td class="mono">TestAlgorithmMeetsFloorAcceptsRecommendedAlgorithms,

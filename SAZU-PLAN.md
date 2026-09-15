@@ -1249,6 +1249,66 @@ pushes alike.
   (`TestWildcardScopeFallsThroughForNeverOnboardedNames`) is
   unaffected.
 
+- **Added: `sazuctl decommission-zone`, the first way to fully remove a
+  zone.** Surfaced as a prerequisite while designing multi-instance
+  replication (`SAZU-MULTIINSTANCE-CONCEPT.md`) -- gossip-based
+  reconciliation across instances needs a real "this zone is gone"
+  operation to build tombstones on top of, and none existed at all,
+  single-instance or not: every ordinary RFC 2136 delete-shaped op
+  deliberately protects the apex SOA (`ZoneData.deleteRRsetLocked`/
+  `deleteNameLocked`), and nothing else ever touches the KSK except a
+  rollover, which replaces rather than removes it.
+
+  `decommission.go` follows `contact.go`'s established piggyback
+  convention exactly: a reserved owner name
+  (`_sazu-decommission.<zone>`), a TXT marker riding inside an otherwise
+  ordinary authenticated UPDATE, split out by `splitDecommissionOps`
+  before anything treats the rest of the push as zone content -- never
+  itself DNSSEC-signed, since SIG(0) on the containing transaction
+  already authenticates it. It may not be mixed with any other op in
+  the same push (content, a DNSKEY, a contact directive): decommission
+  is consequential enough that a push meaning to do it should do
+  nothing else.
+
+  Authorization is deliberately as strict as first contact or a KSK
+  rollover -- `handler.go`'s new gate requires `alreadyPinned &&
+  !isRollover && candidateRole == RoleKSK`, refusing anything else
+  (an already-registered ZSK included) with a new, honestly-labeled
+  status code, `statusErrDecommissionRequiresKSK` (not one of §12's
+  original nine -- follows the same convention
+  `statusErrFirstContactNeedsKSK` already established for exactly this
+  situation). On success, the zone is removed from `Store`,
+  `KeyRegistry`, and `ContactRegistry` in memory, and from `db` via a
+  new `DB.DeleteZone` -- every `rrs`/`keys`/`contacts` row and the
+  `zones` row itself, but deliberately *not* `audit_log`: a
+  decommissioned zone's transaction history, including the
+  decommission transaction itself, stays available for an operator
+  investigating what happened to it, the same reason `audit_log` was
+  never a foreign key against `zones(origin)` to begin with.
+
+  `sazuctl decommission-zone` requires an explicit `-yes` confirmation
+  flag before it will build or send anything at all, and requires
+  `-ksk-key` to already exist (never generated, unlike most other key
+  flags in this tool -- a freshly generated key could never match what
+  the server actually has pinned, guaranteeing failure rather than
+  doing anything). It says nothing about the parent DS record; removing
+  that at the registrar, if wanted, stays the customer's own
+  out-of-band step.
+
+  Verified with a full suite: direct unit tests of
+  `splitDecommissionOps` (extraction, absence, more-than-one, mixed
+  with another op, a stray RRSIG dropped the same way
+  `splitContactOps` already does), `handler_test.go`/`decommission_test.go`
+  end-to-end coverage proving the KSK-only gate (an already-authorized
+  ZSK is refused, a never-onboarded zone is refused), that everything
+  really is gone afterward (a query behaves exactly like the zone was
+  never onboarded), and that the same zone name onboards cleanly again
+  from scratch with nothing left over to conflict with it;
+  `db_test.go` proving `DeleteZone`'s exact scope (keys/content/contact
+  gone, `ListZones` no longer names it, `audit_log` history survives);
+  and `cmd/sazuctl/e2e_test.go` driving the real CLI command against a
+  real server end to end, including the `-yes` refusal itself.
+
 ## Outstanding
 
 Every item the architectural review that led to this document identified

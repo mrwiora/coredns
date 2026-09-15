@@ -436,6 +436,35 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Debugf("update for %s: invalid contact directive: %v", zone, err)
 		return reply(dns.RcodeFormatError, "")
 	}
+
+	// A decommission directive (decommission.go) removes a zone entirely
+	// -- KSK, every ZSK, all content and its chain, and the contact
+	// registration -- rather than changing any of them, so none of the
+	// ordinary content/key-management handling below applies to it.
+	// Stripped out and handled here, on its own, before any of that runs.
+	zoneOps, decommission, err := splitDecommissionOps(zoneOps, zone)
+	if err != nil {
+		log.Debugf("update for %s: invalid decommission directive: %v", zone, err)
+		return reply(dns.RcodeFormatError, "")
+	}
+	if decommission {
+		if !alreadyPinned || isRollover || candidateRole != RoleKSK {
+			log.Debugf("update for %s: decommission attempted by other than the zone's own pinned KSK, refusing", zone)
+			return reply(dns.RcodeRefused, statusErrDecommissionRequiresKSK)
+		}
+		if s.DB != nil {
+			if err := s.DB.DeleteZone(zone); err != nil {
+				log.Errorf("update for %s: DB.DeleteZone failed: %v", zone, err)
+				return reply(dns.RcodeServerFailure, "")
+			}
+		}
+		s.Store.DeleteZone(zone)
+		s.Keys.DeleteZone(zone)
+		s.Contacts.Set(zone, nil)
+		log.Infof("update for %s: decommissioned (authenticated by KSK key tag %d)", zone, candidate.KeyTag())
+		return reply(dns.RcodeSuccess, "")
+	}
+
 	// isFullPush: a real content push always carries the apex SOA
 	// (sazuctl publish-zone) -- used for §12 quota metering, below, to
 	// bucket it separately from a pure key-management push
@@ -984,6 +1013,17 @@ const statusErrFirstContactNeedsKSK = "ERR_FIRST_CONTACT_REQUIRES_KSK"
 // "re-sign and re-push," not "something is wrong with the key or the
 // content."
 const statusErrExpiredSignature = "ERR_EXPIRED_SIGNATURE"
+
+// statusErrDecommissionRequiresKSK is not one of §12's original status
+// codes (decommissioning a zone didn't exist when the design doc was
+// written) but follows its same diagnostic-TXT convention: a
+// decommission directive (decommission.go) was authenticated by
+// something other than the zone's own currently-pinned KSK -- an
+// already-registered ZSK, or a rollover-shaped candidate. Removing a
+// zone entirely is at least as consequential as establishing or rolling
+// over its KSK, so it requires exactly the same authenticator those do,
+// never the lighter-weight ZSK routine content pushes use.
+const statusErrDecommissionRequiresKSK = "ERR_DECOMMISSION_REQUIRES_KSK"
 
 // replyWithStatus replies to r with rcode and, if status is non-empty,
 // a diagnostic TXT record carrying it in the Additional section.

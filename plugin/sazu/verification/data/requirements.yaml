@@ -242,6 +242,16 @@ areas:
       alongside a signature that no longer covers it.
     source: |-
       RFC 4034 §3 (an RRSIG covers its whole RRset) &middot; Engineering decision
+  - id: KEY-13
+    text: |-
+      A zone SHALL be fully removable — its KSK, every registered ZSK, all content and its
+      NSEC/NSEC3 chain, and its §10.6 contact registration — via a dedicated decommission
+      directive, authenticated by the zone's own currently-pinned KSK specifically (refused,
+      status <code class="inline">ERR_DECOMMISSION_REQUIRES_KSK</code>, if authenticated by
+      anything else, including an already-registered ZSK). The directive SHALL NOT be mixed
+      with any other op in the same transaction. A decommissioned zone's audit-trail history
+      SHALL survive the removal.
+    source: Engineering decision
 - id: algo
   code: ALGO
   title: Minimum algorithm floor

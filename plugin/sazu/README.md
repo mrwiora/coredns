@@ -243,6 +243,21 @@ Subcommands:
   record at your registrar). `-target` is required for either role, for
   the same reason as `add-zsk`/`retire-zsk` above (a rollover re-signs the
   complete resulting DNSKEY set too, not just the new KSK).
+* `sazuctl decommission-zone -zone <zone> -ksk-key <path> -yes [-target host:port|url] [-json]` —
+  permanently removes a zone: its KSK, every registered ZSK, all content
+  and its NSEC/NSEC3 chain, and its contact registration, from the
+  server (and its `db`, if configured) — there is otherwise no way to
+  fully un-onboard a zone at all; every ordinary RFC 2136 delete-shaped
+  op deliberately protects the apex SOA. Authenticated by `-ksk-key`
+  specifically, which must already exist (never generated here — a
+  freshly generated key could never match what the server has pinned,
+  guaranteeing failure). `-yes` is a required, explicit confirmation:
+  without it, the command refuses to build or send anything at all. This
+  says nothing about the parent DS record — removing that at your
+  registrar, if you want to, stays your own out-of-band step, same as
+  publishing one always has been. The exact same zone name can be
+  onboarded again afterward with `publish-trust`, from scratch, with
+  nothing left over to conflict with it.
 
 Every subcommand *other than* `add-zsk`, `retire-zsk`, and `rotate-key`
 run without `-target` just prints the signed wire bytes and self-verifies
