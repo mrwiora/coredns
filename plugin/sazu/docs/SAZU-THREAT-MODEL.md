@@ -176,6 +176,25 @@ full:
   server last saw for that zone. This has not been designed in detail or
   implemented; it's flagged here as the one concrete "spot we are missing"
   this review found.
+- **Trust assumption underlying the whole window: the SAZU server's own
+  system clock.** `SIG.Verify` (miekg/dns's `sig0.go`) checks
+  `Inception`/`Expiration` against `time.Now()` read on the *verifying*
+  machine — never anything derived from the request itself. The two
+  timestamps are absolute values the legitimate signer chose at signing
+  time, and they're covered by the signature (`sig0.go`'s `SignUpdate`
+  doc comment), so an attacker holding a captured push can't edit them
+  without invalidating the signature, and manipulating *their own*
+  system clock has no effect whatsoever on this check — only the
+  verifier's clock is ever consulted. The one way clock manipulation
+  *would* matter is the other direction: if an attacker could shift the
+  SAZU server's own clock backward (NTP spoofing against that specific
+  host, a compromised or misconfigured time source), an old, otherwise-
+  expired captured push could fall back inside its original window and
+  become replayable again — a "compromise the verifier's time source"
+  attack, categorically different from and far harder than anything a
+  client-side clock change could achieve. Not separately mitigated today
+  beyond ordinary host/NTP hardening, which is the operator's
+  responsibility the same way §5.2's `db`-file access control is.
 
 ## 6. Repudiation (denying an action, or being unable to prove one happened)
 
