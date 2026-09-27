@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
@@ -512,6 +513,7 @@ func runPublishTrust(args []string) error {
 	jsonCarrier := addJSONCarrierFlag(fs)
 	passphraseFile := addPassphraseFlag(fs)
 	zskPassphraseFile := fs.String("zsk-key-passphrase-file", "", "like -key-passphrase-file, but for -zsk-key")
+	zoneVersion := addZoneVersionFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -548,6 +550,9 @@ func runPublishTrust(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, true); err != nil {
+		return err
+	}
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
@@ -578,6 +583,7 @@ func runPublishZone(args []string) error {
 	nsec3OptOut := fs.Bool("nsec3-opt-out", false, "set the NSEC3 Opt-Out flag (ignored unless -denial-of-existence=nsec3)")
 	keepSerial := fs.Bool("keep-serial", false,
 		"publish the zone file's SOA serial as-is, even if -target already serves the same or a newer one (the server will then refuse the push with ERR_STALE_SERIAL)")
+	zoneVersion := addZoneVersionFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -640,6 +646,20 @@ func runPublishZone(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The zone's first content push has no SOA serial to be ordered by,
+	// so it must carry the version prerequisite instead; later ones are
+	// ordered by their serial and don't need it.
+	if *zoneVersion >= 0 {
+		m.Answer = append(m.Answer, sazu.BuildVersionPrereq(*zone, uint64(*zoneVersion)))
+	} else if *target != "" {
+		if _, served, err := fetchCurrentSerial(*target, *zone); err != nil {
+			return err
+		} else if !served {
+			if err := addVersionPrereq(m, *zone, -1, *target, false); err != nil {
+				return err
+			}
+		}
+	}
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, zsk, zskPriv, inception, expiration)
 	if err != nil {
@@ -666,6 +686,7 @@ func runContact(args []string) error {
 	var addresses stringSliceFlag
 	fs.Var(&addresses, "address", "contact address: mailto:you@example.org, or https://... for a webhook (repeatable)")
 	passphraseFile := addPassphraseFlag(fs)
+	zoneVersion := addZoneVersionFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -704,6 +725,9 @@ func runContact(args []string) error {
 		m.Insert([]dns.RR{op})
 	}
 
+	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
+		return err
+	}
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, key, priv, inception, expiration)
 	if err != nil {
@@ -726,6 +750,7 @@ func runDecommissionZone(args []string) error {
 	jsonCarrier := addJSONCarrierFlag(fs)
 	passphraseFile := addPassphraseFlag(fs)
 	confirm := fs.Bool("yes", false, "confirm this zone should really be removed entirely (required)")
+	zoneVersion := addZoneVersionFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -747,6 +772,9 @@ func runDecommissionZone(args []string) error {
 	printKeyInfo(*kskPath, ksk)
 
 	m := sazu.BuildDecommissionPush(*zone)
+	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
+		return err
+	}
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
@@ -772,6 +800,7 @@ func runAddZSK(args []string) error {
 	udp := addUDPFlag(fs)
 	kskPassphraseFile := addPassphraseFlag(fs)
 	zskPassphraseFile := fs.String("zsk-key-passphrase-file", "", "like -key-passphrase-file, but for -zsk-key")
+	zoneVersion := addZoneVersionFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -817,6 +846,9 @@ func runAddZSK(args []string) error {
 		return err
 	}
 
+	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
+		return err
+	}
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
@@ -841,6 +873,7 @@ func runRetireZSK(args []string) error {
 	udp := addUDPFlag(fs)
 	kskPassphraseFile := addPassphraseFlag(fs)
 	zskPassphraseFile := fs.String("zsk-key-passphrase-file", "", "like -key-passphrase-file, but for -zsk-key")
+	zoneVersion := addZoneVersionFlag(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -879,6 +912,9 @@ func runRetireZSK(args []string) error {
 		return err
 	}
 
+	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
+		return err
+	}
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
@@ -1012,6 +1048,9 @@ func runRotateKey(args []string) error {
 			return err
 		}
 
+		if err := addVersionPrereq(m, *zone, -1, *target, false); err != nil {
+			return err
+		}
 		inception, expiration := sig0Window()
 		wire, err := sazu.SignUpdate(m, newKSK, newPriv, inception, expiration)
 		if err != nil {
@@ -1154,6 +1193,59 @@ func queryTarget(target, zone string, qtype uint16) (*dns.Msg, error) {
 // arithmetic, the comparison the server applies to SOA serials.
 func serialNewer(a, b uint32) bool {
 	return a != b && a-b < 1<<31
+}
+
+// addZoneVersionFlag registers -zone-version: the zone's current version
+// (see plugin/sazu/version.go), for signing a control change without
+// asking -target for it -- e.g. on an offline KSK host. -1 means unset.
+func addZoneVersionFlag(fs *flag.FlagSet) *int64 {
+	return fs.Int64("zone-version", -1,
+		"the zone's current version, as published in TXT _sazu-version.<zone> (read from -target if omitted; "+
+			"needed to sign a control change offline)")
+}
+
+// addVersionPrereq adds the zone's version prerequisite to m, which every
+// control change needs: flagVersion if set, otherwise the version read
+// from target. With neither, a brand-new zone (neverOnboarded) is at
+// version 0; anything else is an error, since signing for a guessed
+// version would only get refused.
+func addVersionPrereq(m *dns.Msg, zone string, flagVersion int64, target string, neverOnboarded bool) error {
+	var v uint64
+	switch {
+	case flagVersion >= 0:
+		v = uint64(flagVersion)
+	case target != "":
+		fetched, err := fetchZoneVersion(target, zone)
+		if err != nil {
+			return err
+		}
+		v = fetched
+	case neverOnboarded:
+		v = 0
+	default:
+		return fmt.Errorf("this change needs the zone's current version: pass -target, or -zone-version N "+
+			"(read it with: dig TXT %s)", sazu.VersionOwnerName(zone))
+	}
+	m.Answer = append(m.Answer, sazu.BuildVersionPrereq(zone, v))
+	return nil
+}
+
+// fetchZoneVersion reads zone's current version from target.
+func fetchZoneVersion(target, zone string) (uint64, error) {
+	resp, err := queryTarget(target, sazu.VersionOwnerName(zone), dns.TypeTXT)
+	if err != nil {
+		return 0, fmt.Errorf("querying %s for %s's version: %w", target, zone, err)
+	}
+	for _, rr := range resp.Answer {
+		if txt, ok := rr.(*dns.TXT); ok && len(txt.Txt) == 1 {
+			v, err := strconv.ParseUint(txt.Txt[0], 10, 64)
+			if err != nil {
+				return 0, fmt.Errorf("%s published an invalid version for %s: %q", target, zone, txt.Txt[0])
+			}
+			return v, nil
+		}
+	}
+	return 0, fmt.Errorf("%s published no version for %s (is it in the server's scope?)", target, zone)
 }
 
 // sig0Window returns the SIG(0) inception and expiration for the next
@@ -1379,6 +1471,11 @@ func interpretResponse(zone string, key *dns.DNSKEY, resp *dns.Msg) error {
 	case statusErrUnknownSigner:
 		printUnknownSignerGuidance(zone, key)
 		return fmt.Errorf("denied: a DS record for %s is already published, but not for this key", zone)
+	case "ERR_STALE_VERSION":
+		return fmt.Errorf("denied: %s's version changed since this was signed (another control change was applied "+
+			"first, or this is a replay) -- re-run the command so it reads the current version", zone)
+	case "ERR_VERSION_REQUIRED":
+		return fmt.Errorf("denied: this change must carry %s's current version -- pass -target or -zone-version", zone)
 	}
 
 	rcodeName := dns.RcodeToString[resp.Rcode]

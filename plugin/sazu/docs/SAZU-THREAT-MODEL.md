@@ -139,22 +139,23 @@ entirely.**
 **Threat: a captured, still-valid push is replayed to revert a zone to an
 earlier state.**
 
-> **Status: mitigated.** The server now enforces three rules on every
-> update (see `replay.go` and README's "Replay protection"): a message
-> may not be older (by SIG(0) inception) than the newest one accepted
-> from the same key for that zone, nor one already accepted (marks --
-> the newest inception plus digests of the messages accepted at it --
-> persisted in the same transaction as the update, never deleted); a full push's SOA serial must move
-> forward (RFC 1982); and a SIG(0) window may not exceed
-> `max_sig0_lifetime` (default 1h5m). This closes every case below,
-> including the key-management one, without a separate sequence number:
-> the SIG(0) inception already *is* a signed, per-message value the
-> client controls. It also blunts the clock-rewind variant at the end
-> of this section — a message the server already accepted stays
-> rejected however far its clock is turned back. What remains open is
-> the multi-instance case: the marks must be replicated with the same
-> consistency as the key state (`SAZU-CLUSTER.md`), or a replay against
-> a lagging instance succeeds. The analysis below is kept as written.
+> **Status: mitigated.** Two per-zone counters, both part of the zone's
+> own state, now close every case below (see `version.go` and README's
+> "Replay protection"): a full push's SOA serial must move forward (RFC
+> 1982), and every control change -- onboarding, rollover, a DNSKEY
+> RRset change, a contact change, decommission, and a zone's first
+> content push -- must name the zone's current version in an RFC 2136
+> prerequisite and increments it. A captured control message is valid
+> for exactly one version, so it can never apply twice or out of order,
+> regardless of any clock (the clock-rewind variant at the end of this
+> section no longer matters either). The version survives decommission,
+> and is published at `_sazu-version.<zone>` so an offline KSK host can
+> sign against it. An earlier fix used per-key SIG(0)-inception marks
+> plus a store of message digests instead; that was dropped because it
+> relied on client clocks and was server-local history rather than
+> zone state -- a second server without that history could be replayed
+> against. A SIG(0) window is also capped at `max_sig0_lifetime`
+> (default 1h5m). The analysis below is kept as written.
 
 This is the one gap this review surfaced that wasn't previously flagged
 anywhere in the codebase's own comments, and is worth walking through in
@@ -312,8 +313,8 @@ full:
 ## 10. Summary of identified gaps, ranked by what to address first
 
 1. ~~**Replay of a captured, still-valid push within its one-hour SIG(0)
-   window**~~ — **mitigated** (see §5's status note); remaining only for
-   multi-instance deployments. Original finding (§5) — concrete, currently exploitable if a customer's own
+   window**~~ — **mitigated** by the per-zone version counter and SOA
+   serial rule (see §5's status note). Original finding (§5) — concrete, currently exploitable if a customer's own
    tooling omits `previousSerial`, and unmitigated at all for
    key-management operations regardless of client behavior. The most
    actionable finding in this document; needs a monotonic nonce/sequence

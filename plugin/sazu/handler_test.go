@@ -26,6 +26,8 @@ func newTestSazu(zone string) *Sazu {
 		Zones:                       []string{dns.Fqdn(zone)},
 		Store:                       NewStore(),
 		Keys:                        NewKeyRegistry(),
+		Versions:                    NewVersionRegistry(),
+		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Contacts:                    NewContactRegistry(),
 		Validator:                   NewValidator(),
 		Capture:                     NewRawCapture(5*time.Second, 64),
@@ -798,6 +800,8 @@ func TestIPRateLimiterCoversScanningAcrossManyDistinctZoneNames(t *testing.T) {
 		Zones:                       []string{"."}, // catch-all, like a real multi-tenant "sazu ." scope
 		Store:                       NewStore(),
 		Keys:                        NewKeyRegistry(),
+		Versions:                    NewVersionRegistry(),
+		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
 		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
@@ -1426,6 +1430,8 @@ func TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges(t *testing.T
 		Zones:                       []string{"."}, // catch-all: accept any domain
 		Store:                       NewStore(),
 		Keys:                        NewKeyRegistry(),
+		Versions:                    NewVersionRegistry(),
+		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
 		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
@@ -1465,6 +1471,8 @@ func TestWildcardScopeFallsThroughForNeverOnboardedNames(t *testing.T) {
 		Zones:                       []string{"."},
 		Store:                       NewStore(),
 		Keys:                        NewKeyRegistry(),
+		Versions:                    NewVersionRegistry(),
+		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
 		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,

@@ -53,10 +53,15 @@ type Sazu struct {
 	// authenticated ones.
 	IPRateLimiter *IPRateLimiter
 
-	// Replay enforces per-key monotonic SIG(0) inception (replay.go).
-	// setup.go always installs one; nil disables the check, which only
-	// this package's own tests rely on.
-	Replay *ReplayGuard
+	// Versions holds every zone's control-state version -- the counter
+	// control changes must name as a prerequisite (see version.go).
+	Versions *VersionRegistry
+
+	// SkipVersionCheck turns off the version-prerequisite requirement.
+	// Only this package's own tests set it, for the many tests about
+	// something else that build control messages by hand; the zero
+	// value, and everything setup.go builds, enforces it.
+	SkipVersionCheck bool
 
 	// MaxSIG0Lifetime caps a SIG(0) record's validity window
 	// (expiration - inception). Zero means DefaultMaxSIG0Lifetime.
@@ -152,6 +157,10 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 			return s.nextOrRefuse(ctx, w, r, qname, "outside this instance's configured zone scope")
 		}
 		return s.serveUpdate(ctx, w, r, qname, raw, haveRaw)
+	}
+
+	if m, ok := s.versionAnswer(r); ok {
+		return writeMsg(w, m)
 	}
 
 	// Ordinary query: find which *onboarded* zone (if any) qname falls
@@ -460,9 +469,10 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	authKeyTag = &keyTag
 	authKeyRole = candidateRole.String()
 
-	// Replay protection, part 1: a SIG(0) window longer than the
-	// server's maximum would keep a captured message usable for longer
-	// than the ReplayGuard below has to reason about.
+	// A SIG(0) window longer than the server's maximum would keep a
+	// captured message cryptographically valid for longer than needed.
+	// (Replay itself is prevented by the SOA serial and version rules
+	// below; this only bounds the window those have to hold across.)
 	sig0 := isSig0(r)
 	if sig0 == nil {
 		// Can't happen once VerifySIG0 succeeded against the raw bytes,
@@ -473,19 +483,12 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Debugf("update for %s: SIG(0) validity window %s exceeds the %s maximum, refusing", zone, lifetime, s.maxSIG0Lifetime())
 		return reply(dns.RcodeNotAuth, statusErrSIG0LifetimeTooLong)
 	}
-	// Replay protection, part 2: this key's SIG(0) inception must not be
-	// older than the last message accepted from it for this zone, and
-	// this exact message must not have been accepted before -- see
-	// ReplayGuard. Checked before any expensive work (the
-	// chain-of-trust walk, content verification) a replay would
-	// otherwise trigger again.
-	digest := sig0Digest(sig0)
-	if !s.Replay.Allow(zone, candidate, sig0.Inception, digest) {
-		log.Warningf("update for %s from %s: SIG(0) inception %d from key tag %d is older than the last accepted one, or this message was already accepted -- refusing as a replay",
-			zone, remoteAddr, sig0.Inception, candidate.KeyTag())
-		return reply(dns.RcodeRefused, statusErrReplayed)
+
+	prereqs, claimedVersion, versionPresent, err := splitVersionPrereq(r.Answer, zone)
+	if err != nil {
+		log.Debugf("update for %s: %v", zone, err)
+		return reply(dns.RcodeFormatError, "")
 	}
-	mark := markFor(zone, candidate, sig0.Inception, digest)
 
 	// §10.6 registration record: a contact address (if this push carries
 	// one) rides the same authenticated UPDATE as everything else, at a
@@ -509,21 +512,54 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Debugf("update for %s: invalid decommission directive: %v", zone, err)
 		return reply(dns.RcodeFormatError, "")
 	}
+	if touchesReservedName(zoneOps, zone) {
+		log.Debugf("update for %s: update touches the reserved version name, refusing", zone)
+		return reply(dns.RcodeFormatError, "")
+	}
+
+	// Replay protection for control changes (see version.go): anything
+	// that changes the zone's control state -- onboarding, a rollover,
+	// its DNSKEY RRset, its contact, decommission -- must name the
+	// zone's current version, and increments it once applied. So must a
+	// zone's first content push, which has no SOA serial yet to be
+	// ordered by. A version that is present must match even where it
+	// isn't required.
+	touchesKeys := touchesDNSKEY(zoneOps, zone)
+	isControl := !alreadyPinned || isRollover || decommission || touchesKeys || contactUpdate != nil
+	currentVersion := s.Versions.Get(zone)
+	if !s.SkipVersionCheck {
+		needsVersion := isControl
+		if !needsVersion && containsAPEXSOA(zoneOps, zone) {
+			existing, ok := s.Store.Get(zone)
+			needsVersion = !ok || existing.SOA() == nil
+		}
+		switch {
+		case needsVersion && !versionPresent:
+			log.Debugf("update for %s: control change without a version prerequisite, refusing", zone)
+			return reply(dns.RcodeRefused, statusErrVersionRequired)
+		case versionPresent && claimedVersion != currentVersion:
+			log.Debugf("update for %s: version prerequisite %d, zone is at %d, refusing", zone, claimedVersion, currentVersion)
+			return reply(dns.RcodeNXRrset, statusErrStaleVersion)
+		}
+	}
+	var newVersion *uint64
+	if isControl {
+		v := currentVersion + 1
+		newVersion = &v
+	}
+
 	if decommission {
 		if !alreadyPinned || isRollover || candidateRole != RoleKSK {
 			log.Debugf("update for %s: decommission attempted by other than the zone's own pinned KSK, refusing", zone)
 			return reply(dns.RcodeRefused, statusErrDecommissionRequiresKSK)
 		}
 		if s.DB != nil {
-			if err := s.DB.DeleteZone(zone); err != nil {
+			if err := s.DB.DeleteZoneWithVersion(zone, *newVersion); err != nil {
 				log.Errorf("update for %s: DB.DeleteZone failed: %v", zone, err)
 				return reply(dns.RcodeServerFailure, "")
 			}
-			if err := s.DB.RecordReplayMark(mark); err != nil {
-				log.Errorf("update for %s: recording replay mark after decommission: %v", zone, err)
-			}
 		}
-		s.Replay.Record(zone, candidate, sig0.Inception, digest)
+		s.Versions.Set(zone, *newVersion)
 		s.Store.DeleteZone(zone)
 		s.Keys.DeleteZone(zone)
 		s.Contacts.Set(zone, nil)
@@ -538,7 +574,6 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// add/retire), which changes no served content at all and costs this
 	// server far less to process.
 	isFullPush := containsAPEXSOA(zoneOps, zone)
-	touchesKeys := touchesDNSKEY(zoneOps, zone)
 
 	// Only the KSK may change the zone's key set or its contact: a ZSK
 	// is the warm key an automation host holds for routine content
@@ -710,15 +745,15 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 
 	z := s.Store.GetOrCreate(zone)
-	if rcode, status, err := EvaluatePrerequisites(z, r.Answer, dns.ClassINET); err != nil {
+	if rcode, status, err := EvaluatePrerequisites(z, prereqs, dns.ClassINET); err != nil {
 		log.Debugf("update for %s: prerequisite failed: %v", zone, err)
 		return reply(rcode, status)
 	}
 
-	// Replay protection, part 3: a full push's SOA serial must move
+	// Replay protection for content: a full push's SOA serial must move
 	// forward (RFC 1982 arithmetic), the same rule secondaries and
 	// resolvers already rely on -- so an older complete zone can never
-	// be re-installed over a newer one, even by a key with no mark yet.
+	// be re-installed over a newer one.
 	if isFullPush {
 		if current := z.SOA(); current != nil {
 			if pushed := apexSOA(zoneOps, zone); pushed != nil && !serialGreater(pushed.Serial, current.Serial) {
@@ -792,7 +827,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		keyChange.RetireZSK = &tag
 	}
 	if s.DB != nil {
-		if err := s.DB.CommitUpdateWithMark(zone, mark, keyChange, zoneOps, dns.ClassINET, contactUpdate); err != nil {
+		if err := s.DB.CommitUpdateWithVersion(zone, newVersion, keyChange, zoneOps, dns.ClassINET, contactUpdate); err != nil {
 			log.Errorf("update for %s: DB.CommitUpdate failed: %v", zone, err)
 			return reply(dns.RcodeServerFailure, "")
 		}
@@ -841,7 +876,9 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		s.Keys.RetireZSK(zone, retiredZSKTag)
 		log.Infof("update for %s: retired ZSK key tag %d", zone, retiredZSKTag)
 	}
-	s.Replay.Record(zone, candidate, sig0.Inception, digest)
+	if newVersion != nil {
+		s.Versions.Set(zone, *newVersion)
+	}
 	if contactUpdate != nil && s.Contacts != nil {
 		s.Contacts.Set(zone, contactUpdate.Addresses)
 		log.Debugf("update for %s: contact registration updated (%d address(es))", zone, len(contactUpdate.Addresses))
@@ -1272,10 +1309,14 @@ const statusErrFullZoneRequired = "ERR_FULL_ZONE_REQUIRED"
 // isn't exactly the pinned KSK plus the registered ZSKs.
 const statusErrDNSKEYSetMismatch = "ERR_DNSKEY_RRSET_MISMATCH"
 
-// statusErrReplayed: the SIG(0) inception is older than that of the
-// last message accepted from the same key for the same zone, or this
-// exact message was already accepted -- see ReplayGuard.
-const statusErrReplayed = "ERR_REPLAYED"
+// statusErrVersionRequired: a control change (or a zone's first content
+// push) carried no version prerequisite -- see version.go.
+const statusErrVersionRequired = "ERR_VERSION_REQUIRED"
+
+// statusErrStaleVersion: the version prerequisite doesn't match the
+// zone's current version -- a replay, or something else changed the
+// zone's control state since the client read it. Re-read and re-sign.
+const statusErrStaleVersion = "ERR_STALE_VERSION"
 
 // statusErrSIG0LifetimeTooLong: the SIG(0) record's validity window is
 // longer than the server accepts -- see DefaultMaxSIG0Lifetime.

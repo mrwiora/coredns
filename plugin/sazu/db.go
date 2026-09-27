@@ -85,20 +85,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS audit_log_zone_at ON audit_log(zone, at);
 
--- Replay protection (see replay.go's ReplayGuard): the SIG(0) inception
--- of the newest accepted message per (zone, signing key), and the
--- space-separated digests of every message accepted at exactly that
--- inception. Deliberately
--- not a foreign key into zones(origin) and never deleted -- not by a ZSK
--- retirement, a KSK rollover, or DeleteZone -- so a captured message
--- can't be replayed after the key or zone it belongs to was removed and
--- later re-added.
-CREATE TABLE IF NOT EXISTS sig0_highwater (
-	zone      TEXT NOT NULL,
-	key_id    TEXT NOT NULL,
-	inception INTEGER NOT NULL,
-	digests   TEXT NOT NULL DEFAULT '',
-	PRIMARY KEY (zone, key_id)
+-- Every zone's control-state version (see version.go): the counter a
+-- control change must name as a prerequisite, incremented by each one.
+-- Deliberately not a foreign key into zones(origin) and never deleted --
+-- DeleteZone increments it instead -- so a message signed for an older
+-- version can't re-create or change a decommissioned zone later.
+CREATE TABLE IF NOT EXISTS zone_versions (
+	zone    TEXT PRIMARY KEY,
+	version INTEGER NOT NULL
 );
 `
 
@@ -342,15 +336,14 @@ type KeyChange struct {
 // ApplyUpdateOps' RFC 2136 §2.5 classification exactly, so the two stay
 // in lockstep for the same input.
 func (db *DB) CommitUpdate(zone string, keyChange *KeyChange, ops []dns.RR, zclass uint16, contact *ContactUpdate) error {
-	return db.CommitUpdateWithMark(zone, nil, keyChange, ops, zclass, contact)
+	return db.CommitUpdateWithVersion(zone, nil, keyChange, ops, zclass, contact)
 }
 
-// CommitUpdateWithMark is CommitUpdate that additionally records mark
-// (if non-nil) as the newest accepted SIG(0) inception for its (zone,
-// key) pair, in the same transaction -- so an update is never persisted
-// without the replay mark that stops it from being applied a second
-// time after a restart.
-func (db *DB) CommitUpdateWithMark(zone string, mark *ReplayMark, keyChange *KeyChange, ops []dns.RR, zclass uint16, contact *ContactUpdate) error {
+// CommitUpdateWithVersion is CommitUpdate that additionally sets the
+// zone's version (see version.go) to *version, if non-nil, in the same
+// transaction -- so a control change is never persisted without the
+// version bump that stops it from applying a second time.
+func (db *DB) CommitUpdateWithVersion(zone string, version *uint64, keyChange *KeyChange, ops []dns.RR, zclass uint16, contact *ContactUpdate) error {
 	tx, err := db.sql.Begin()
 	if err != nil {
 		return err
@@ -361,7 +354,7 @@ func (db *DB) CommitUpdateWithMark(zone string, mark *ReplayMark, keyChange *Key
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO zones (origin, created_at) VALUES (?, ?)`, zone, now); err != nil {
 		return fmt.Errorf("ensuring zone row: %w", err)
 	}
-	if err := recordReplayMark(tx, mark); err != nil {
+	if err := setVersion(tx, zone, version); err != nil {
 		return err
 	}
 
@@ -553,49 +546,38 @@ func purgeContent(tx *sql.Tx, zone string) error {
 	return nil
 }
 
-// recordReplayMark merges mark into sig0_highwater the same way
-// ReplayGuard.Record does in memory: a newer inception replaces the row
-// (and its digests), an equal one adds its digests, an older one is a
-// no-op. A nil mark is a no-op.
-func recordReplayMark(tx *sql.Tx, mark *ReplayMark) error {
-	if mark == nil {
+// setVersion upserts zone's version. A nil version is a no-op.
+func setVersion(tx *sql.Tx, zone string, version *uint64) error {
+	if version == nil {
 		return nil
-	}
-	var stored int64
-	var digests string
-	err := tx.QueryRow(`SELECT inception, digests FROM sig0_highwater WHERE zone = ? AND key_id = ?`,
-		mark.Zone, mark.KeyID).Scan(&stored, &digests)
-	switch {
-	case err == sql.ErrNoRows || (err == nil && int64(mark.Inception) > stored):
-		digests = strings.Join(mark.Digests, " ")
-	case err != nil:
-		return fmt.Errorf("reading SIG(0) replay mark: %w", err)
-	case int64(mark.Inception) < stored:
-		return nil
-	default:
-		digests = strings.TrimSpace(digests + " " + strings.Join(mark.Digests, " "))
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO sig0_highwater (zone, key_id, inception, digests) VALUES (?, ?, ?, ?)
-		 ON CONFLICT(zone, key_id) DO UPDATE SET inception = excluded.inception, digests = excluded.digests`,
-		mark.Zone, mark.KeyID, int64(mark.Inception), digests); err != nil {
-		return fmt.Errorf("recording SIG(0) replay mark: %w", err)
+		`INSERT INTO zone_versions (zone, version) VALUES (?, ?)
+		 ON CONFLICT(zone) DO UPDATE SET version = excluded.version`,
+		normalizeZone(zone), int64(*version)); err != nil {
+		return fmt.Errorf("recording zone version: %w", err)
 	}
 	return nil
 }
 
-// RecordReplayMark persists mark on its own -- for the one accepted
-// update that doesn't go through CommitUpdateWithMark, a decommission.
-func (db *DB) RecordReplayMark(mark *ReplayMark) error {
-	tx, err := db.sql.Begin()
+// LoadVersions returns every persisted zone version, for seeding a
+// VersionRegistry at startup.
+func (db *DB) LoadVersions() (map[string]uint64, error) {
+	rows, err := db.sql.Query(`SELECT zone, version FROM zone_versions`)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
-	if err := recordReplayMark(tx, mark); err != nil {
-		return err
+	defer rows.Close()
+	out := make(map[string]uint64)
+	for rows.Next() {
+		var zone string
+		var v int64
+		if err := rows.Scan(&zone, &v); err != nil {
+			return nil, err
+		}
+		out[zone] = uint64(v)
 	}
-	return tx.Commit()
+	return out, rows.Err()
 }
 
 // EarliestRRSIGExpiration returns the soonest expiration among every
@@ -626,29 +608,6 @@ func (db *DB) EarliestRRSIGExpiration(zone string) (earliest time.Time, ok bool,
 	return earliest, ok, rows.Err()
 }
 
-// LoadReplayMarks returns every persisted replay mark, for seeding a
-// ReplayGuard at startup.
-func (db *DB) LoadReplayMarks() ([]ReplayMark, error) {
-	rows, err := db.sql.Query(`SELECT zone, key_id, inception, digests FROM sig0_highwater`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []ReplayMark
-	for rows.Next() {
-		var m ReplayMark
-		var inception int64
-		var digests string
-		if err := rows.Scan(&m.Zone, &m.KeyID, &inception, &digests); err != nil {
-			return nil, err
-		}
-		m.Inception = uint32(inception)
-		m.Digests = strings.Fields(digests)
-		out = append(out, m)
-	}
-	return out, rows.Err()
-}
-
 // DeleteZone removes every persisted trace of zone -- its zones row,
 // every keys row, every rrs row, and its contacts row, if any -- so a
 // subsequent LoadAll sees no trace of it. Deliberately never touches
@@ -660,12 +619,26 @@ func (db *DB) LoadReplayMarks() ([]ReplayMark, error) {
 // existed at all (a rejected first-contact attempt), let alone one that
 // existed and was later removed.
 func (db *DB) DeleteZone(zone string) error {
+	return db.deleteZone(zone, nil)
+}
+
+// DeleteZoneWithVersion is DeleteZone that also sets the zone's version
+// (which survives the zone -- see zone_versions) in the same
+// transaction.
+func (db *DB) DeleteZoneWithVersion(zone string, version uint64) error {
+	return db.deleteZone(zone, &version)
+}
+
+func (db *DB) deleteZone(zone string, version *uint64) error {
 	zone = normalizeZone(zone)
 	tx, err := db.sql.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+	if err := setVersion(tx, zone, version); err != nil {
+		return err
+	}
 
 	if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ?`, zone); err != nil {
 		return fmt.Errorf("deleting rrs: %w", err)

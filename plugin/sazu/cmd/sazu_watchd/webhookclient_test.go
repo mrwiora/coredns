@@ -2,9 +2,9 @@ package main
 
 import (
 	"errors"
-	"sync/atomic"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 )

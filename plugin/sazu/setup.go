@@ -53,7 +53,7 @@ func setup(c *caddy.Controller) error {
 		InsecureSkipChainValidation: cfg.insecureSkipChainValidation,
 		RateLimiter:                 NewRateLimiter(cfg.fullPushesPerDay, cfg.keyManagementPushesPerDay),
 		IPRateLimiter:               NewIPRateLimiter(cfg.ipUpdatesPerMinute),
-		Replay:                      NewReplayGuard(),
+		Versions:                    NewVersionRegistry(),
 		MaxSIG0Lifetime:             cfg.maxSIG0Lifetime,
 	}
 
@@ -67,12 +67,14 @@ func setup(c *caddy.Controller) error {
 			db.Close()
 			return plugin.Error("sazu", err)
 		}
-		marks, err := db.LoadReplayMarks()
+		versions, err := db.LoadVersions()
 		if err != nil {
 			db.Close()
 			return plugin.Error("sazu", err)
 		}
-		s.Replay.Load(marks)
+		for zone, v := range versions {
+			s.Versions.Set(zone, v)
+		}
 		s.DB = db
 		s.Store = store
 		s.Keys = keys
