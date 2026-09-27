@@ -447,17 +447,19 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Debugf("update for %s: SIG(0) validity window %s exceeds the %s maximum, refusing", zone, lifetime, s.maxSIG0Lifetime())
 		return reply(dns.RcodeNotAuth, statusErrSIG0LifetimeTooLong)
 	}
-	// Replay protection, part 2: this key's SIG(0) inception must be
-	// strictly newer than the last message accepted from it for this
-	// zone -- see ReplayGuard. Checked before any expensive work (the
+	// Replay protection, part 2: this key's SIG(0) inception must not be
+	// older than the last message accepted from it for this zone, and
+	// this exact message must not have been accepted before -- see
+	// ReplayGuard. Checked before any expensive work (the
 	// chain-of-trust walk, content verification) a replay would
 	// otherwise trigger again.
-	if !s.Replay.Allow(zone, candidate, sig0.Inception) {
-		log.Warningf("update for %s from %s: SIG(0) inception %d from key tag %d is not newer than the last accepted one, refusing as a replay",
+	digest := sig0Digest(sig0)
+	if !s.Replay.Allow(zone, candidate, sig0.Inception, digest) {
+		log.Warningf("update for %s from %s: SIG(0) inception %d from key tag %d is older than the last accepted one, or this message was already accepted -- refusing as a replay",
 			zone, remoteAddr, sig0.Inception, candidate.KeyTag())
 		return reply(dns.RcodeRefused, statusErrReplayed)
 	}
-	mark := markFor(zone, candidate, sig0.Inception)
+	mark := markFor(zone, candidate, sig0.Inception, digest)
 
 	// §10.6 registration record: a contact address (if this push carries
 	// one) rides the same authenticated UPDATE as everything else, at a
@@ -495,7 +497,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 				log.Errorf("update for %s: recording replay mark after decommission: %v", zone, err)
 			}
 		}
-		s.Replay.Record(zone, candidate, sig0.Inception)
+		s.Replay.Record(zone, candidate, sig0.Inception, digest)
 		s.Store.DeleteZone(zone)
 		s.Keys.DeleteZone(zone)
 		s.Contacts.Set(zone, nil)
@@ -813,7 +815,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		s.Keys.RetireZSK(zone, retiredZSKTag)
 		log.Infof("update for %s: retired ZSK key tag %d", zone, retiredZSKTag)
 	}
-	s.Replay.Record(zone, candidate, sig0.Inception)
+	s.Replay.Record(zone, candidate, sig0.Inception, digest)
 	if contactUpdate != nil && s.Contacts != nil {
 		s.Contacts.Set(zone, contactUpdate.Addresses)
 		log.Debugf("update for %s: contact registration updated (%d address(es))", zone, len(contactUpdate.Addresses))
@@ -1244,9 +1246,9 @@ const statusErrFullZoneRequired = "ERR_FULL_ZONE_REQUIRED"
 // isn't exactly the pinned KSK plus the registered ZSKs.
 const statusErrDNSKEYSetMismatch = "ERR_DNSKEY_RRSET_MISMATCH"
 
-// statusErrReplayed: the SIG(0) inception isn't newer than that of the
-// last message accepted from the same key for the same zone -- see
-// ReplayGuard.
+// statusErrReplayed: the SIG(0) inception is older than that of the
+// last message accepted from the same key for the same zone, or this
+// exact message was already accepted -- see ReplayGuard.
 const statusErrReplayed = "ERR_REPLAYED"
 
 // statusErrSIG0LifetimeTooLong: the SIG(0) record's validity window is

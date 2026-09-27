@@ -140,10 +140,11 @@ entirely.**
 earlier state.**
 
 > **Status: mitigated.** The server now enforces three rules on every
-> update (see `replay.go` and README's "Replay protection"): each key's
-> SIG(0) inception must be strictly newer than the last message accepted
-> from that key for that zone (marks persisted in the same transaction
-> as the update, never deleted); a full push's SOA serial must move
+> update (see `replay.go` and README's "Replay protection"): a message
+> may not be older (by SIG(0) inception) than the newest one accepted
+> from the same key for that zone, nor one already accepted (marks --
+> the newest inception plus digests of the messages accepted at it --
+> persisted in the same transaction as the update, never deleted); a full push's SOA serial must move
 > forward (RFC 1982); and a SIG(0) window may not exceed
 > `max_sig0_lifetime` (default 1h5m). This closes every case below,
 > including the key-management one, without a separate sequence number:

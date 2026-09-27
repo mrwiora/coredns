@@ -173,3 +173,57 @@ func TestOverlongSIG0LifetimeIsRejected(t *testing.T) {
 	}
 	expectRefusedWith(t, "day-long SIG(0)", sendRaw(t, addr, wire), dns.RcodeNotAuth, statusErrSIG0LifetimeTooLong)
 }
+
+// TestSameSecondMessagesAreAcceptedButNotReplayed: several different
+// messages from one key within the same second (e.g. rotate-key's
+// add-zsk then retire-zsk) are all accepted without the client having to
+// wait, while replaying any of them is still refused -- also after a
+// restart.
+func TestSameSecondMessagesAreAcceptedButNotReplayed(t *testing.T) {
+	db := openTestDB(t)
+	s := newTestSazu("example.org.")
+	s.Replay = NewReplayGuard()
+	s.DB = db
+	addr := serveThroughRealServer(t, s)
+	ksk, kskPriv, zsk, _ := onboardKSKAndZSK(t, addr)
+
+	extra, _, err := GenerateEd25519Key("example.org.", false)
+	if err != nil {
+		t.Fatalf("generating ZSK: %v", err)
+	}
+	inception := time.Now().Add(-time.Minute).Truncate(time.Second)
+
+	add, err := BuildAddZSKPush("example.org.", currentDNSKEYs(t, addr), extra, ksk, kskPriv)
+	if err != nil {
+		t.Fatalf("BuildAddZSKPush: %v", err)
+	}
+	addWire := signAt(t, add, ksk, kskPriv, inception)
+	if resp := sendRaw(t, addr, addWire); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("add-zsk rcode = %s", dns.RcodeToString[resp.Rcode])
+	}
+	retire, err := BuildRetireZSKPush("example.org.", currentDNSKEYs(t, addr), zsk, ksk, kskPriv)
+	if err != nil {
+		t.Fatalf("BuildRetireZSKPush: %v", err)
+	}
+	retireWire := signAt(t, retire, ksk, kskPriv, inception)
+	if resp := sendRaw(t, addr, retireWire); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("same-second retire-zsk rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	}
+	expectRefusedWith(t, "replayed same-second add-zsk", sendRaw(t, addr, addWire), dns.RcodeRefused, statusErrReplayed)
+
+	marks, err := db.LoadReplayMarks()
+	if err != nil {
+		t.Fatalf("LoadReplayMarks: %v", err)
+	}
+	store, keys, contacts, err := db.LoadAll()
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	s2 := newTestSazu("example.org.")
+	s2.Store, s2.Keys, s2.Contacts, s2.DB = store, keys, contacts, db
+	s2.Replay = NewReplayGuard()
+	s2.Replay.Load(marks)
+	addr2 := serveThroughRealServer(t, s2)
+	expectRefusedWith(t, "replayed retire-zsk after restart", sendRaw(t, addr2, retireWire), dns.RcodeRefused, statusErrReplayed)
+	expectRefusedWith(t, "replayed add-zsk after restart", sendRaw(t, addr2, addWire), dns.RcodeRefused, statusErrReplayed)
+}

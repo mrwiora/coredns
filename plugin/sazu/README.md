@@ -54,7 +54,7 @@ it has to be pieced back together from the sections above.
 | Signature | Covers | Validity | What happens if you let it lapse |
 |---|---|---|---|
 | RRSIG (zone content) | Every record in a `publish-zone` push — this is the one that determines whether your zone validates for real DNSSEC resolvers. | **30 days** (`DefaultSignatureValidity`), fixed regardless of which key signs it — using the KSK instead of the ZSK does not extend it. | Resolvers see an expired signature once their cache re-fetches past it — SERVFAIL for a validating resolver. **You must run `publish-zone` again at least this often**, even with zero content changes, purely to refresh signatures. |
-| SIG(0) (transaction) | The UPDATE message itself, for the ~1 hour around when `sazuctl` sends it. | ~1 hour, set fresh by `sazuctl` on every push; the server refuses anything longer than `max_sig0_lifetime` (default 1h5m). | Nothing to manage — this isn't a stored credential. The server additionally accepts each key's messages only in strictly increasing SIG(0) inception order, so a captured push can never be applied twice or out of order (see [Replay protection](#replay-protection)). Never confuse this with the RRSIG window above; they protect different things on completely different timescales. |
+| SIG(0) (transaction) | The UPDATE message itself, for the ~1 hour around when `sazuctl` sends it. | ~1 hour, set fresh by `sazuctl` on every push; the server refuses anything longer than `max_sig0_lifetime` (default 1h5m). | Nothing to manage — this isn't a stored credential. The server additionally refuses any message it has already accepted, and any message older (by SIG(0) inception) than the newest it has accepted from the same key, so a captured push can never be applied twice or rolled back behind a newer one (see [Replay protection](#replay-protection)). Never confuse this with the RRSIG window above; they protect different things on completely different timescales. |
 
 **What's mandatory vs. configurable:**
 
@@ -410,11 +410,6 @@ Subcommands:
   onboarded again afterward with `publish-trust`, from scratch, with
   nothing left over to conflict with it.
 
-Every SIG(0) signature `sazuctl` makes gets a whole second of its own
-(it waits for the next second boundary, up to one second, before
-signing), because the server accepts each key's messages only in
-strictly increasing SIG(0) inception order.
-
 Every subcommand *other than* `add-zsk`, `retire-zsk`, and `rotate-key`
 run without `-target` just prints the signed wire bytes and self-verifies
 — safe to run with nothing listening yet.
@@ -769,11 +764,15 @@ sazu ZONES... {
 A signed UPDATE stays cryptographically valid until its SIG(0) expires.
 To keep a captured one from ever being applied again, the server:
 
-* accepts each key's messages for a zone only in **strictly increasing
-  SIG(0) inception** order (`ERR_REPLAYED` otherwise). The marks are
-  stored in the `db` together with the update they belong to and kept
-  even after a key is retired or the zone decommissioned, so neither a
-  restart nor a re-onboarding reopens the window;
+* refuses (`ERR_REPLAYED`) a message whose **SIG(0) inception is older**
+  than the newest it has accepted from the same key for the zone, and
+  any message it has **already accepted**. Different messages from one
+  key within the same second are all accepted, so clients never have to
+  wait between signatures. The marks (newest inception plus a digest of
+  each message accepted at it) are stored in the `db` together with the
+  update they belong to and kept even after a key is retired or the zone
+  decommissioned, so neither a restart nor a re-onboarding reopens the
+  window;
 * refuses a content push whose SOA serial isn't newer (RFC 1982) than the
   one it serves (`ERR_STALE_SERIAL`);
 * refuses a SIG(0) valid for longer than `max_sig0_lifetime`.

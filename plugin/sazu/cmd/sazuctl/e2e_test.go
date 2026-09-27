@@ -38,8 +38,8 @@ func startTestServer(t *testing.T) string {
 		Capture:                     sazu.NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
 		// As setup.go always installs one: these tests then also prove
-		// sazuctl's own signatures (sig0Window) stay strictly monotonic
-		// per key across back-to-back commands.
+		// back-to-back sazuctl commands -- often within the same second,
+		// with the same key -- are never mistaken for replays.
 		Replay: sazu.NewReplayGuard(),
 	}
 	cfg := &dnsserver.Config{

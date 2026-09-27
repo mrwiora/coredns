@@ -1156,29 +1156,16 @@ func serialNewer(a, b uint32) bool {
 	return a != b && a-b < 1<<31
 }
 
-// lastInception is the SIG(0) inception second this process last signed
-// with -- see sig0Window.
-var lastInception int64
-
 // sig0Window returns the SIG(0) inception and expiration for the next
-// message this process signs. A SAZU server only accepts a message
-// whose SIG(0) inception is strictly newer than the last one it
-// accepted from the same key for the same zone (its replay protection),
-// and inception has one-second resolution. So every signature here uses
-// a whole second of its own: the first one waits for the next second
-// boundary -- which keeps it apart from anything a previous, just-
-// finished sazuctl run signed -- and each later one in the same run
-// (rotate-key sends two) uses a later second still. Inception is then
-// backdated by a minute for clock skew; expiration is an hour out,
-// inside the server's default maximum SIG(0) lifetime.
+// message this process signs: inception backdated a minute for clock
+// skew, expiration an hour out, inside the server's default maximum
+// SIG(0) lifetime. No waiting is needed between signatures: the server
+// accepts several different messages from one key within the same
+// second, and only refuses a message it has already accepted or one
+// older than the newest it has seen.
 func sig0Window() (inception, expiration time.Time) {
-	next := time.Now().Truncate(time.Second).Add(time.Second)
-	if next.Unix() <= lastInception {
-		next = time.Unix(lastInception+1, 0)
-	}
-	time.Sleep(time.Until(next))
-	lastInception = next.Unix()
-	return next.Add(-time.Minute), next.Add(time.Hour)
+	now := time.Now()
+	return now.Add(-time.Minute), now.Add(time.Hour)
 }
 
 // chooseNetwork is signSelfVerifyAndSend's transport decision, pulled

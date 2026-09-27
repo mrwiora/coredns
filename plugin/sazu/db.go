@@ -86,7 +86,9 @@ CREATE TABLE IF NOT EXISTS audit_log (
 CREATE INDEX IF NOT EXISTS audit_log_zone_at ON audit_log(zone, at);
 
 -- Replay protection (see replay.go's ReplayGuard): the SIG(0) inception
--- of the newest accepted message per (zone, signing key). Deliberately
+-- of the newest accepted message per (zone, signing key), and the
+-- space-separated digests of every message accepted at exactly that
+-- inception. Deliberately
 -- not a foreign key into zones(origin) and never deleted -- not by a ZSK
 -- retirement, a KSK rollover, or DeleteZone -- so a captured message
 -- can't be replayed after the key or zone it belongs to was removed and
@@ -95,6 +97,7 @@ CREATE TABLE IF NOT EXISTS sig0_highwater (
 	zone      TEXT NOT NULL,
 	key_id    TEXT NOT NULL,
 	inception INTEGER NOT NULL,
+	digests   TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (zone, key_id)
 );
 `
@@ -550,16 +553,32 @@ func purgeContent(tx *sql.Tx, zone string) error {
 	return nil
 }
 
-// recordReplayMark upserts mark into sig0_highwater, never moving an
-// existing mark backwards. A nil mark is a no-op.
+// recordReplayMark merges mark into sig0_highwater the same way
+// ReplayGuard.Record does in memory: a newer inception replaces the row
+// (and its digests), an equal one adds its digests, an older one is a
+// no-op. A nil mark is a no-op.
 func recordReplayMark(tx *sql.Tx, mark *ReplayMark) error {
 	if mark == nil {
 		return nil
 	}
+	var stored int64
+	var digests string
+	err := tx.QueryRow(`SELECT inception, digests FROM sig0_highwater WHERE zone = ? AND key_id = ?`,
+		mark.Zone, mark.KeyID).Scan(&stored, &digests)
+	switch {
+	case err == sql.ErrNoRows || (err == nil && int64(mark.Inception) > stored):
+		digests = strings.Join(mark.Digests, " ")
+	case err != nil:
+		return fmt.Errorf("reading SIG(0) replay mark: %w", err)
+	case int64(mark.Inception) < stored:
+		return nil
+	default:
+		digests = strings.TrimSpace(digests + " " + strings.Join(mark.Digests, " "))
+	}
 	if _, err := tx.Exec(
-		`INSERT INTO sig0_highwater (zone, key_id, inception) VALUES (?, ?, ?)
-		 ON CONFLICT(zone, key_id) DO UPDATE SET inception = MAX(inception, excluded.inception)`,
-		mark.Zone, mark.KeyID, int64(mark.Inception)); err != nil {
+		`INSERT INTO sig0_highwater (zone, key_id, inception, digests) VALUES (?, ?, ?, ?)
+		 ON CONFLICT(zone, key_id) DO UPDATE SET inception = excluded.inception, digests = excluded.digests`,
+		mark.Zone, mark.KeyID, int64(mark.Inception), digests); err != nil {
 		return fmt.Errorf("recording SIG(0) replay mark: %w", err)
 	}
 	return nil
@@ -610,7 +629,7 @@ func (db *DB) EarliestRRSIGExpiration(zone string) (earliest time.Time, ok bool,
 // LoadReplayMarks returns every persisted replay mark, for seeding a
 // ReplayGuard at startup.
 func (db *DB) LoadReplayMarks() ([]ReplayMark, error) {
-	rows, err := db.sql.Query(`SELECT zone, key_id, inception FROM sig0_highwater`)
+	rows, err := db.sql.Query(`SELECT zone, key_id, inception, digests FROM sig0_highwater`)
 	if err != nil {
 		return nil, err
 	}
@@ -619,10 +638,12 @@ func (db *DB) LoadReplayMarks() ([]ReplayMark, error) {
 	for rows.Next() {
 		var m ReplayMark
 		var inception int64
-		if err := rows.Scan(&m.Zone, &m.KeyID, &inception); err != nil {
+		var digests string
+		if err := rows.Scan(&m.Zone, &m.KeyID, &inception, &digests); err != nil {
 			return nil, err
 		}
 		m.Inception = uint32(inception)
+		m.Digests = strings.Fields(digests)
 		out = append(out, m)
 	}
 	return out, rows.Err()

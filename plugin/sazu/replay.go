@@ -1,6 +1,8 @@
 package sazu
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -19,14 +21,27 @@ import (
 // server has already accepted.
 const DefaultMaxSIG0Lifetime = time.Hour + 5*time.Minute
 
-// ReplayGuard enforces the protocol's per-key monotonic-inception rule:
-// for every (zone, key) pair, the SIG(0) inception time of each accepted
-// message must be strictly greater than that of the last message
-// accepted from that key for that zone. A captured message -- replayed
-// as-is, or held back and delivered after a newer one -- therefore never
-// verifies twice, whatever it carries: an old content push can't roll
-// the zone back, and a key-management message can't be re-applied (the
-// motivating case: re-registering a ZSK that has since been retired).
+// ReplayGuard enforces the protocol's per-key replay rule. For every
+// (zone, key) pair it remembers the newest SIG(0) inception accepted so
+// far and a digest of each message accepted with exactly that
+// inception. A message from that key for that zone is then accepted
+// only if its inception is
+//
+//   - newer than the remembered one (the digest set starts over), or
+//   - equal to it, and the message itself isn't one already accepted.
+//
+// So a captured message can never be applied twice, and one held back
+// can never be applied after a newer second's message -- an old content
+// push can't roll the zone back, and a key-management message can't be
+// re-applied (the motivating case: re-registering a ZSK that has since
+// been retired). Allowing equal inceptions keeps clients from having to
+// wait: SIG(0) inception has one-second resolution, and requiring a
+// strictly newer one would force every client to spend a second of its
+// own on each signature (rotate-key alone signs twice). The cost is that
+// two *different* messages signed by the same key within the same second
+// aren't ordered against each other; the SOA serial rule (content) and
+// the complete-DNSKEY-RRset rule (key management) still refuse anything
+// that would move the zone backwards.
 //
 // Marks are keyed by the full key (algorithm, key tag, public key), not
 // the key tag alone, and are deliberately never removed -- not when a
@@ -36,19 +51,24 @@ const DefaultMaxSIG0Lifetime = time.Hour + 5*time.Minute
 // re-onboarded. Growth is bounded by what gets accepted in the first
 // place: a mark is only ever written for a message that passed SIG(0)
 // verification and every other check, which the per-zone quotas already
-// limit.
+// limit, and only the newest second's digests are kept.
 //
 // A nil *ReplayGuard disables the check entirely -- only ever the case
 // for a Sazu constructed directly (this package's own tests); setup.go
 // always installs one.
 type ReplayGuard struct {
 	mu    sync.Mutex
-	marks map[string]uint32
+	marks map[string]*replayState
+}
+
+type replayState struct {
+	inception uint32
+	seen      map[string]bool // digests of messages accepted at inception
 }
 
 // NewReplayGuard returns an empty ReplayGuard.
 func NewReplayGuard() *ReplayGuard {
-	return &ReplayGuard{marks: make(map[string]uint32)}
+	return &ReplayGuard{marks: make(map[string]*replayState)}
 }
 
 // replayKeyID identifies key for ReplayGuard's purposes -- see
@@ -62,55 +82,79 @@ func replayMapKey(zone, keyID string) string {
 	return normalizeZone(zone) + "|" + keyID
 }
 
-// Allow reports whether a message for zone signed by key with the given
-// SIG(0) inception is newer than anything already accepted from that key
-// for that zone. It does not record anything -- call Record once the
+// sig0Digest identifies one signed message: a hash of its SIG(0)
+// signature, which covers the whole message and is unique to it.
+func sig0Digest(sig *dns.SIG) string {
+	sum := sha256.Sum256([]byte(sig.Signature))
+	return hex.EncodeToString(sum[:])
+}
+
+// Allow reports whether a message for zone signed by key, with the given
+// SIG(0) inception and digest (sig0Digest), may be accepted -- see
+// ReplayGuard. It does not record anything: call Record once the
 // message has actually been applied, so a message rejected later for an
-// unrelated reason doesn't burn its inception time.
-func (g *ReplayGuard) Allow(zone string, key *dns.DNSKEY, inception uint32) bool {
+// unrelated reason doesn't count as seen.
+func (g *ReplayGuard) Allow(zone string, key *dns.DNSKEY, inception uint32, digest string) bool {
 	if g == nil {
 		return true
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	last, seen := g.marks[replayMapKey(zone, replayKeyID(key))]
-	return !seen || inception > last
+	st, ok := g.marks[replayMapKey(zone, replayKeyID(key))]
+	switch {
+	case !ok || inception > st.inception:
+		return true
+	case inception == st.inception:
+		return !st.seen[digest]
+	default:
+		return false
+	}
 }
 
-// Record notes inception as the newest accepted SIG(0) inception for
-// (zone, key). It never moves a mark backwards.
-func (g *ReplayGuard) Record(zone string, key *dns.DNSKEY, inception uint32) {
+// Record notes an accepted message for (zone, key).
+func (g *ReplayGuard) Record(zone string, key *dns.DNSKEY, inception uint32, digest string) {
 	if g == nil {
 		return
 	}
-	g.set(replayMapKey(zone, replayKeyID(key)), inception)
+	g.merge(replayMapKey(zone, replayKeyID(key)), inception, []string{digest})
 }
 
-func (g *ReplayGuard) set(k string, inception uint32) {
+func (g *ReplayGuard) merge(k string, inception uint32, digests []string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if last, seen := g.marks[k]; !seen || inception > last {
-		g.marks[k] = inception
+	st, ok := g.marks[k]
+	switch {
+	case !ok || inception > st.inception:
+		st = &replayState{inception: inception, seen: make(map[string]bool)}
+		g.marks[k] = st
+	case inception < st.inception:
+		return
+	}
+	for _, d := range digests {
+		st.seen[d] = true
 	}
 }
 
-// ReplayMark is one persisted ReplayGuard entry -- see DB.CommitUpdateWithMark
-// and DB.LoadReplayMarks.
+// ReplayMark is one persisted ReplayGuard entry -- see
+// DB.CommitUpdateWithMark and DB.LoadReplayMarks. Digests are the
+// messages accepted at exactly Inception.
 type ReplayMark struct {
 	Zone      string
 	KeyID     string
 	Inception uint32
+	Digests   []string
 }
 
-// markFor builds the ReplayMark for a message from zone signed by key.
-func markFor(zone string, key *dns.DNSKEY, inception uint32) *ReplayMark {
-	return &ReplayMark{Zone: normalizeZone(zone), KeyID: replayKeyID(key), Inception: inception}
+// markFor builds the ReplayMark for one accepted message from zone
+// signed by key.
+func markFor(zone string, key *dns.DNSKEY, inception uint32, digest string) *ReplayMark {
+	return &ReplayMark{Zone: normalizeZone(zone), KeyID: replayKeyID(key), Inception: inception, Digests: []string{digest}}
 }
 
 // Load seeds g from persisted marks, e.g. at startup.
 func (g *ReplayGuard) Load(marks []ReplayMark) {
 	for _, m := range marks {
-		g.set(replayMapKey(m.Zone, m.KeyID), m.Inception)
+		g.merge(replayMapKey(m.Zone, m.KeyID), m.Inception, m.Digests)
 	}
 }
 
