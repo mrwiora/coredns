@@ -364,3 +364,20 @@ fixed these, none of which the sections above had flagged:
   zone's NSEC/NSEC3 chain until the next full push. Now refused.
 - **A SHA-1 DS could satisfy the chain-of-trust match.** Now only
   SHA-256/SHA-384 count.
+- **SIG(0) was verified over one message and another was applied.**
+  The signature was checked against the raw bytes captured for (source
+  address, message ID), but the separately parsed message was what got
+  applied. A spoofed packet with the victim's source address and ID —
+  carrying a copy of the victim's SIG(0) record — could pair a forged
+  decommission or contact change with genuinely signed bytes. UDP and
+  TCP shared one capture key space, so TCP clients were exposed too.
+  Now only the message parsed from the verified bytes is processed, and
+  capture keys include the transport.
+- **sazu-watchd webhooks could reach internal addresses.** Contact URLs
+  come from zone owners; the daemon now refuses non-public destinations
+  at dial time, follows no redirects and ignores proxy settings (unless
+  `-webhook-allow-private`).
+- **IPv6 was rate-limited per /128.** Now per /64.
+- **Any UDP packet could evict pending UPDATE capture entries.** Only
+  UPDATE requests are captured now, and every UPDATE claims its entry
+  on arrival, so requests refused early don't leave entries behind.

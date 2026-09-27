@@ -1483,21 +1483,32 @@ func TestWildcardScopeFallsThroughForNeverOnboardedNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
+	// UDP and TCP must share one port number, and a free UDP port's TCP
+	// twin can already be taken (by another test's connection), so retry
+	// with a fresh port rather than fail on that race.
+	var pc net.PacketConn
+	var l net.Listener
+	for attempt := 0; ; attempt++ {
+		var err error
+		pc, err = net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("ListenPacket: %v", err)
+		}
+		_, port, err := net.SplitHostPort(pc.LocalAddr().String())
+		if err != nil {
+			t.Fatalf("SplitHostPort: %v", err)
+		}
+		if l, err = net.Listen("tcp", "127.0.0.1:"+port); err == nil {
+			break
+		}
+		pc.Close()
+		if attempt == 20 {
+			t.Fatalf("Listen: %v", err)
+		}
 	}
 	defer pc.Close()
-	go func() { _ = srv.ServePacket(pc) }()
-	_, port, err := net.SplitHostPort(pc.LocalAddr().String())
-	if err != nil {
-		t.Fatalf("SplitHostPort: %v", err)
-	}
-	l, err := net.Listen("tcp", "127.0.0.1:"+port)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
 	defer l.Close()
+	go func() { _ = srv.ServePacket(pc) }()
 	go func() { _ = srv.Serve(l) }()
 	defer srv.Stop()
 	addr := pc.LocalAddr().String()

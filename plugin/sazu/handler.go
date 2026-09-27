@@ -129,6 +129,16 @@ func (s *Sazu) Name() string { return "sazu" }
 // what lets a new customer domain be onboarded by sending it a signed
 // push, with no Corefile edit or server restart needed per domain.
 func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	// Claim this UPDATE's captured bytes first, whatever happens to the
+	// request next: an entry left behind by a request refused early (out
+	// of scope, malformed, rate-limited) would otherwise sit in the
+	// bounded capture table until evicted, crowding out legitimate ones.
+	var raw []byte
+	var haveRaw bool
+	if r.Opcode == dns.OpcodeUpdate {
+		raw, haveRaw = s.Capture.Take(w.RemoteAddr(), r.Id)
+	}
+
 	if len(r.Question) != 1 {
 		return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
 	}
@@ -141,7 +151,7 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 		if plugin.Zones(s.Zones).Matches(qname) == "" {
 			return s.nextOrRefuse(ctx, w, r, qname, "outside this instance's configured zone scope")
 		}
-		return s.serveUpdate(ctx, w, r, qname)
+		return s.serveUpdate(ctx, w, r, qname, raw, haveRaw)
 	}
 
 	// Ordinary query: find which *onboarded* zone (if any) qname falls
@@ -244,7 +254,7 @@ func isDNSSECRequested(r *dns.Msg) bool {
 	return opt != nil && opt.Do()
 }
 
-func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, zone string) (int, error) {
+func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, zone string, raw []byte, ok bool) (int, error) {
 	txID := newTransactionID()
 	remoteAddr := w.RemoteAddr().String()
 	// authKeyTag/authKeyRole identify the key whose SIG(0) signature
@@ -303,7 +313,6 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		return reply(dns.RcodeRefused, statusErrRateLimited)
 	}
 
-	raw, ok := s.Capture.Take(w.RemoteAddr(), r.Id)
 	if !ok {
 		// §7.3 HTTPS/JSON carrier: UDP/TCP get here via
 		// UDPDecorateReaderFunc/TCPDecorateReaderFunc into s.Capture, but
