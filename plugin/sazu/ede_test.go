@@ -80,3 +80,29 @@ func TestEveryStatusHasAnEDECode(t *testing.T) {
 		}
 	}
 }
+
+// TestSignatureFailureNamesTheRRset: the diagnostic detail says which
+// name and type failed verification.
+func TestSignatureFailureNamesTheRRset(t *testing.T) {
+	s := newTestSazu("example.org.")
+	addr := serveThroughRealServer(t, s)
+	_, _, zsk, zskPriv := onboardKSKAndZSK(t, addr)
+	m, err := BuildContentPush("example.org.", testSOA(5), []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, zsk, zskPriv, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Drop the RRSIG covering www's A record.
+	var kept []dns.RR
+	for _, rr := range m.Ns {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeA {
+			continue
+		}
+		kept = append(kept, rr)
+	}
+	m.Ns = kept
+	resp := sendRaw(t, addr, signNow(t, m, zsk, zskPriv))
+	expectRefusedWith(t, "push with an unsigned RRset", resp, dns.RcodeNotAuth, statusErrSigInvalid)
+	if d := diagnosticDetailForTest(resp); d != "no valid RRSIG covers www.example.org./A" {
+		t.Fatalf("detail = %q", d)
+	}
+}

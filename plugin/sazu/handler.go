@@ -373,7 +373,8 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	signed := new(dns.Msg)
 	if err := signed.Unpack(raw); err != nil ||
 		signed.Id != r.Id || signed.Opcode != dns.OpcodeUpdate || signed.Response ||
-		len(signed.Question) != 1 || !strings.EqualFold(signed.Question[0].Name, zone) {
+		len(signed.Question) != 1 || !strings.EqualFold(signed.Question[0].Name, zone) ||
+		signed.Question[0].Qtype != dns.TypeSOA || signed.Question[0].Qclass != dns.ClassINET {
 		log.Warningf("update for %s from %s: captured bytes for id %d are not this request, refusing", zone, remoteAddr, r.Id)
 		return reply(dns.RcodeFormatError, "")
 	}
@@ -496,6 +497,13 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		// but never index a nil record on the strength of that alone.
 		return reply(dns.RcodeFormatError, "")
 	}
+	if !strings.EqualFold(sig0.SignerName, dns.Fqdn(zone)) {
+		// The SIG(0) key is always one of the zone's own DNSKEYs, so its
+		// signer name is the zone apex; anything else names some other
+		// principal this server knows nothing about.
+		log.Debugf("update for %s: SIG(0) signer name %s is not the zone apex, refusing", zone, sig0.SignerName)
+		return reply(dns.RcodeNotAuth, "")
+	}
 	if lifetime := time.Duration(sig0.Expiration-sig0.Inception) * time.Second; lifetime > s.maxSIG0Lifetime() {
 		log.Debugf("update for %s: SIG(0) validity window %s exceeds the %s maximum, refusing", zone, lifetime, s.maxSIG0Lifetime())
 		return reply(dns.RcodeNotAuth, statusErrSIG0LifetimeTooLong)
@@ -597,6 +605,19 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// add/retire), which changes no served content at all and costs this
 	// server far less to process.
 	isFullPush := containsAPEXSOA(zoneOps, zone)
+
+	// Every update must be one of the message kinds (or an allowed
+	// combination of them). One that changes nothing at all matches none.
+	if len(zoneOps) == 0 && !isControl {
+		log.Debugf("update for %s: carries no operation of any message kind, refusing", zone)
+		return reply(dns.RcodeFormatError, "")
+	}
+	// A content push replaces the whole zone, so it has nothing to delete
+	// -- except DNSKEYs, when it's combined with a key update.
+	if isFullPush && hasNonDNSKEYDeletes(zoneOps) {
+		log.Debugf("update for %s: content push carries delete operations, refusing", zone)
+		return reply(dns.RcodeFormatError, "")
+	}
 
 	// Only the KSK may change the zone's key set or its contact: a ZSK
 	// is the warm key an automation host holds for routine content
@@ -846,6 +867,9 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		if status == "" {
 			status = statusErrSigInvalid
 		}
+		// Name the failing RRset, so the client can say exactly what to
+		// fix (the protocol's §6.2).
+		statusDetail = strings.TrimPrefix(err.Error(), "sazu: ")
 		return reply(dns.RcodeNotAuth, status)
 	}
 
@@ -1176,6 +1200,18 @@ func touchesDNSKEY(updateOps []dns.RR, zone string) bool {
 			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeDNSKEY {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// hasNonDNSKEYDeletes reports whether updateOps contains an RFC 2136
+// delete (class ANY or NONE) of anything but a DNSKEY.
+func hasNonDNSKEYDeletes(updateOps []dns.RR) bool {
+	for _, rr := range updateOps {
+		h := rr.Header()
+		if (h.Class == dns.ClassANY || h.Class == dns.ClassNONE) && h.Rrtype != dns.TypeDNSKEY {
+			return true
 		}
 	}
 	return false

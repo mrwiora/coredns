@@ -97,6 +97,9 @@ func TestCheckOnceAlertsOnTransitionFromOKToFailing(t *testing.T) {
 	}
 
 	v.err = map[string]error{"example.org.": fmt.Errorf("no DS published")}
+	if early, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -124,6 +127,9 @@ func TestCheckOnceAlertsOnRecovery(t *testing.T) {
 	}
 
 	v.err = nil
+	if early, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -165,6 +171,9 @@ func TestCheckOnceHandlesMultipleZonesIndependently(t *testing.T) {
 	}
 
 	v.err = map[string]error{"a.example.": fmt.Errorf("broken")}
+	if early, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -222,6 +231,9 @@ func TestCheckOnceAlertsWhenARegisteredZSKGoesMissing(t *testing.T) {
 	}
 
 	f.served["example.org."] = map[uint16]bool{} // key no longer served
+	if early, err := checkOnce(db, fakeValidator{}, f, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, fakeValidator{}, f, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -250,6 +262,9 @@ func TestCheckOnceAlertsWhenAMissingZSKIsRestored(t *testing.T) {
 	}
 
 	f.served["example.org."] = map[uint16]bool{tag: true}
+	if early, err := checkOnce(db, fakeValidator{}, f, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, fakeValidator{}, f, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -337,6 +352,9 @@ func TestCheckOnceAlertWithNoRegisteredContactStillReported(t *testing.T) {
 		t.Fatalf("first checkOnce: %v", err)
 	}
 	v.err = map[string]error{"example.org.": fmt.Errorf("broken")}
+	if _, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil { // debounce: first differing pass
+		t.Fatal(err)
+	}
 	alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -468,5 +486,27 @@ func TestCheckOnceAlertsOnPendingRollover(t *testing.T) {
 	}
 	if rec := pendingAlerts(); len(rec) != 1 || !rec[0].Recovered {
 		t.Fatalf("expected a recovery once it's no longer pending, got %+v", rec)
+	}
+}
+
+// TestCheckOnceTreatsUnreachableParentAsInconclusive: a pass that can't
+// reach the parent at all neither alerts nor counts towards the debounce.
+func TestCheckOnceTreatsUnreachableParentAsInconclusive(t *testing.T) {
+	db := openTestDB(t)
+	onboardTestZone(t, db, "example.org.")
+	v := fakeValidator{}
+	state := make(map[string]*zoneState)
+	if _, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil {
+		t.Fatal(err)
+	}
+	v.err = map[string]error{"example.org.": &sazu.ChainError{Op: "query", Msg: "timeout"}}
+	for i := 0; i < 3; i++ {
+		alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
+		if err != nil || len(alerts) != 0 {
+			t.Fatalf("pass %d: expected no alert for an unreachable parent, got %+v (%v)", i, alerts, err)
+		}
+	}
+	if !state["example.org."].lastOK {
+		t.Fatalf("an unreachable parent must not change the last known outcome")
 	}
 }

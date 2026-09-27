@@ -361,7 +361,7 @@ Subcommands:
   register (or, with `-clear`, remove) the zone's §10.6 contact address(es):
   where `sazu-watchd`'s (§11) alerts get sent. `-key` must be the zone's
   KSK — the server refuses a contact change authenticated by a ZSK.
-  `-address` accepts `mailto:` for email or `http(s)://` for a webhook, and
+  `-address` accepts `mailto:` for email or `https://` for a webhook, and
   can repeat. This rides an ordinary authenticated push at a reserved owner
   name (`_sazu-contact.<zone>`) — it is never itself DNSSEC-signed or
   servable DNS content, just metadata carried alongside a real update.
@@ -571,7 +571,7 @@ there is no other configuration to keep in sync between the two. Alerts go
 to whatever address(es) a zone registered with `sazuctl contact`: `mailto:`
 addresses via SMTP (configure `-smtp-*` above, or leave them unset --
 email alerts are simply skipped, with a logged error, until they're
-configured), `https://`/`http://` addresses via a small JSON webhook POST.
+configured), `https://` addresses via a small JSON webhook POST.
 A zone with no registered contact still gets every check logged, just
 with nothing to notify externally.
 

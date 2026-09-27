@@ -123,10 +123,12 @@ func validateContactAddresses(addrs []string) ([]string, error) {
 		if a == "" {
 			continue
 		}
-		if !hasNonEmptySchemePrefix(a, "mailto:") &&
-			!hasNonEmptySchemePrefix(a, "http://") &&
-			!hasNonEmptySchemePrefix(a, "https://") {
-			return nil, fmt.Errorf("contact address %q: must start with mailto:, http://, or https://", a)
+		// Webhooks must be https:// -- an alert is security-relevant
+		// (it may be the only notice of a registrar compromise), so it
+		// isn't sent in the clear where anyone on the path could read or
+		// suppress it.
+		if !hasNonEmptySchemePrefix(a, "mailto:") && !hasNonEmptySchemePrefix(a, "https://") {
+			return nil, fmt.Errorf("contact address %q: must start with mailto: or https://", a)
 		}
 		out = append(out, a)
 	}

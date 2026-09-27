@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -21,6 +22,13 @@ import (
 // yet another persisted table for a purely advisory monitoring signal.
 type zoneState struct {
 	lastOK bool
+
+	// chainFlips counts consecutive passes whose chain-of-trust outcome
+	// differed from lastOK; lastOK only changes -- and an alert only
+	// fires -- once two passes in a row agree (see debounced).
+	chainFlips int
+	// zskFlips is the same, per registered ZSK key tag.
+	zskFlips map[uint16]int
 
 	// zskPresent tracks, per currently-registered ZSK key tag, whether
 	// the last pass found it present in the zone's live-served DNSKEY
@@ -144,14 +152,22 @@ func checkOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher
 		checkErr := validator.VerifyChainOfTrust(zone, zk.KSK.DNSKEY)
 		nowOK := checkErr == nil
 		switch {
+		case inconclusive(checkErr):
+			// The parent (or an ancestor) couldn't be reached at all: no
+			// evidence either way, so neither an alert nor a step
+			// towards one.
 		case !seen:
 			// First observation: baseline only, no alert -- see doc comment.
-		case st.lastOK && !nowOK:
-			alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertChainOfTrust, Err: checkErr})
-		case !st.lastOK && nowOK:
-			alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertChainOfTrust, Recovered: true})
+			st.lastOK = nowOK
+		default:
+			if changed := debounced(&st.lastOK, &st.chainFlips, nowOK); changed {
+				if nowOK {
+					alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertChainOfTrust, Recovered: true})
+				} else {
+					alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertChainOfTrust, Err: checkErr})
+				}
+			}
 		}
-		st.lastOK = nowOK
 
 		if len(zk.ZSKs) > 0 {
 			alerts = append(alerts, checkZSKPresence(db, zone, zk, dnskeys, st, seen)...)
@@ -166,6 +182,35 @@ func checkOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher
 		alerts = append(alerts, expiryAlerts...)
 	}
 	return alerts, nil
+}
+
+// debounceThreshold is how many consecutive passes must agree on a new
+// outcome before it replaces the last known one and alerts -- so a
+// single transient resolution hiccup never pages anyone.
+const debounceThreshold = 2
+
+// debounced feeds one pass's outcome into a debounced state: *last is
+// the last confirmed outcome and *flips the number of consecutive passes
+// since that disagreed with it. It reports whether *last just changed.
+func debounced(last *bool, flips *int, now bool) bool {
+	if now == *last {
+		*flips = 0
+		return false
+	}
+	*flips++
+	if *flips < debounceThreshold {
+		return false
+	}
+	*last, *flips = now, 0
+	return true
+}
+
+// inconclusive reports whether a chain-of-trust error only means the
+// servers couldn't be reached or queried -- not that anything about the
+// delegation is wrong.
+func inconclusive(err error) bool {
+	var ce *sazu.ChainError
+	return errors.As(err, &ce) && (ce.Op == "query" || ce.Op == "delegation")
 }
 
 // checkPendingRollover alerts as soon as a KSK rollover becomes pending
@@ -226,22 +271,27 @@ func checkZSKPresence(db *sazu.DB, zone string, zk *sazu.ZoneKeys, dnskeys DNSKE
 	if st.zskPresent == nil {
 		st.zskPresent = make(map[uint16]bool, len(zk.ZSKs))
 	}
+	if st.zskFlips == nil {
+		st.zskFlips = make(map[uint16]int, len(zk.ZSKs))
+	}
 
 	var alerts []Alert
 	for _, zsk := range zk.ZSKs {
 		tag := zsk.KeyTag()
 		nowPresent := served[tag]
 		wasPresent, seen := st.zskPresent[tag]
-		switch {
-		case !seenBefore || !seen:
+		if !seenBefore || !seen {
 			// First observation of this zone, or of this specific key
 			// tag (e.g. just registered) -- baseline only, no alert.
-		case wasPresent && !nowPresent:
-			alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertZSKMissing, KeyTag: tag})
-		case !wasPresent && nowPresent:
-			alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertZSKMissing, KeyTag: tag, Recovered: true})
+			st.zskPresent[tag] = nowPresent
+			continue
 		}
-		st.zskPresent[tag] = nowPresent
+		flips := st.zskFlips[tag]
+		if debounced(&wasPresent, &flips, nowPresent) {
+			alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertZSKMissing, KeyTag: tag, Recovered: nowPresent})
+		}
+		st.zskPresent[tag] = wasPresent
+		st.zskFlips[tag] = flips
 	}
 	return alerts
 }
