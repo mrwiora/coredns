@@ -776,6 +776,17 @@ sazu ZONES... {
   file for anything long-lived. A file that can't be loaded fails
   startup rather than falling back.
 
+### Status codes
+
+Every refusal carries a SAZU status code (e.g. `ERR_NO_DS_PUBLISHED`)
+next to the RCODE. When the request carries EDNS(0) — `sazuctl` always
+sends it — the code arrives as an RFC 8914 Extended DNS Error: the
+status as EXTRA-TEXT, with INFO-CODE 18 (Prohibited) for policy
+refusals, 1/2 for a weak key algorithm or DS digest, 6 (DNSSEC Bogus)
+for a signature that doesn't verify, 7 (Signature Expired), and 0
+otherwise. For clients without EDNS it is also sent as a TXT record at
+the zone apex in the Additional section.
+
 ### Replay protection
 
 A signed UPDATE stays cryptographically valid until its SIG(0) expires.

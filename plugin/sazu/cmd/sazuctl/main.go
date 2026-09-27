@@ -553,6 +553,7 @@ func runPublishTrust(args []string) error {
 	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, true); err != nil {
 		return err
 	}
+	m.SetEdns0(dns.DefaultMsgSize, false) // lets the server answer with an RFC 8914 Extended DNS Error
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
@@ -660,6 +661,7 @@ func runPublishZone(args []string) error {
 			}
 		}
 	}
+	m.SetEdns0(dns.DefaultMsgSize, false) // lets the server answer with an RFC 8914 Extended DNS Error
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, zsk, zskPriv, inception, expiration)
 	if err != nil {
@@ -728,6 +730,7 @@ func runContact(args []string) error {
 	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
 		return err
 	}
+	m.SetEdns0(dns.DefaultMsgSize, false) // lets the server answer with an RFC 8914 Extended DNS Error
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, key, priv, inception, expiration)
 	if err != nil {
@@ -775,6 +778,7 @@ func runDecommissionZone(args []string) error {
 	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
 		return err
 	}
+	m.SetEdns0(dns.DefaultMsgSize, false) // lets the server answer with an RFC 8914 Extended DNS Error
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
@@ -849,6 +853,7 @@ func runAddZSK(args []string) error {
 	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
 		return err
 	}
+	m.SetEdns0(dns.DefaultMsgSize, false) // lets the server answer with an RFC 8914 Extended DNS Error
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
@@ -915,6 +920,7 @@ func runRetireZSK(args []string) error {
 	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
 		return err
 	}
+	m.SetEdns0(dns.DefaultMsgSize, false) // lets the server answer with an RFC 8914 Extended DNS Error
 	inception, expiration := sig0Window()
 	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
@@ -1051,6 +1057,7 @@ func runRotateKey(args []string) error {
 		if err := addVersionPrereq(m, *zone, -1, *target, false); err != nil {
 			return err
 		}
+		m.SetEdns0(dns.DefaultMsgSize, false) // lets the server answer with an RFC 8914 Extended DNS Error
 		inception, expiration := sig0Window()
 		wire, err := sazu.SignUpdate(m, newKSK, newPriv, inception, expiration)
 		if err != nil {
@@ -1500,6 +1507,15 @@ const statusErrUnknownSigner = "ERR_UNKNOWN_SIGNER"
 // diagnosticStatus extracts a §12 SAZU status code from a response's
 // Additional section, if present.
 func diagnosticStatus(m *dns.Msg) (string, bool) {
+	// Prefer the RFC 8914 Extended DNS Error's EXTRA-TEXT; fall back to
+	// the diagnostic TXT record for servers that don't send one.
+	if opt := m.IsEdns0(); opt != nil {
+		for _, o := range opt.Option {
+			if ede, ok := o.(*dns.EDNS0_EDE); ok && ede.ExtraText != "" {
+				return ede.ExtraText, true
+			}
+		}
+	}
 	for _, rr := range m.Extra {
 		if txt, ok := rr.(*dns.TXT); ok && len(txt.Txt) > 0 {
 			return txt.Txt[0], true

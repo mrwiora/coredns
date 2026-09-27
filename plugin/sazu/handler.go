@@ -652,7 +652,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 					case "weak-ds-digest":
 						// The key does match a published DS, but only a
 						// SHA-1 one -- the §10.7 digest floor.
-						status = statusErrWeakAlgorithm
+						status = statusErrWeakDSDigest
 					case "key-mismatch":
 						// A DS *is* published for this zone, just not for
 						// this key. Distinct from ERR_NO_DS_PUBLISHED and
@@ -1322,8 +1322,39 @@ const statusErrStaleVersion = "ERR_STALE_VERSION"
 // longer than the server accepts -- see DefaultMaxSIG0Lifetime.
 const statusErrSIG0LifetimeTooLong = "ERR_SIG0_LIFETIME_TOO_LONG"
 
+// statusErrWeakDSDigest: the candidate KSK matches a DS at the parent,
+// but only one with a SHA-1 digest (§7.2 accepts SHA-256/SHA-384 only).
+const statusErrWeakDSDigest = "ERR_WEAK_DS_DIGEST"
+
+// edeCodes maps each SAZU status code to the RFC 8914 Extended DNS Error
+// INFO-CODE it is reported under. Anything the server refuses as a
+// matter of policy is 18 (Prohibited); the few with a more specific
+// registered code use it; the rest are 0 (Other Error). The SAZU code
+// itself always travels as the EXTRA-TEXT.
+var edeCodes = map[string]uint16{
+	statusErrWeakAlgorithm:           dns.ExtendedErrorCodeUnsupportedDNSKEYAlgorithm,
+	statusErrWeakDSDigest:            dns.ExtendedErrorCodeUnsupportedDSDigestType,
+	statusErrSigInvalid:              dns.ExtendedErrorCodeDNSBogus,
+	statusErrExpiredSignature:        dns.ExtendedErrorCodeSignatureExpired,
+	statusErrNoDSPublished:           dns.ExtendedErrorCodeProhibited,
+	statusErrUnknownSigner:           dns.ExtendedErrorCodeProhibited,
+	statusErrFirstContactNeedsKSK:    dns.ExtendedErrorCodeProhibited,
+	statusErrDecommissionRequiresKSK: dns.ExtendedErrorCodeProhibited,
+	statusErrRequiresKSK:             dns.ExtendedErrorCodeProhibited,
+	statusErrTransportNotAllowed:     dns.ExtendedErrorCodeProhibited,
+	statusErrQuotaExceeded:           dns.ExtendedErrorCodeProhibited,
+	statusErrRateLimited:             dns.ExtendedErrorCodeProhibited,
+	statusErrFullZoneRequired:        dns.ExtendedErrorCodeProhibited,
+	statusErrDNSKEYSetMismatch:       dns.ExtendedErrorCodeProhibited,
+	statusErrVersionRequired:         dns.ExtendedErrorCodeProhibited,
+}
+
 // replyWithStatus replies to r with rcode and, if status is non-empty,
-// a diagnostic TXT record carrying it in the Additional section.
+// reports it two ways: as an RFC 8914 Extended DNS Error (INFO-CODE from
+// edeCodes, the status as EXTRA-TEXT) when the request carried EDNS(0) --
+// RFC 6891 forbids an OPT record in a reply to a request without one --
+// and, for clients without EDNS, as a diagnostic TXT record at the zone
+// apex in the Additional section.
 func replyWithStatus(w dns.ResponseWriter, r *dns.Msg, rcode int, status string) (int, error) {
 	m := new(dns.Msg)
 	m.SetReply(r)
@@ -1333,6 +1364,11 @@ func replyWithStatus(w dns.ResponseWriter, r *dns.Msg, rcode int, status string)
 			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0},
 			Txt: []string{status},
 		})
+		if r.IsEdns0() != nil {
+			m.SetEdns0(dns.DefaultMsgSize, false)
+			opt := m.IsEdns0()
+			opt.Option = append(opt.Option, &dns.EDNS0_EDE{InfoCode: edeCodes[status], ExtraText: status})
+		}
 	}
 	return writeMsg(w, m)
 }
