@@ -735,7 +735,8 @@ sazu ZONES... {
   name(s) it targets — closing the gap a per-zone-only quota leaves open
   against an attacker probing many different candidate zone names (each
   gets its own fresh, unused per-zone quota). Defaults to `30` if
-  omitted. Checked before anything else in a push, including SIG(0)
+  omitted. IPv6 sources are counted per /64, since one client normally
+  holds a whole /64. Checked before anything else in a push, including SIG(0)
   verification, since it bounds raw attempt volume, not just
   successfully authenticated attempts. An exceeded limit is refused with
   the `ERR_RATE_LIMITED` diagnostic. Not persisted across a restart.
