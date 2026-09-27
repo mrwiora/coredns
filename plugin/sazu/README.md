@@ -7,12 +7,12 @@ signer pushes DNSSEC-signed zone content to this server, authenticated purely
 by SIG(0) (RFC 2931) riding on an RFC 2136 dynamic UPDATE, with no separate
 account or API-key handshake. The server never holds a private key.
 
-See the design document (`sazu-protocol.md` in
-[github.com/mrwiora/sazu](https://github.com/mrwiora/sazu), the separate
-repo this port was built against) for the full protocol; see this repo's
+See the protocol specification ([`readme.md` in
+github.com/mrwiora/sazu](https://github.com/mrwiora/sazu/blob/main/readme.md),
+the separate repo this port was built against) for the full protocol; see this repo's
 own `plugin/sazu/docs/SAZU-PLAN.md` for exactly what of it this port implements today,
-including chain-of-trust bootstrap, full and partial pushes, key
-rollover, rate limiting, persistence, an audit trail, the §11
+including chain-of-trust bootstrap, full-zone pushes, key
+rollover, replay protection, rate limiting, persistence, an audit trail, the §11
 delegation-change watch daemon, and pushing over UDP, TCP, or HTTPS
 (§7.3, raw wire bytes or a JSON envelope). Treat this as a working proof
 of concept for testing the mechanism, not a production-ready deployment.
@@ -43,7 +43,7 @@ it has to be pieced back together from the sections above.
 
 | | **KSK** (key-signing key) | **ZSK** (zone-signing key) |
 |---|---|---|
-| **Use case** | Anchors the chain of trust: the only key ever matched against a DS record at your registrar. Authenticates `publish-trust` and a KSK rollover. | Routine, day-to-day key: authenticates and signs every `publish-zone` content push. An automation box running scheduled pushes only ever needs this one. |
+| **Use case** | Anchors the chain of trust: the only key ever matched against a DS record at your registrar. Authenticates `publish-trust`, a KSK rollover, and every other change to the zone's key set or contact (`add-zsk`, `retire-zsk`, `contact`, `decommission-zone`), and is the only key allowed to sign the DNSKEY RRset. | Routine, day-to-day key: authenticates and signs every `publish-zone` content push -- and nothing else. An automation box running scheduled pushes only ever needs this one, and a stolen ZSK can't register keys, retire keys, or redirect alerts. |
 | **Created** | `sazuctl publish-trust` — always generated together with its paired ZSK, never on its own. | Same `publish-trust` call, paired with the KSK from the start. |
 | **Registrar interaction** | Required — a DS record at your registrar, every time this key changes (onboarding or rollover). | **Never** — a ZSK is trusted purely because an already-trusted key (the KSK) vouched for it; `add-zsk`/`retire-zsk`/`rotate-key -role zsk` involve no registrar step at all. |
 | **How it expires** | It doesn't, on its own. Rotate deliberately with `rotate-key -role ksk` (best-practice hygiene, or a suspected compromise) — there is no forced cadence. | Same — doesn't expire on its own. Retire/replace on your own schedule (`retire-zsk` + `add-zsk`, or `rotate-key -role zsk` for both in one command). |
@@ -54,7 +54,7 @@ it has to be pieced back together from the sections above.
 | Signature | Covers | Validity | What happens if you let it lapse |
 |---|---|---|---|
 | RRSIG (zone content) | Every record in a `publish-zone` push — this is the one that determines whether your zone validates for real DNSSEC resolvers. | **30 days** (`DefaultSignatureValidity`), fixed regardless of which key signs it — using the KSK instead of the ZSK does not extend it. | Resolvers see an expired signature once their cache re-fetches past it — SERVFAIL for a validating resolver. **You must run `publish-zone` again at least this often**, even with zero content changes, purely to refresh signatures. |
-| SIG(0) (transaction) | The UPDATE message itself, for the ~1 hour around when `sazuctl` sends it. | ~1 hour, set fresh by `sazuctl` on every push. | Nothing to manage — this isn't a stored credential, just replay protection for one in-flight push. Never confuse this with the RRSIG window above; they protect different things on completely different timescales. |
+| SIG(0) (transaction) | The UPDATE message itself, for the ~1 hour around when `sazuctl` sends it. | ~1 hour, set fresh by `sazuctl` on every push; the server refuses anything longer than `max_sig0_lifetime` (default 1h5m). | Nothing to manage — this isn't a stored credential. The server additionally accepts each key's messages only in strictly increasing SIG(0) inception order, so a captured push can never be applied twice or out of order (see [Replay protection](#replay-protection)). Never confuse this with the RRSIG window above; they protect different things on completely different timescales. |
 
 **What's mandatory vs. configurable:**
 
@@ -219,15 +219,14 @@ real nameservers throughout.
    replacing it, so you can proceed the same way as this step without
    disturbing whatever's already keeping the domain validated.
 
-   **As soon as this ZSK is registered (once trust succeeds, below), it
-   is fully authorized for this zone** — not narrowly scoped to "push
-   content." Whichever machine holds `zsk.private` can, from then on, do
-   anything a SIG(0)-authenticated push can do here: push zone content,
-   register or retire further ZSKs (for onboarding yet more signer
-   machines — see `add-zsk`/`retire-zsk` below — without ever touching
-   the KSK again), and manage the zone's contact address. There is no
-   narrower per-key permission than that today; see README's **Known
-   limitations**.
+   **Once this ZSK is registered (once trust succeeds, below), it can
+   push zone content — and only that.** Registering or retiring ZSKs,
+   changing the contact address, and decommissioning the zone all need
+   the KSK: they change the zone's key set or where its alerts go, and
+   the DNSKEY RRset must be signed by the KSK anyway for validating
+   resolvers to accept it. So whichever machine holds `zsk.private` can
+   publish content, but a stolen ZSK can be retired with one KSK-signed
+   `retire-zsk` and can't lock you out first.
 
 5. **Submit that DS record at your registrar** — every major registrar
    that supports DNSSEC has a form for this (look for "DS record,"
@@ -266,7 +265,10 @@ real nameservers throughout.
 8. **Verify with dig**, then iterate by editing the YAML file and re-running
    `publish-zone` — every push resends the zone's complete content, so a
    newly added or edited record just needs to be in the file before the
-   next push:
+   next push. The server only accepts a push whose SOA serial is newer
+   than the one it serves; if yours isn't (an edited file with the same
+   serial, or `serial: auto` pushed twice on one day), `publish-zone`
+   publishes it with the served serial + 1 and says so:
 
    ```
    dig @127.0.0.1 -p 15353 www.yourdomain.example A
@@ -329,7 +331,7 @@ Subcommands:
   it registered is what every subsequent `publish-zone` push
   authenticates and signs with — the KSK isn't needed again unless it's
   rolled over (`sazuctl rotate-key -role ksk`).
-* `sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-denial-of-existence nsec3|nsec] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json]` —
+* `sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-keep-serial] [-denial-of-existence nsec3|nsec] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json]` —
   build, sign, and (optionally) send a zone's **complete, authoritative
   content**: every record in a BIND-format zone file. Authenticated and
   signed entirely by `-zsk-key` (registered first via `publish-trust`) —
@@ -337,7 +339,10 @@ Subcommands:
   any kind rides along with it, since trust is already an established,
   separate fact by the time this runs. `-previous-serial` adds the
   SOA-serial staleness guard for a *re*-push; omit it (0) for a zone's
-  first content push. `-zonefile` is required — either a BIND-format zone
+  first content push. With `-target`, the zone file's SOA serial is
+  raised to the served serial + 1 if it isn't already newer (the server
+  refuses a push that doesn't move the serial forward); `-keep-serial`
+  sends it unchanged instead. `-zonefile` is required — either a BIND-format zone
   file, or a YAML zone definition (`.yaml`/`.yml`, converted
   automatically, no separate step); see `sazuctl init-zone` to create a
   starter one for a brand-new domain. `-denial-of-existence` picks the
@@ -352,22 +357,18 @@ Subcommands:
   is a fresh, full replacement of the zone's entire content — there is
   no partial/differential update command; see
   [`docs/SAZU-DIFFUPDATES.md`](docs/SAZU-DIFFUPDATES.md) for why.
-* `sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-target host:port|url] [-json]` —
-  the original minimal single-record demo, kept for quick protocol
-  smoke-testing. It does **not** include a SOA, so it cannot by itself
-  onboard a zone against this server (see `publish-trust`/`publish-zone`
-  for that).
 * `sazuctl contact -zone <zone> -key <path> [-address mailto:you@example.org]... [-clear] [-target host:port|url] [-json]` —
   register (or, with `-clear`, remove) the zone's §10.6 contact address(es):
-  where `sazu-watchd`'s (§11) delegation-change alerts get sent.
+  where `sazu-watchd`'s (§11) alerts get sent. `-key` must be the zone's
+  KSK — the server refuses a contact change authenticated by a ZSK.
   `-address` accepts `mailto:` for email or `http(s)://` for a webhook, and
   can repeat. This rides an ordinary authenticated push at a reserved owner
   name (`_sazu-contact.<zone>`) — it is never itself DNSSEC-signed or
   servable DNS content, just metadata carried alongside a real update.
 * `sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-json]` —
   register an additional ZSK on top of a zone's existing KSK: an
-  ordinary push, authenticated by `-ksk-key`, that adds `-zsk-key`'s DNSKEY
-  record. Generates `-zsk-key` if it doesn't exist yet. No chain-of-trust
+  ordinary push, authenticated by `-ksk-key` (which must be the zone's
+  KSK), that adds `-zsk-key`'s DNSKEY record. Generates `-zsk-key` if it doesn't exist yet. No chain-of-trust
   network walk and no registrar step. `publish-trust` already creates a
   zone's first ZSK automatically at onboarding — reach for this to add a
   second one, or to register a replacement after `retire-zsk`; see **KSK,
@@ -408,6 +409,11 @@ Subcommands:
   publishing one always has been. The exact same zone name can be
   onboarded again afterward with `publish-trust`, from scratch, with
   nothing left over to conflict with it.
+
+Every SIG(0) signature `sazuctl` makes gets a whole second of its own
+(it waits for the next second boundary, up to one second, before
+signing), because the server accepts each key's messages only in
+strictly increasing SIG(0) inception order.
 
 Every subcommand *other than* `add-zsk`, `retire-zsk`, and `rotate-key`
 run without `-target` just prints the signed wire bytes and self-verifies
@@ -510,9 +516,9 @@ expands to before pushing it).
 ### sazu-watchd: §11 delegation-change monitoring
 
 `plugin/sazu/cmd/sazu_watchd` is a separate, standalone daemon -- never runs
-inside CoreDNS -- that periodically runs two independent checks per
+inside CoreDNS -- that periodically runs three independent checks per
 onboarded zone and alerts the zone's registered contact (`sazuctl contact`)
-when either one's outcome changes:
+when any of them needs attention:
 
 * **Chain of trust** -- the same "does a DS matching this zone's pinned
   KSK exist at the parent" check first contact and a key rollover already
@@ -521,6 +527,13 @@ when either one's outcome changes:
   the kind of drift nothing else here would ever notice -- the registrar
   is outside this system entirely, so nothing short of asking it
   periodically can catch a change made there.
+* **Signature expiry** -- this server never re-signs anything, so a zone
+  whose owner's automation stops pushing goes bogus for validating
+  resolvers the moment its earliest RRSIG expires, with no symptom on
+  the server itself. The daemon warns the zone's contact once that
+  expiration is within `-expiry-warning` (default 7 days) -- right away,
+  even on its first pass -- and sends a recovery once a fresh push
+  moves it out again.
 * **ZSK presence** -- for each zone with at least one registered ZSK, an
   ordinary DNS query confirms it's still actually present in what the zone
   is currently serving, compared against what this server's own database
@@ -530,7 +543,7 @@ when either one's outcome changes:
   see keys.go's `KeyRole` doc comment) -- it's a low-cost canary against
   this server's own bugs or a corrupted database, not a routine concern.
 
-Both checks share the same debounce discipline: a single failing/missing
+The chain-of-trust and ZSK checks share the same debounce discipline: a single failing/missing
 pass doesn't alert on its own (two consecutive checks, 10 minutes apart at
 the default interval, do), and a transient failure to even reach a zone's
 own servers for the ZSK check is treated as inconclusive, never as
@@ -553,6 +566,10 @@ email alerts are simply skipped, with a logged error, until they're
 configured), `https://`/`http://` addresses via a small JSON webhook POST.
 A zone with no registered contact still gets every check logged, just
 with nothing to notify externally.
+
+`-trust-anchor FILE` takes the same root trust anchor file as the
+plugin's `trust_anchor` directive; keep the two pointed at the same,
+maintained file.
 
 Pass `-once` to run a single check pass and exit, instead of looping
 forever -- useful for confirming the daemon can actually reach and parse
@@ -587,10 +604,18 @@ itself requires) before switching over:
 
 Publish the new DS record at your registrar alongside the existing one
 (most accept more than one, and both stay listed throughout — see
-`REGISTRARS.md`) and wait for it to propagate; until the push above
-succeeds, the old KSK keeps working normally. Once switched, remove the
-old DS whenever you're ready — there's no rush, since a dangling extra DS
-alongside the real one is safe. This always requires a new DS record and
+`REGISTRARS.md`) and wait for it to propagate, then at least the parent's
+DS TTL more so resolvers that cached the old DS set have refreshed it;
+until the push above succeeds, the old KSK keeps working normally.
+
+**Once switched, remove the old DS promptly** — as soon as the old
+DNSKEY RRset has had time to expire from caches (its TTL). For
+resolvers a dangling extra DS is harmless, but for this server it is
+not: a KSK rollover only needs a key that signs its own push and
+matches *some* DS at the parent, so as long as the old DS is published,
+anyone holding the old KSK can roll the zone straight back to it. That
+matters most exactly when you're rotating because the old key may have
+leaked. This always requires a new DS record and
 always requires waiting for it to propagate, because the KSK is the one
 and only key this server ever anchors to a parent DS. **The ZSK
 `publish-trust` registered alongside the old KSK is untouched by this** —
@@ -600,8 +625,9 @@ before, with no registrar step of its own.
 ### KSK, and the ZSK it's always paired with
 
 Every zone has exactly one **KSK** (key-signing key) — the only key this
-server ever anchors to a parent DS record, and the one `rotate-key -role
-ksk` rotates. `sazuctl publish-trust` generates it together with a **ZSK**
+server ever anchors to a parent DS record, the only key allowed to sign
+the zone's DNSKEY RRset or change its key set or contact, and the one
+`rotate-key -role ksk` rotates. `sazuctl publish-trust` generates it together with a **ZSK**
 (zone-signing key) at onboarding, always, and that pairing is the whole
 point: the KSK proves the chain of trust once and is then set aside,
 while the ZSK is what authenticates and signs every routine
@@ -644,6 +670,8 @@ sazu ZONES... {
     db PATH
     rate_limit FULL_PER_DAY KEY_MANAGEMENT_PER_DAY
     ip_rate_limit UPDATES_PER_MINUTE
+    max_sig0_lifetime DURATION
+    trust_anchor FILE
 }
 ```
 
@@ -723,6 +751,33 @@ sazu ZONES... {
   the chain-of-trust walk this protects. Refused with the
   `ERR_TRANSPORT_NOT_ALLOWED` diagnostic.
 
+* `max_sig0_lifetime DURATION` caps how long a SIG(0) signature may be
+  valid (expiration − inception, a Go duration such as `1h5m`). Default
+  `1h5m`; a longer window is refused with `NOTAUTH` and
+  `ERR_SIG0_LIFETIME_TOO_LONG`.
+* `trust_anchor FILE` replaces the built-in root trust anchors with the
+  DS and/or DNSKEY records for `.` in FILE (zone-file format — e.g. the
+  `root.key` that `unbound-anchor` keeps current per RFC 5011). The
+  built-in list (root KSK-2017 and KSK-2024) is only as current as the
+  build; with a stale anchor, onboarding and KSK rollover fail for every
+  zone at once after a root key rollover, so point this at a maintained
+  file for anything long-lived. A file that can't be loaded fails
+  startup rather than falling back.
+
+### Replay protection
+
+A signed UPDATE stays cryptographically valid until its SIG(0) expires.
+To keep a captured one from ever being applied again, the server:
+
+* accepts each key's messages for a zone only in **strictly increasing
+  SIG(0) inception** order (`ERR_REPLAYED` otherwise). The marks are
+  stored in the `db` together with the update they belong to and kept
+  even after a key is retired or the zone decommissioned, so neither a
+  restart nor a re-onboarding reopens the window;
+* refuses a content push whose SOA serial isn't newer (RFC 1982) than the
+  one it serves (`ERR_STALE_SERIAL`);
+* refuses a SIG(0) valid for longer than `max_sig0_lifetime`.
+
 ## Known limitations
 
 Worth being explicit about what this proof of concept does *not* cover, so
@@ -733,22 +788,21 @@ a real-world test isn't mistaken for a production trial run:
   onboarded zone and pinned key.
 * **Onboarding is two round trips, not one.** `publish-trust` establishes
   the KSK/ZSK trust relationship and `publish-zone` pushes content
-  separately — a zone is briefly "trusted but empty" in between, unable
-  to answer anything but NXDOMAIN. This is a deliberate consequence of
+  separately — a zone is briefly "trusted but empty" in between,
+  answering only its DNSKEY RRset (which `add-zsk`/`retire-zsk`/
+  `rotate-key` read) and NXDOMAIN for everything else. This is a deliberate consequence of
   keeping trust establishment and content genuinely separate (see
   keys.go's `KeyRole` doc comment); it's never a problem in practice
   since nothing serves traffic in that window anyway.
-* **No per-key authorization scoping.** Independent per-instance pusher
+* **No per-key scoping beyond KSK/ZSK.** Independent per-instance pusher
   identities for HA/multi-signer deployments already work today: a zone
   can register more than one ZSK (`add-zsk`/`retire-zsk`), each held by
   a different signer machine, each independently revocable, and the
   audit trail (`AuditEntry.KeyTag`/`KeyRole`) records which one
   authenticated every transaction — "which signer pushed this" is
-  answerable after the fact. What's still genuinely unaddressed: every
-  registered key (KSK or ZSK alike) is authorized to do everything a
-  SIG(0)-authenticated push can do here — push zone content, register or
-  retire another ZSK, manage the contact address — with no way to scope
-  a specific key to a narrower set of operations. See plugin/sazu/docs/SAZU-PLAN.md's
+  answerable after the fact. Key management and the contact are
+  KSK-only; every ZSK may push content for the whole zone, with no way
+  to scope one to, say, a subtree of names. See plugin/sazu/docs/SAZU-PLAN.md's
   KSK/ZSK section for why that's a materially different problem
   (authorization, not a DNSSEC key role) from the KSK/ZSK split itself.
 
@@ -782,20 +836,11 @@ rediscover it:
   what's already mitigated and how (citing real code, not aspirational),
   and — called out explicitly rather than left implicit — the gaps that
   pass surfaced. Worth reading before relying on this in production; the
-  closest thing here to a single security overview. Its most actionable
-  finding: every `sazuctl` command signs its SIG(0) transaction with a
-  fixed one-hour validity window, so a captured, still-valid push remains
-  replayable for that whole hour — unmitigated for key-management
-  operations (`add-zsk` specifically: a captured push for a
-  since-retired ZSK, replayed, silently un-retires it) regardless of
-  client behavior, and only caught for content pushes when the client
-  opts into `-previous-serial`. The proposed fix — a mandatory,
-  monotonically increasing per-zone key-management sequence number,
-  piggybacked on the live query `add-zsk`/`retire-zsk`/`rotate-key -role
-  ksk` already make before signing — is **not implemented**; see the
-  threat model's §5/§10 for the full reasoning, including why a
-  same-server replay-dedup cache alone doesn't close this once more than
-  one instance is authoritative for a zone.
+  closest thing here to a single security overview. Its former top
+  finding — a captured push stayed replayable for its SIG(0) window — is
+  now closed (see [Replay protection](#replay-protection)); what remains
+  open for replay is the multi-instance case, where the per-key marks
+  would have to be replicated along with the key state.
 * **`docs/SAZU-CLUSTER.md`** — a specification for running more than one
   SAZU instance for the same zones, converged automatically (symmetric
   partner list, digest-comparison gossip, a shared cluster secret, zone

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/coredns/coredns/plugin/sazu"
 
@@ -342,5 +343,84 @@ func TestCheckOnceAlertWithNoRegisteredContactStillReported(t *testing.T) {
 	}
 	if len(alerts) != 1 || len(alerts[0].Addresses) != 0 {
 		t.Fatalf("expected the transition still reported, with no addresses, got %+v", alerts)
+	}
+}
+
+// commitSignedSOA stores a SOA plus an RRSIG over it expiring at expires
+// -- enough for checkSignatureExpiry, which only reads expirations.
+func commitSignedSOA(t *testing.T, db *sazu.DB, zone string, serial uint32, expires time.Time) {
+	t.Helper()
+	soa := &dns.SOA{Hdr: dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600},
+		Ns: "ns1." + dns.Fqdn(zone), Mbox: "hostmaster." + dns.Fqdn(zone), Serial: serial, Refresh: 3600, Retry: 900, Expire: 604800, Minttl: 3600}
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		TypeCovered: dns.TypeSOA, Algorithm: dns.ED25519, Labels: 2, OrigTtl: 3600, KeyTag: 1, SignerName: dns.Fqdn(zone),
+		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(expires.Unix()), Signature: "AAAA"}
+	if err := db.CommitUpdate(zone, nil, []dns.RR{soa, sig}, dns.ClassINET, nil); err != nil {
+		t.Fatalf("CommitUpdate: %v", err)
+	}
+}
+
+// TestCheckOnceWarnsBeforeSignaturesExpire: a zone whose earliest RRSIG
+// expires within the warning window alerts immediately -- even on the
+// first pass, since a deadline has no baseline to establish -- stays
+// quiet while nothing changes, and recovers once a fresh push moves the
+// expiration out again.
+func TestCheckOnceWarnsBeforeSignaturesExpire(t *testing.T) {
+	db := openTestDB(t)
+	onboardTestZone(t, db, "example.org.", "mailto:ops@example.org")
+	soon := time.Now().Add(2 * 24 * time.Hour)
+	commitSignedSOA(t, db, "example.org.", 2, soon)
+
+	state := make(map[string]*zoneState)
+	validator := fakeValidator{}
+	fetcher := fakeDNSKEYFetcher{}
+
+	expiryAlerts := func() []Alert {
+		t.Helper()
+		alerts, err := checkOnce(db, validator, fetcher, state)
+		if err != nil {
+			t.Fatalf("checkOnce: %v", err)
+		}
+		var out []Alert
+		for _, a := range alerts {
+			if a.Kind == AlertSignatureExpiry {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+
+	first := expiryAlerts()
+	if len(first) != 1 || first[0].Recovered || first[0].Expires.Unix() != soon.Unix() {
+		t.Fatalf("expected one expiry warning on the first pass, got %+v", first)
+	}
+	if len(first[0].Addresses) != 1 {
+		t.Fatalf("expected the warning to go to the registered contact, got %v", first[0].Addresses)
+	}
+	if again := expiryAlerts(); len(again) != 0 {
+		t.Fatalf("expected no repeat warning while nothing changed, got %+v", again)
+	}
+
+	commitSignedSOA(t, db, "example.org.", 3, time.Now().Add(30*24*time.Hour))
+	recovered := expiryAlerts()
+	if len(recovered) != 1 || !recovered[0].Recovered {
+		t.Fatalf("expected a recovery once signatures were refreshed, got %+v", recovered)
+	}
+}
+
+// TestCheckOnceNoExpiryWarningForFreshSignatures: nothing to say about a
+// zone well outside the window, first pass included.
+func TestCheckOnceNoExpiryWarningForFreshSignatures(t *testing.T) {
+	db := openTestDB(t)
+	onboardTestZone(t, db, "example.org.")
+	commitSignedSOA(t, db, "example.org.", 2, time.Now().Add(30*24*time.Hour))
+	alerts, err := checkOnce(db, fakeValidator{}, fakeDNSKEYFetcher{}, make(map[string]*zoneState))
+	if err != nil {
+		t.Fatalf("checkOnce: %v", err)
+	}
+	for _, a := range alerts {
+		if a.Kind == AlertSignatureExpiry {
+			t.Fatalf("expected no expiry warning, got %+v", a)
+		}
 	}
 }

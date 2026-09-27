@@ -245,14 +245,11 @@ func (z *ZoneData) deleteRRLocked(rr dns.RR) {
 
 // PurgeNSEC removes every stored NSEC or NSEC3(PARAM) record (and their
 // covering RRSIGs) across the whole zone -- whichever scheme, if either,
-// the zone was last pushed with. Called from handler.go's serveUpdate
-// for an update that changes chain-relevant content without being a
-// full content push (see changesChainRelevantContent) -- nothing
-// sazuctl itself builds reaches this today (publish-zone is the only
-// command that ever changes ordinary content, and it's always a full
-// push handled by PurgeContentAndApply instead), but the protocol
-// doesn't forbid a different, arbitrary SIG(0)-signed client from
-// sending one. SAZU's split-signing model means only a freshly,
+// the zone was last pushed with. serveUpdate no longer needs it -- it
+// refuses any content change that isn't a full push, which
+// PurgeContentAndApply handles -- but it remains available to callers
+// that apply partial changes to a ZoneData directly. SAZU's
+// split-signing model means only a freshly,
 // completely recomputed chain -- from a full push, the only kind that
 // sees the zone's entire name set at once -- can be trusted as correct,
 // so any existing chain is invalidated up front rather than risked
@@ -436,9 +433,8 @@ func (z *ZoneData) ownerNames() []string {
 // handle.
 //
 // Returns nil if the zone has no chain at all -- either nothing was ever
-// pushed with one (an older push, from before this feature), or a
-// non-full-push update changed chain-relevant content and invalidated
-// it (see PurgeNSEC) with no full push having repopulated it since. A
+// pushed with one (an older push, from before this feature), or the
+// last full push simply carried none. A
 // negative response simply carries no authenticated denial in that
 // case, the same as before this existed.
 func (z *ZoneData) NegativeProof(qname string, nameExists bool) []dns.RR {
@@ -612,16 +608,20 @@ func (s *Store) DeleteZone(origin string) {
 // lets many customer domains be onboarded dynamically under one broad
 // plugin scope (e.g. a Corefile's "sazu ."), with no per-domain Corefile
 // edit needed: the set of zones this searches is whatever has actually
-// been onboarded, not a fixed list. A zone with no SOA yet (shouldn't
-// normally exist, given handler.go's first-contact invariant, but
-// defensively excluded here too) doesn't count as found.
+// been onboarded, not a fixed list. A zone counts as found once it has
+// either a SOA or an apex DNSKEY RRset: a zone onboarded by a keys-only
+// first contact (sazuctl publish-trust) has no content, and so no SOA,
+// until its first publish-zone push, but must still answer DNSKEY
+// queries in between -- add-zsk, retire-zsk and rotate-key read the live
+// DNSKEY RRset before signing a change to it. A zone with neither (an
+// empty placeholder left by a rejected update) doesn't count.
 func (s *Store) FindZoneForName(name string) (origin string, zone *ZoneData, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var best string
 	var bestZone *ZoneData
 	for candidate, z := range s.zones {
-		if z.SOA() == nil {
+		if z.SOA() == nil && len(z.Lookup(candidate, dns.TypeDNSKEY)) == 0 {
 			continue
 		}
 		if dns.IsSubDomain(candidate, name) && len(candidate) > len(best) {

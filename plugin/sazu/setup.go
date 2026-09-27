@@ -37,13 +37,24 @@ func setup(c *caddy.Controller) error {
 	config.UDPDecorateReaderFunc = capture.DecorateReaderFunc
 	config.TCPDecorateReaderFunc = capture.DecorateReaderFunc
 
+	validator := NewValidator()
+	if cfg.trustAnchorPath != "" {
+		anchors, err := LoadTrustAnchors(cfg.trustAnchorPath)
+		if err != nil {
+			return plugin.Error("sazu", err)
+		}
+		validator.Anchors = anchors
+	}
+
 	s := &Sazu{
 		Zones:                       cfg.zones,
-		Validator:                   NewValidator(),
+		Validator:                   validator,
 		Capture:                     capture,
 		InsecureSkipChainValidation: cfg.insecureSkipChainValidation,
 		RateLimiter:                 NewRateLimiter(cfg.fullPushesPerDay, cfg.keyManagementPushesPerDay),
 		IPRateLimiter:               NewIPRateLimiter(cfg.ipUpdatesPerMinute),
+		Replay:                      NewReplayGuard(),
+		MaxSIG0Lifetime:             cfg.maxSIG0Lifetime,
 	}
 
 	if cfg.dbPath != "" {
@@ -56,6 +67,12 @@ func setup(c *caddy.Controller) error {
 			db.Close()
 			return plugin.Error("sazu", err)
 		}
+		marks, err := db.LoadReplayMarks()
+		if err != nil {
+			db.Close()
+			return plugin.Error("sazu", err)
+		}
+		s.Replay.Load(marks)
 		s.DB = db
 		s.Store = store
 		s.Keys = keys
@@ -82,6 +99,8 @@ type sazuConfig struct {
 	fullPushesPerDay            int
 	keyManagementPushesPerDay   int
 	ipUpdatesPerMinute          int
+	maxSIG0Lifetime             time.Duration
+	trustAnchorPath             string
 }
 
 func parseSazu(c *caddy.Controller) (sazuConfig, error) {
@@ -89,6 +108,7 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 		fullPushesPerDay:          DefaultFullPushesPerDay,
 		keyManagementPushesPerDay: DefaultKeyManagementPushesPerDay,
 		ipUpdatesPerMinute:        DefaultIPUpdatesPerMinute,
+		maxSIG0Lifetime:           DefaultMaxSIG0Lifetime,
 	}
 	for c.Next() {
 		args := c.RemainingArgs()
@@ -143,6 +163,26 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 					return sazuConfig{}, c.Errf("ip_rate_limit: invalid updates-per-minute %q", args[0])
 				}
 				cfg.ipUpdatesPerMinute = perMinute
+			case "trust_anchor":
+				// A file of root DS/DNSKEY trust anchors replacing the
+				// built-in ones -- see LoadTrustAnchors.
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return sazuConfig{}, c.ArgErr()
+				}
+				cfg.trustAnchorPath = args[0]
+			case "max_sig0_lifetime":
+				// Longest accepted SIG(0) validity window -- see
+				// DefaultMaxSIG0Lifetime. Default applies if omitted.
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return sazuConfig{}, c.ArgErr()
+				}
+				d, err := time.ParseDuration(args[0])
+				if err != nil || d <= 0 {
+					return sazuConfig{}, c.Errf("max_sig0_lifetime: invalid duration %q", args[0])
+				}
+				cfg.maxSIG0Lifetime = d
 			default:
 				return sazuConfig{}, c.ArgErr()
 			}

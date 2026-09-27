@@ -275,23 +275,7 @@ func TestKSKRolloverNeverPurgesContentOrChain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating new KSK: %v", err)
 	}
-	newKSKRR := &dns.DNSKEY{
-		Hdr:   dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags: newKSK.Flags, Protocol: newKSK.Protocol, Algorithm: newKSK.Algorithm, PublicKey: newKSK.PublicKey,
-	}
-	signedKSK, err := SignZoneContent([]dns.RR{newKSKRR}, newKSK, newKSKPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	rollover := new(dns.Msg)
-	rollover.SetQuestion("example.org.", dns.TypeSOA)
-	rollover.Opcode = dns.OpcodeUpdate
-	rollover.Insert(signedKSK)
-	wire, err = SignUpdate(rollover, newKSK, newKSKPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("SignUpdate: %v", err)
-	}
-	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
+	if resp := rolloverKSK(t, addr, ksk, newKSK, newKSKPriv); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rollover rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 

@@ -96,13 +96,13 @@ func TestDBCommitUpdateThenLoadAllReproducesOnboarding(t *testing.T) {
 	}
 }
 
-// TestDBCommitUpdatePurgesStaleNSECOnNextUpdate proves CommitUpdate's SQL
-// mirrors ZoneData.PurgeNSEC exactly: an NSEC (and its RRSIG) persisted by
-// one update must not survive a later update that doesn't include one,
-// even across a full reload from disk -- otherwise a restarted server
-// would resurrect a stale chain that live, in-memory traffic already
-// correctly discarded.
-func TestDBCommitUpdatePurgesStaleNSECOnNextUpdate(t *testing.T) {
+// TestDBCommitUpdatePurgesStaleNSECOnNextFullPush proves CommitUpdate's
+// SQL mirrors ZoneData.PurgeContentAndApply: an NSEC (and its RRSIG)
+// persisted by one full push must not survive a later full push that
+// doesn't include it, even across a full reload from disk -- otherwise a
+// restarted server would resurrect a stale chain that live, in-memory
+// traffic already correctly discarded.
+func TestDBCommitUpdatePurgesStaleNSECOnNextFullPush(t *testing.T) {
 	db := openTestDB(t)
 
 	key, _, err := GenerateEd25519Key("example.org.", true)
@@ -123,8 +123,10 @@ func TestDBCommitUpdatePurgesStaleNSECOnNextUpdate(t *testing.T) {
 		t.Fatalf("first CommitUpdate: %v", err)
 	}
 
-	secondOps := []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}
-	secondOps[0].Header().Class = dns.ClassINET
+	secondOps := []dns.RR{testSOA(2), testA("www.example.org.", net.IPv4(203, 0, 113, 10))}
+	for _, rr := range secondOps {
+		rr.Header().Class = dns.ClassINET
+	}
 	if err := db.CommitUpdate("example.org.", nil, secondOps, dns.ClassINET, nil); err != nil {
 		t.Fatalf("second CommitUpdate: %v", err)
 	}
@@ -145,6 +147,55 @@ func TestDBCommitUpdatePurgesStaleNSECOnNextUpdate(t *testing.T) {
 	}
 	if got := z.Lookup("www.example.org.", dns.TypeA); len(got) != 1 {
 		t.Fatalf("expected the second update's own content to survive, got %+v", got)
+	}
+	if got := z.Lookup("example.org.", dns.TypeDNSKEY); len(got) != 1 {
+		t.Fatalf("expected a full push to leave the DNSKEY RRset in place, got %+v", got)
+	}
+}
+
+// TestServeUpdateFullPushDoesNotResurrectDroppedRecordsAfterRestart is
+// the regression test for full pushes only ever being purged in memory:
+// a record dropped from the zone by a later full push -- whose RRSIG is
+// still well inside its validity window -- must stay gone after the
+// server reloads its state from disk, not come back from rows the purge
+// never deleted.
+func TestServeUpdateFullPushDoesNotResurrectDroppedRecordsAfterRestart(t *testing.T) {
+	s := newTestSazu("example.org.")
+	s.DB = openTestDB(t)
+	addr := serveThroughRealServer(t, s)
+
+	ksk, kskPriv, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatalf("generating KSK: %v", err)
+	}
+	onboardWithKSK(t, addr, ksk, kskPriv)
+
+	if resp := contentPush(t, addr, "example.org.", []dns.RR{testA("old.example.org.", net.IPv4(203, 0, 113, 10))}, ksk, kskPriv, ksk, kskPriv); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("first content push rcode = %s", dns.RcodeToString[resp.Rcode])
+	}
+	if resp := contentPush(t, addr, "example.org.", []dns.RR{testA("new.example.org.", net.IPv4(203, 0, 113, 20))}, ksk, kskPriv, ksk, kskPriv); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("second content push rcode = %s", dns.RcodeToString[resp.Rcode])
+	}
+
+	store, _, _, err := s.DB.LoadAll()
+	if err != nil {
+		t.Fatalf("LoadAll: %v", err)
+	}
+	z, ok := store.Get("example.org.")
+	if !ok {
+		t.Fatalf("expected the zone to exist after reloading")
+	}
+	if got := z.Lookup("old.example.org.", dns.TypeA); len(got) != 0 {
+		t.Fatalf("expected the dropped record to stay gone after a reload, got %+v", got)
+	}
+	if got := z.LookupRRSIG("old.example.org.", dns.TypeA); len(got) != 0 {
+		t.Fatalf("expected the dropped record's RRSIG to stay gone after a reload, got %+v", got)
+	}
+	if got := z.Lookup("new.example.org.", dns.TypeA); len(got) != 1 {
+		t.Fatalf("expected the current record after a reload, got %+v", got)
+	}
+	if got := z.Lookup("example.org.", dns.TypeDNSKEY); len(got) == 0 {
+		t.Fatalf("expected the DNSKEY RRset to survive full pushes and a reload")
 	}
 }
 

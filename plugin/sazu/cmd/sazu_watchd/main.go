@@ -2,8 +2,10 @@
 // standalone daemon, deliberately outside CoreDNS itself, that
 // periodically re-checks every onboarded zone's chain of trust (the same
 // "does a DS matching this zone's pinned key exist at the parent" check
-// first contact and a §10.4 key rollover already perform) and alerts the
-// zone's registered §10.6 contact when that check's outcome changes.
+// first contact and a §10.4 key rollover already perform), that its
+// registered ZSKs are still served, and how soon its earliest RRSIG
+// expires, and alerts the zone's registered §10.6 contact when any of
+// those needs attention.
 //
 // Kept out of CoreDNS on purpose: this is a periodic background job, not
 // request-driven, and its own failure mode (a slow or flaky query to some
@@ -34,10 +36,14 @@ func main() {
 	smtpUsername := flag.String("smtp-username", "", "SMTP auth username (omit for no auth)")
 	smtpPasswordFile := flag.String("smtp-password-file", "", "path to a file containing the SMTP auth password")
 	webhookTimeout := flag.Duration("webhook-timeout", 10*time.Second, "timeout for a single webhook POST")
+	flag.DurationVar(&expiryWarning, "expiry-warning", expiryWarning,
+		"warn a zone's contact once its earliest RRSIG expires within this long")
+	trustAnchorPath := flag.String("trust-anchor", "",
+		"file of root DS/DNSKEY trust anchors (e.g. unbound-anchor's root.key); default: the built-in anchors")
 	flag.Parse()
 
 	if *dbPath == "" {
-		fmt.Fprintln(os.Stderr, "usage: sazu-watchd -db <path> [-interval 5m] [-once] "+
+		fmt.Fprintln(os.Stderr, "usage: sazu-watchd -db <path> [-interval 5m] [-once] [-expiry-warning 168h] [-trust-anchor <path>] "+
 			"[-smtp-addr host:port -smtp-from you@example.org [-smtp-username u -smtp-password-file p]] [-webhook-timeout 10s]")
 		os.Exit(1)
 	}
@@ -60,6 +66,14 @@ func main() {
 	defer db.Close()
 
 	validator := sazu.NewValidator()
+	if *trustAnchorPath != "" {
+		anchors, err := sazu.LoadTrustAnchors(*trustAnchorPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sazu-watchd: -trust-anchor: %v\n", err)
+			os.Exit(1)
+		}
+		validator.Anchors = anchors
+	}
 	dnskeys := liveDNSKEYFetcher{Timeout: 5 * time.Second}
 	notifier := &Notifier{
 		SMTPAddr:     *smtpAddr,
@@ -91,6 +105,12 @@ func runOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher, 
 	}
 	for _, alert := range alerts {
 		switch alert.Kind {
+		case AlertSignatureExpiry:
+			if alert.Recovered {
+				log.Printf("sazu-watchd: %s: signatures refreshed", alert.Zone)
+			} else {
+				log.Printf("sazu-watchd: %s: earliest RRSIG expires %s", alert.Zone, alert.Expires.UTC().Format(time.RFC3339))
+			}
 		case AlertZSKMissing:
 			if alert.Recovered {
 				log.Printf("sazu-watchd: %s: ZSK key tag %d is being served again", alert.Zone, alert.KeyTag)

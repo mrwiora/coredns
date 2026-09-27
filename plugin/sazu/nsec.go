@@ -31,12 +31,11 @@ import (
 // A consequence of that split: only a full push can be trusted to
 // produce a *complete* chain, since only it sees the zone's entire name
 // set at once. Any update that isn't one (sazuctl publish-trust, a KSK
-// rollover, or a ZSK add/retire -- see handler.go's PurgeNSEC call site)
-// never computes or includes NSEC records, so ZoneData.PurgeNSEC
-// invalidates any existing chain before applying content that changed
-// without one -- serving no negative-existence proof at all until the
-// next full push is a safe degradation; serving a stale one that
-// contradicts what the zone actually now contains is not.
+// rollover, or a ZSK add/retire) never computes or includes NSEC
+// records -- and is therefore only accepted if it changes nothing the
+// chain describes (see handler.go's changesChainRelevantContent), so an
+// existing chain is never left describing content that changed under
+// it.
 
 // CanonicalCompare orders a and b per RFC 4034 §6.1 ("Canonical DNS Name
 // Order"): labels compare from most-significant (rightmost) to least,

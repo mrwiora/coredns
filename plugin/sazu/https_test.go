@@ -177,7 +177,7 @@ func TestOnboardOverHTTPSJSONWireEnvelope(t *testing.T) {
 // already-pinned-key push also works over HTTPS, not just first
 // contact -- the same two-step onboard-then-push-again shape
 // TestOrdinaryPartialPushAfterOnboarding already proves for UDP/TCP.
-func TestPartialPushOverHTTPSAfterOnboarding(t *testing.T) {
+func TestContentPushOverHTTPSAfterOnboarding(t *testing.T) {
 	s := newTestSazu("example.org.")
 	baseURL := serveThroughRealHTTPSServer(t, s)
 
@@ -200,20 +200,18 @@ func TestPartialPushOverHTTPSAfterOnboarding(t *testing.T) {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
+	push, err := BuildContentPush("example.org.", testSOA(2),
+		[]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10)), testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, nil)
+	if err != nil {
+		t.Fatalf("BuildContentPush: %v", err)
+	}
 	now = time.Now()
-	signedMail, err := SignZoneContent([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	pushWire, err := SignUpdate(push, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
+		t.Fatalf("signing content push: %v", err)
 	}
-	partial := new(dns.Msg)
-	partial.SetUpdate("example.org.")
-	partial.Insert(signedMail)
-	partialWire, err := SignUpdate(partial, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing partial push: %v", err)
-	}
-	if resp := sendOverHTTPS(t, baseURL, partialWire, false); resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("partial push over HTTPS rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	if resp := sendOverHTTPS(t, baseURL, pushWire, false); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("content push over HTTPS rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
 	z, ok := s.Store.Get("example.org.")

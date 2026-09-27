@@ -63,12 +63,16 @@ type webhookPayload struct {
 	Recovered bool   `json:"recovered"`
 	Error     string `json:"error,omitempty"`
 	KeyTag    uint16 `json:"key_tag,omitempty"`
+	Expires   string `json:"expires,omitempty"`
 	At        string `json:"at"`
 }
 
 func alertKindName(k AlertKind) string {
-	if k == AlertZSKMissing {
+	switch k {
+	case AlertZSKMissing:
 		return "zsk_missing"
+	case AlertSignatureExpiry:
+		return "signature_expiry"
 	}
 	return "chain_of_trust"
 }
@@ -83,6 +87,9 @@ func (n *Notifier) sendWebhook(url string, alert Alert) error {
 	}
 	if alert.Err != nil {
 		payload.Error = alert.Err.Error()
+	}
+	if !alert.Expires.IsZero() {
+		payload.Expires = alert.Expires.UTC().Format(time.RFC3339)
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -114,6 +121,17 @@ func (n *Notifier) sendEmail(to string, alert Alert) error {
 	var subject, body string
 	body = fmt.Sprintf("Zone: %s\n", alert.Zone)
 	switch alert.Kind {
+	case AlertSignatureExpiry:
+		if alert.Recovered {
+			subject = fmt.Sprintf("SAZU: %s signatures refreshed", alert.Zone)
+			body += "The zone's earliest RRSIG expiration is outside the warning window again.\n"
+		} else {
+			subject = fmt.Sprintf("SAZU: %s signatures expire %s", alert.Zone, alert.Expires.UTC().Format("2006-01-02 15:04 MST"))
+			body += fmt.Sprintf("The zone's earliest RRSIG expires at %s.\n"+
+				"This server never re-signs anything: unless a fresh publish-zone push arrives before then,\n"+
+				"validating resolvers will start treating the zone as bogus (SERVFAIL).\n",
+				alert.Expires.UTC().Format(time.RFC3339))
+		}
 	case AlertZSKMissing:
 		if alert.Recovered {
 			subject = fmt.Sprintf("SAZU: %s ZSK key tag %d is being served again", alert.Zone, alert.KeyTag)

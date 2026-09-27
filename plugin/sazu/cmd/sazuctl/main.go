@@ -150,8 +150,6 @@ func main() {
 		err = runKeygen(os.Args[2:])
 	case "ds":
 		err = runDS(os.Args[2:])
-	case "push":
-		err = runPush(os.Args[2:])
 	case "publish-trust":
 		err = runPublishTrust(os.Args[2:])
 	case "publish-zone":
@@ -186,9 +184,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sazuctl zone-convert -in <path.yaml> -out <path.zone> [-zone <zone>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl keygen -out <path> [-zone <owner>] [-role ksk|zsk] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl ds -zone <zone> -key <path> [-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl push -zone <zone> -key <path> [-record name=ipv4] [-ttl 300] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl publish-trust -zone <zone> -key <path> -zsk-key <path> [-target host:port|url] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
-	fmt.Fprintln(os.Stderr, "  sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-denial-of-existence nsec3|nsec] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
+	fmt.Fprintln(os.Stderr, "  sazuctl publish-zone -zone <zone> -zsk-key <path> -zonefile <path> [-previous-serial N] [-keep-serial] [-denial-of-existence nsec3|nsec] [-nsec3-iterations N] [-nsec3-salt HEX] [-nsec3-opt-out] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl contact -zone <zone> -key <path> [-address mailto:you@example.org]... [-clear] [-udp] [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-udp] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-udp] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
@@ -480,81 +477,6 @@ func runZoneConvert(args []string) error {
 	return nil
 }
 
-func runPush(args []string) error {
-	fs := flag.NewFlagSet("push", flag.ExitOnError)
-	zone := fs.String("zone", "", "zone being bootstrapped")
-	keyPath := fs.String("key", "", "path to the Ed25519 key (created if missing)")
-	record := fs.String("record", "", "record to add, as name=ipv4 (default www.<zone>=203.0.113.10)")
-	ttl := fs.Uint("ttl", 300, "TTL for the added record")
-	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
-	jsonCarrier := addJSONCarrierFlag(fs)
-	passphraseFile := addPassphraseFlag(fs)
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *zone == "" || *keyPath == "" {
-		return fmt.Errorf("-zone and -key are required")
-	}
-	passphrase, err := readPassphraseFile(*passphraseFile)
-	if err != nil {
-		return err
-	}
-
-	key, priv, generated, err := sazu.LoadOrGenerateKey(*keyPath, *zone, true, passphrase)
-	if err != nil {
-		return err
-	}
-	if generated {
-		fmt.Fprintf(os.Stderr, "No key found at %s -- generated a new one.\n", *keyPath)
-	}
-	printKeyInfo(*keyPath, key)
-
-	rec := *record
-	if rec == "" {
-		rec = "www." + strings.TrimSuffix(*zone, ".") + "=203.0.113.10"
-	}
-	name, ipStr, ok := strings.Cut(rec, "=")
-	if !ok {
-		return fmt.Errorf("-record must be of the form name=ipv4")
-	}
-	ip := net.ParseIP(ipStr).To4()
-	if ip == nil {
-		return fmt.Errorf("invalid IPv4 address %q", ipStr)
-	}
-
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(*zone), dns.TypeSOA) // zone section, RFC 2136 §2.3
-	m.Opcode = dns.OpcodeUpdate
-	// First contact per §10.2: no prerequisites of our own -- the server
-	// decides whether a key is already pinned, we just present ourselves.
-	// Content-signature verification is mandatory on every push, so both
-	// records need a genuine RRSIG, not just the transaction's SIG(0).
-	now := time.Now()
-	signed, err := sazu.SignZoneContent([]dns.RR{
-		&dns.DNSKEY{
-			Hdr:       dns.RR_Header{Name: key.Hdr.Name, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: uint32(*ttl)},
-			Flags:     key.Flags,
-			Protocol:  key.Protocol,
-			Algorithm: key.Algorithm,
-			PublicKey: key.PublicKey,
-		},
-		&dns.A{
-			Hdr: dns.RR_Header{Name: dns.Fqdn(name), Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: uint32(*ttl)},
-			A:   ip,
-		},
-	}, key, priv, now.Add(-sazu.DefaultSignatureInceptionSkew), now.Add(sazu.DefaultSignatureValidity))
-	if err != nil {
-		return err
-	}
-	m.Insert(signed)
-
-	wire, err := sazu.SignUpdate(m, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		return err
-	}
-	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, false)
-}
-
 // loadOptionalZSK loads the key -zsk-key names, if given, erroring
 // clearly (never auto-generating) if the path doesn't exist. Returns
 // nil, nil, nil if path is empty.
@@ -626,8 +548,8 @@ func runPublishTrust(args []string) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	wire, err := sazu.SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+	inception, expiration := sig0Window()
+	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
 		return err
 	}
@@ -654,6 +576,8 @@ func runPublishZone(args []string) error {
 	nsec3Iterations := fs.Uint("nsec3-iterations", 0, "NSEC3 hash iterations (RFC 9276: 0 is current guidance; ignored unless -denial-of-existence=nsec3)")
 	nsec3Salt := fs.String("nsec3-salt", "", "NSEC3 salt, hex-encoded (RFC 9276: none is current guidance; ignored unless -denial-of-existence=nsec3)")
 	nsec3OptOut := fs.Bool("nsec3-opt-out", false, "set the NSEC3 Opt-Out flag (ignored unless -denial-of-existence=nsec3)")
+	keepSerial := fs.Bool("keep-serial", false,
+		"publish the zone file's SOA serial as-is, even if -target already serves the same or a newer one (the server will then refuse the push with ERR_STALE_SERIAL)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -683,6 +607,22 @@ func runPublishZone(args []string) error {
 	}
 	fmt.Printf("Loaded %s: SOA serial %d, %d other record(s)\n", *zoneFile, soa.Serial, len(rrs))
 
+	// The server only accepts a push whose SOA serial is newer (RFC 1982)
+	// than the one it serves. A zone file edited without bumping its
+	// serial -- or a YAML "serial: auto" pushed twice on the same day --
+	// would otherwise just be refused, so move it past the served one.
+	if *target != "" && !*keepSerial {
+		current, ok, err := fetchCurrentSerial(*target, *zone)
+		if err != nil {
+			return err
+		}
+		if ok && !serialNewer(soa.Serial, current) {
+			fmt.Printf("Note: %s already serves SOA serial %d, not older than %d from %s -- publishing with serial %d instead (pass -keep-serial to disable).\n",
+				*target, current, soa.Serial, *zoneFile, current+1)
+			soa.Serial = current + 1
+		}
+	}
+
 	var previousSOA *dns.SOA
 	if *previousSerial != 0 {
 		prev := *soa
@@ -700,8 +640,8 @@ func runPublishZone(args []string) error {
 	if err != nil {
 		return err
 	}
-	now := time.Now()
-	wire, err := sazu.SignUpdate(m, zsk, zskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+	inception, expiration := sig0Window()
+	wire, err := sazu.SignUpdate(m, zsk, zskPriv, inception, expiration)
 	if err != nil {
 		return err
 	}
@@ -718,7 +658,7 @@ func runPublishZone(args []string) error {
 func runContact(args []string) error {
 	fs := flag.NewFlagSet("contact", flag.ExitOnError)
 	zone := fs.String("zone", "", "zone to register a contact for")
-	keyPath := fs.String("key", "", "path to the Ed25519 key already pinned at the server for this zone")
+	keyPath := fs.String("key", "", "path to the zone's KSK, as pinned at the server (a ZSK can't change the contact)")
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
 	udp := addUDPFlag(fs)
@@ -764,8 +704,8 @@ func runContact(args []string) error {
 		m.Insert([]dns.RR{op})
 	}
 
-	now := time.Now()
-	wire, err := sazu.SignUpdate(m, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
+	inception, expiration := sig0Window()
+	wire, err := sazu.SignUpdate(m, key, priv, inception, expiration)
 	if err != nil {
 		return err
 	}
@@ -807,8 +747,8 @@ func runDecommissionZone(args []string) error {
 	printKeyInfo(*kskPath, ksk)
 
 	m := sazu.BuildDecommissionPush(*zone)
-	now := time.Now()
-	wire, err := sazu.SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+	inception, expiration := sig0Window()
+	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
 		return err
 	}
@@ -818,14 +758,14 @@ func runDecommissionZone(args []string) error {
 
 // runAddZSK registers a new, optional ZSK for a zone that already has a
 // KSK -- the cheap path (see keys.go's KeyRole doc comment,
-// plugin/sazu): an ordinary push, authenticated by -ksk-key (the KSK, or
-// any key already trusted to authenticate a transaction for this zone),
-// that adds -zsk-key's DNSKEY record. No registrar interaction, no
+// plugin/sazu): an ordinary push, authenticated by -ksk-key (the zone's
+// KSK: the server refuses any DNSKEY RRset change authenticated or
+// signed by anything else), that adds -zsk-key's DNSKEY record. No registrar interaction, no
 // chain-of-trust network walk on the server's side.
 func runAddZSK(args []string) error {
 	fs := flag.NewFlagSet("add-zsk", flag.ExitOnError)
 	zone := fs.String("zone", "", "zone to register a new ZSK for")
-	kskPath := fs.String("ksk-key", "", "path to a key already trusted to authenticate a transaction for this zone (ordinarily the KSK)")
+	kskPath := fs.String("ksk-key", "", "path to the zone's KSK -- the only key the server accepts a DNSKEY RRset change from")
 	zskPath := fs.String("zsk-key", "", "path to the ZSK to register (created if missing)")
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
@@ -877,8 +817,8 @@ func runAddZSK(args []string) error {
 		return err
 	}
 
-	now := time.Now()
-	wire, err := sazu.SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+	inception, expiration := sig0Window()
+	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
 		return err
 	}
@@ -894,7 +834,7 @@ func runAddZSK(args []string) error {
 func runRetireZSK(args []string) error {
 	fs := flag.NewFlagSet("retire-zsk", flag.ExitOnError)
 	zone := fs.String("zone", "", "zone to retire a ZSK from")
-	kskPath := fs.String("ksk-key", "", "path to a key already trusted to authenticate a transaction for this zone (ordinarily the KSK)")
+	kskPath := fs.String("ksk-key", "", "path to the zone's KSK -- the only key the server accepts a DNSKEY RRset change from")
 	zskPath := fs.String("zsk-key", "", "path to the ZSK being retired (must already exist)")
 	target := fs.String("target", "", "host:port, or an http(s):// URL for the §7.3 HTTPS carrier, to send the signed push to (omit to just self-verify)")
 	jsonCarrier := addJSONCarrierFlag(fs)
@@ -939,8 +879,8 @@ func runRetireZSK(args []string) error {
 		return err
 	}
 
-	now := time.Now()
-	wire, err := sazu.SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+	inception, expiration := sig0Window()
+	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
 	if err != nil {
 		return err
 	}
@@ -1072,8 +1012,8 @@ func runRotateKey(args []string) error {
 			return err
 		}
 
-		now := time.Now()
-		wire, err := sazu.SignUpdate(m, newKSK, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
+		inception, expiration := sig0Window()
+		wire, err := sazu.SignUpdate(m, newKSK, newPriv, inception, expiration)
 		if err != nil {
 			return err
 		}
@@ -1121,8 +1061,47 @@ func fetchCurrentDNSKEYs(target, zone string) ([]*dns.DNSKEY, error) {
 	if target == "" {
 		return nil, fmt.Errorf("-target is required: this command needs to query the zone's current DNSKEY set live before it can correctly sign a change to it")
 	}
+	resp, err := queryTarget(target, zone, dns.TypeDNSKEY)
+	if err != nil {
+		return nil, fmt.Errorf("querying %s for %s's current DNSKEY set: %w", target, zone, err)
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		return nil, fmt.Errorf("querying %s for %s's current DNSKEY set: %s", target, zone, dns.RcodeToString[resp.Rcode])
+	}
+	var keys []*dns.DNSKEY
+	for _, rr := range resp.Answer {
+		if k, ok := rr.(*dns.DNSKEY); ok {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("%s currently serves no DNSKEY records for %s -- is it actually onboarded yet ('sazuctl publish-trust')?", target, zone)
+	}
+	return keys, nil
+}
+
+// fetchCurrentSerial asks target which SOA serial it currently serves for
+// zone. ok is false when it serves none -- a zone with no content pushed
+// yet, or one not onboarded at all.
+func fetchCurrentSerial(target, zone string) (serial uint32, ok bool, err error) {
+	resp, err := queryTarget(target, zone, dns.TypeSOA)
+	if err != nil {
+		return 0, false, fmt.Errorf("querying %s for %s's current SOA: %w", target, zone, err)
+	}
+	for _, rr := range resp.Answer {
+		if soa, isSOA := rr.(*dns.SOA); isSOA {
+			return soa.Serial, true, nil
+		}
+	}
+	return 0, false, nil
+}
+
+// queryTarget sends one ordinary query for zone/qtype to target -- over
+// TCP for a host:port, or as a DoH POST for an http(s):// URL, the same
+// two carriers every push uses.
+func queryTarget(target, zone string, qtype uint16) (*dns.Msg, error) {
 	q := new(dns.Msg)
-	q.SetQuestion(dns.Fqdn(zone), dns.TypeDNSKEY)
+	q.SetQuestion(dns.Fqdn(zone), qtype)
 	wire, err := q.Pack()
 	if err != nil {
 		return nil, err
@@ -1139,48 +1118,67 @@ func fetchCurrentDNSKEYs(target, zone string) ([]*dns.DNSKEY, error) {
 		client := &http.Client{Timeout: 5 * time.Second}
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("querying %s for %s's current DNSKEY set: %w", target, zone, err)
+			return nil, err
 		}
 		defer resp.Body.Close()
 		buf, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, fmt.Errorf("reading DNSKEY query response from %s: %w", target, err)
+			return nil, fmt.Errorf("reading response: %w", err)
 		}
 	} else {
 		conn, err := net.Dial("tcp", target)
 		if err != nil {
-			return nil, fmt.Errorf("querying %s for %s's current DNSKEY set: %w", target, zone, err)
+			return nil, err
 		}
 		defer conn.Close()
 		if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 			return nil, err
 		}
 		if err := writeRequest(conn, "tcp", wire); err != nil {
-			return nil, fmt.Errorf("sending DNSKEY query to %s: %w", target, err)
+			return nil, fmt.Errorf("sending query: %w", err)
 		}
 		buf, err = readResponse(conn, "tcp")
 		if err != nil {
-			return nil, fmt.Errorf("reading DNSKEY query response from %s: %w", target, err)
+			return nil, fmt.Errorf("reading response: %w", err)
 		}
 	}
 
 	resp := new(dns.Msg)
 	if err := resp.Unpack(buf); err != nil {
-		return nil, fmt.Errorf("parsing DNSKEY query response from %s: %w", target, err)
+		return nil, fmt.Errorf("parsing response: %w", err)
 	}
-	if resp.Rcode != dns.RcodeSuccess {
-		return nil, fmt.Errorf("querying %s for %s's current DNSKEY set: %s", target, zone, dns.RcodeToString[resp.Rcode])
+	return resp, nil
+}
+
+// serialNewer reports whether a is newer than b under RFC 1982 serial
+// arithmetic, the comparison the server applies to SOA serials.
+func serialNewer(a, b uint32) bool {
+	return a != b && a-b < 1<<31
+}
+
+// lastInception is the SIG(0) inception second this process last signed
+// with -- see sig0Window.
+var lastInception int64
+
+// sig0Window returns the SIG(0) inception and expiration for the next
+// message this process signs. A SAZU server only accepts a message
+// whose SIG(0) inception is strictly newer than the last one it
+// accepted from the same key for the same zone (its replay protection),
+// and inception has one-second resolution. So every signature here uses
+// a whole second of its own: the first one waits for the next second
+// boundary -- which keeps it apart from anything a previous, just-
+// finished sazuctl run signed -- and each later one in the same run
+// (rotate-key sends two) uses a later second still. Inception is then
+// backdated by a minute for clock skew; expiration is an hour out,
+// inside the server's default maximum SIG(0) lifetime.
+func sig0Window() (inception, expiration time.Time) {
+	next := time.Now().Truncate(time.Second).Add(time.Second)
+	if next.Unix() <= lastInception {
+		next = time.Unix(lastInception+1, 0)
 	}
-	var keys []*dns.DNSKEY
-	for _, rr := range resp.Answer {
-		if k, ok := rr.(*dns.DNSKEY); ok {
-			keys = append(keys, k)
-		}
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("%s currently serves no DNSKEY records for %s -- is it actually onboarded yet ('sazuctl publish-trust')?", target, zone)
-	}
-	return keys, nil
+	time.Sleep(time.Until(next))
+	lastInception = next.Unix()
+	return next.Add(-time.Minute), next.Add(time.Hour)
 }
 
 // chooseNetwork is signSelfVerifyAndSend's transport decision, pulled

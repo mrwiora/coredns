@@ -84,6 +84,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
 	key_role    TEXT
 );
 CREATE INDEX IF NOT EXISTS audit_log_zone_at ON audit_log(zone, at);
+
+-- Replay protection (see replay.go's ReplayGuard): the SIG(0) inception
+-- of the newest accepted message per (zone, signing key). Deliberately
+-- not a foreign key into zones(origin) and never deleted -- not by a ZSK
+-- retirement, a KSK rollover, or DeleteZone -- so a captured message
+-- can't be replayed after the key or zone it belongs to was removed and
+-- later re-added.
+CREATE TABLE IF NOT EXISTS sig0_highwater (
+	zone      TEXT NOT NULL,
+	key_id    TEXT NOT NULL,
+	inception INTEGER NOT NULL,
+	PRIMARY KEY (zone, key_id)
+);
 `
 
 // DB is SAZU's SQLite persistence backend, via modernc.org/sqlite -- a
@@ -326,6 +339,15 @@ type KeyChange struct {
 // ApplyUpdateOps' RFC 2136 §2.5 classification exactly, so the two stay
 // in lockstep for the same input.
 func (db *DB) CommitUpdate(zone string, keyChange *KeyChange, ops []dns.RR, zclass uint16, contact *ContactUpdate) error {
+	return db.CommitUpdateWithMark(zone, nil, keyChange, ops, zclass, contact)
+}
+
+// CommitUpdateWithMark is CommitUpdate that additionally records mark
+// (if non-nil) as the newest accepted SIG(0) inception for its (zone,
+// key) pair, in the same transaction -- so an update is never persisted
+// without the replay mark that stops it from being applied a second
+// time after a restart.
+func (db *DB) CommitUpdateWithMark(zone string, mark *ReplayMark, keyChange *KeyChange, ops []dns.RR, zclass uint16, contact *ContactUpdate) error {
 	tx, err := db.sql.Begin()
 	if err != nil {
 		return err
@@ -335,6 +357,9 @@ func (db *DB) CommitUpdate(zone string, keyChange *KeyChange, ops []dns.RR, zcla
 	now := time.Now().Unix()
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO zones (origin, created_at) VALUES (?, ?)`, zone, now); err != nil {
 		return fmt.Errorf("ensuring zone row: %w", err)
+	}
+	if err := recordReplayMark(tx, mark); err != nil {
+		return err
 	}
 
 	if keyChange != nil {
@@ -389,39 +414,18 @@ func (db *DB) CommitUpdate(zone string, keyChange *KeyChange, ops []dns.RR, zcla
 		}
 	}
 
-	// Invalidate any existing NSEC chain before applying this update's own
-	// ops -- mirrors ZoneData.PurgeNSEC exactly, and for the same reason
-	// (see its doc comment): only a freshly, completely recomputed chain
-	// from a full push can be trusted, so an existing one is invalidated
-	// up front rather than risked going stale once this row set no longer
-	// matches what LoadAll would reconstruct from it. A full push's own
-	// NSEC rows, added by the loop below immediately after this, repopulate
-	// it in the same transaction.
-	if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ? AND rrtype = ?`, zone, dns.TypeNSEC); err != nil {
-		return fmt.Errorf("purging stale NSEC records: %w", err)
-	}
-	sigRows, err := tx.Query(`SELECT id, rr FROM rrs WHERE zone = ? AND rrtype = ?`, zone, dns.TypeRRSIG)
-	if err != nil {
-		return fmt.Errorf("finding RRSIGs to check for stale NSEC coverage: %w", err)
-	}
-	var staleSigIDs []int64
-	for sigRows.Next() {
-		var id int64
-		var text string
-		if err := sigRows.Scan(&id, &text); err != nil {
-			sigRows.Close()
+	// A full push (one that adds the apex SOA) replaces the zone's whole
+	// served content, exactly like ZoneData.PurgeContentAndApply does in
+	// memory: everything except the apex DNSKEY RRset and the RRSIGs
+	// covering it is dropped before this update's own records are added.
+	// Without this, records a later push no longer contains -- with
+	// RRSIGs still inside their validity window -- would come back on
+	// the next LoadAll, along with stale NSEC/NSEC3 chains. serveUpdate
+	// refuses any other kind of content change, so this is the only
+	// purge a commit ever needs.
+	if addsApexSOA(ops, zone, zclass) {
+		if err := purgeContent(tx, zone); err != nil {
 			return err
-		}
-		if rr, err := dns.NewRR(text); err == nil {
-			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeNSEC {
-				staleSigIDs = append(staleSigIDs, id)
-			}
-		}
-	}
-	sigRows.Close()
-	for _, id := range staleSigIDs {
-		if _, err := tx.Exec(`DELETE FROM rrs WHERE id = ?`, id); err != nil {
-			return fmt.Errorf("purging stale NSEC RRSIG: %w", err)
 		}
 	}
 
@@ -496,6 +500,132 @@ func (db *DB) CommitUpdate(zone string, keyChange *KeyChange, ops []dns.RR, zcla
 	}
 
 	return tx.Commit()
+}
+
+// addsApexSOA reports whether ops adds a SOA at zone's apex. Unlike
+// containsAPEXSOA it goes by class alone (an add carries the zone's
+// class; RFC 2136 deletes carry ANY or NONE), not Rdlength, so it also
+// holds for records built in Go rather than unpacked from the wire.
+func addsApexSOA(ops []dns.RR, zone string, zclass uint16) bool {
+	for _, rr := range ops {
+		if _, ok := rr.(*dns.SOA); ok && rr.Header().Class == zclass && normalizeZone(rr.Header().Name) == normalizeZone(zone) {
+			return true
+		}
+	}
+	return false
+}
+
+// purgeContent deletes every stored record for zone except the apex
+// DNSKEY RRset and the RRSIGs covering it -- the on-disk counterpart of
+// ZoneData.purgeContentLocked.
+func purgeContent(tx *sql.Tx, zone string) error {
+	apex := normalizeZone(zone)
+	if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ? AND NOT (name = ? AND rrtype IN (?, ?))`,
+		zone, apex, dns.TypeDNSKEY, dns.TypeRRSIG); err != nil {
+		return fmt.Errorf("purging zone content: %w", err)
+	}
+	rows, err := tx.Query(`SELECT id, rr FROM rrs WHERE zone = ? AND name = ? AND rrtype = ?`, zone, apex, dns.TypeRRSIG)
+	if err != nil {
+		return fmt.Errorf("finding apex RRSIGs to purge: %w", err)
+	}
+	var stale []int64
+	for rows.Next() {
+		var id int64
+		var text string
+		if err := rows.Scan(&id, &text); err != nil {
+			rows.Close()
+			return err
+		}
+		rr, err := dns.NewRR(text)
+		if sig, ok := rr.(*dns.RRSIG); err != nil || !ok || sig.TypeCovered != dns.TypeDNSKEY {
+			stale = append(stale, id)
+		}
+	}
+	rows.Close()
+	for _, id := range stale {
+		if _, err := tx.Exec(`DELETE FROM rrs WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("purging apex RRSIG: %w", err)
+		}
+	}
+	return nil
+}
+
+// recordReplayMark upserts mark into sig0_highwater, never moving an
+// existing mark backwards. A nil mark is a no-op.
+func recordReplayMark(tx *sql.Tx, mark *ReplayMark) error {
+	if mark == nil {
+		return nil
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO sig0_highwater (zone, key_id, inception) VALUES (?, ?, ?)
+		 ON CONFLICT(zone, key_id) DO UPDATE SET inception = MAX(inception, excluded.inception)`,
+		mark.Zone, mark.KeyID, int64(mark.Inception)); err != nil {
+		return fmt.Errorf("recording SIG(0) replay mark: %w", err)
+	}
+	return nil
+}
+
+// RecordReplayMark persists mark on its own -- for the one accepted
+// update that doesn't go through CommitUpdateWithMark, a decommission.
+func (db *DB) RecordReplayMark(mark *ReplayMark) error {
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
+	if err := recordReplayMark(tx, mark); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// EarliestRRSIGExpiration returns the soonest expiration among every
+// RRSIG stored for zone -- the moment the zone starts failing
+// validation if its owner stops re-pushing, since this server never
+// re-signs anything itself. ok is false when the zone has no RRSIGs.
+func (db *DB) EarliestRRSIGExpiration(zone string) (earliest time.Time, ok bool, err error) {
+	rows, err := db.sql.Query(`SELECT rr FROM rrs WHERE zone = ? AND rrtype = ?`, normalizeZone(zone), dns.TypeRRSIG)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var text string
+		if err := rows.Scan(&text); err != nil {
+			return time.Time{}, false, err
+		}
+		rr, err := dns.NewRR(text)
+		sig, isSig := rr.(*dns.RRSIG)
+		if err != nil || !isSig {
+			continue
+		}
+		exp := time.Unix(int64(sig.Expiration), 0)
+		if !ok || exp.Before(earliest) {
+			earliest, ok = exp, true
+		}
+	}
+	return earliest, ok, rows.Err()
+}
+
+// LoadReplayMarks returns every persisted replay mark, for seeding a
+// ReplayGuard at startup.
+func (db *DB) LoadReplayMarks() ([]ReplayMark, error) {
+	rows, err := db.sql.Query(`SELECT zone, key_id, inception FROM sig0_highwater`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ReplayMark
+	for rows.Next() {
+		var m ReplayMark
+		var inception int64
+		if err := rows.Scan(&m.Zone, &m.KeyID, &inception); err != nil {
+			return nil, err
+		}
+		m.Inception = uint32(inception)
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 // DeleteZone removes every persisted trace of zone -- its zones row,

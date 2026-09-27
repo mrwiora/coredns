@@ -139,6 +139,22 @@ entirely.**
 **Threat: a captured, still-valid push is replayed to revert a zone to an
 earlier state.**
 
+> **Status: mitigated.** The server now enforces three rules on every
+> update (see `replay.go` and README's "Replay protection"): each key's
+> SIG(0) inception must be strictly newer than the last message accepted
+> from that key for that zone (marks persisted in the same transaction
+> as the update, never deleted); a full push's SOA serial must move
+> forward (RFC 1982); and a SIG(0) window may not exceed
+> `max_sig0_lifetime` (default 1h5m). This closes every case below,
+> including the key-management one, without a separate sequence number:
+> the SIG(0) inception already *is* a signed, per-message value the
+> client controls. It also blunts the clock-rewind variant at the end
+> of this section — a message the server already accepted stays
+> rejected however far its clock is turned back. What remains open is
+> the multi-instance case: the marks must be replicated with the same
+> consistency as the key state (`SAZU-CLUSTER.md`), or a replay against
+> a lagging instance succeeds. The analysis below is kept as written.
+
 This is the one gap this review surfaced that wasn't previously flagged
 anywhere in the codebase's own comments, and is worth walking through in
 full:
@@ -294,22 +310,56 @@ full:
 
 ## 10. Summary of identified gaps, ranked by what to address first
 
-1. **Replay of a captured, still-valid push within its one-hour SIG(0)
-   window** (§5) — concrete, currently exploitable if a customer's own
+1. ~~**Replay of a captured, still-valid push within its one-hour SIG(0)
+   window**~~ — **mitigated** (see §5's status note); remaining only for
+   multi-instance deployments. Original finding (§5) — concrete, currently exploitable if a customer's own
    tooling omits `previousSerial`, and unmitigated at all for
    key-management operations regardless of client behavior. The most
    actionable finding in this document; needs a monotonic nonce/sequence
    requirement for key-management ops specifically.
-2. **Hardcoded root trust anchor with no rollover mechanism** (§4, §8) —
+2. ~~**Hardcoded root trust anchor with no rollover mechanism**~~ —
+   **mitigated**: the plugin's `trust_anchor FILE` directive and
+   sazu-watchd's `-trust-anchor` take a maintained anchor file (e.g.
+   unbound-anchor's RFC 5011-tracked `root.key`), and the built-in list
+   now includes root KSK-2024. Original finding: **Hardcoded root trust
+   anchor with no rollover mechanism** (§4, §8) —
    a time-delayed, fleet-wide, silent failure waiting for IANA's next root
    KSK rotation. Not urgent today, but worth planning before it becomes
    urgent on someone else's schedule.
 3. **Rate limiting is not cluster-aware** (§8) — best addressed before
    `SAZU-CLUSTER.md`'s gossip work goes much further, since retrofitting
    shared quota state after the fact is harder than designing it in.
-4. **No per-key authorization scoping** (§9) — already tracked in
+4. **No per-key authorization scoping** — narrowed: key management,
+   contact changes, and decommission are now KSK-only, so a ZSK can only
+   push content. Original finding: **No per-key authorization scoping** (§9) — already tracked in
    README's Known Limitations; restated here as a real elevation-relevant
    residual risk, not a new finding.
 5. **Audit trail has no tamper-evidence or retention policy** (§6, §8) —
    lower severity; worth a retention knob and worth being explicit that
    it's an operational record, not a compliance-grade log.
+
+### Found and fixed after this review
+
+A later conformance pass against the protocol specification found and
+fixed these, none of which the sections above had flagged:
+
+- **Chain-of-trust walk accepted a DNSKEY RRset signed by any key in it.**
+  The root's and every ancestor's DNSKEY RRset only had to *contain* the
+  anchored / DS-matched key and carry *some* valid RRSIG from a key in
+  the set — so whoever could answer those queries (on-path, or by
+  spoofing UDP) could add their own key, sign with it, and have it
+  trusted for everything below. Now only the anchored / DS-matched keys
+  may sign it (RFC 4035 §5.2). This was the §4 spoofing defense of
+  first contact and rollover.
+- **The zone's own DNSKEY RRset could be signed by a ZSK**, which the
+  server accepted but validating resolvers treat as bogus; and any ZSK
+  could add or retire keys and change the contact. Now KSK-only, and an
+  update touching the DNSKEY RRset must carry it complete and leave it
+  equal to the pinned KSK plus the registered ZSKs.
+- **Full pushes were never purged on disk**, only in memory: after a
+  restart, records dropped from the zone (with still-valid RRSIGs) were
+  served again.
+- **Partial content changes were accepted** and silently dropped the
+  zone's NSEC/NSEC3 chain until the next full push. Now refused.
+- **A SHA-1 DS could satisfy the chain-of-trust match.** Now only
+  SHA-256/SHA-384 count.

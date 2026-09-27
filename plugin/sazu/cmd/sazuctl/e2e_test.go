@@ -37,6 +37,10 @@ func startTestServer(t *testing.T) string {
 		Validator:                   sazu.NewValidator(),
 		Capture:                     sazu.NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
+		// As setup.go always installs one: these tests then also prove
+		// sazuctl's own signatures (sig0Window) stay strictly monotonic
+		// per key across back-to-back commands.
+		Replay: sazu.NewReplayGuard(),
 	}
 	cfg := &dnsserver.Config{
 		Zone:        ".",

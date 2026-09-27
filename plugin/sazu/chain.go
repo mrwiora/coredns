@@ -90,6 +90,17 @@ type ChainValidator interface {
 //     interaction with, or risk to, ordinary query handling.
 type Validator struct {
 	Client *dns.Client
+
+	// Anchors are the root trust anchors validation bootstraps from. Nil
+	// means RootTrustAnchors(), the built-in list.
+	Anchors []TrustAnchor
+}
+
+func (v *Validator) anchors() []TrustAnchor {
+	if v.Anchors != nil {
+		return v.Anchors
+	}
+	return RootTrustAnchors()
 }
 
 // NewValidator returns a Validator with a default 5s query timeout.
@@ -168,10 +179,29 @@ func (v *Validator) VerifyChainOfTrust(zone string, candidateKey *dns.DNSKEY) er
 		log.Debugf("chain-of-trust for %s: final DS fetch failed: %v", zone, err)
 		return err
 	}
+	return matchCandidateDS(zone, finalDS, candidateKey)
+}
+
+// matchCandidateDS is VerifyChainOfTrust's final step: candidateKey must
+// match one of zone's (already validated) DS records with an acceptable
+// digest type.
+func matchCandidateDS(zone string, finalDS []*dns.DS, candidateKey *dns.DNSKEY) error {
+	weakMatch := false
 	for _, ds := range finalDS {
-		if dsMatchesKey(ds, candidateKey) {
+		if !dsMatchesKey(ds, candidateKey) {
+			continue
+		}
+		// Only a SHA-256 or SHA-384 DS counts (RFC 8624: SHA-1 digests
+		// are NOT RECOMMENDED for DS, and SHA-1's collision resistance is
+		// exactly what a DS digest relies on).
+		if ds.DigestType == dns.SHA256 || ds.DigestType == dns.SHA384 {
 			return nil
 		}
+		weakMatch = true
+	}
+	if weakMatch {
+		return &ChainError{Op: "weak-ds-digest", Msg: fmt.Sprintf(
+			"the only DS for %s matching this key uses a SHA-1 digest; publish a SHA-256 (digest type 2) DS for it", zone)}
 	}
 	// A DS *is* published for zone -- just not one matching this key.
 	// Tagged separately from a generic "verify" failure because it needs
@@ -211,28 +241,34 @@ func (v *Validator) fetchAndVerifyDNSKEYAtRoot(servers []string) ([]*dns.DNSKEY,
 		return nil, chainErr("root-dnskey", "no DNSKEY records returned for the root")
 	}
 
-	anchored := false
+	var anchored []*dns.DNSKEY
 	for _, k := range keys {
-		for _, a := range RootTrustAnchors() {
+		for _, a := range v.anchors() {
 			if a.Matches(k) {
-				anchored = true
+				anchored = append(anchored, k)
+				break
 			}
 		}
 	}
-	if !anchored {
+	if len(anchored) == 0 {
 		return nil, chainErr("root-dnskey", "no root DNSKEY matches the pinned trust anchor")
 	}
 
-	if err := verifyAnyRRSIG(".", toRR(keys), dns.TypeDNSKEY, sigs, keys); err != nil {
+	// The RRset must be signed by an anchored key itself -- not merely
+	// contain one. Otherwise anyone able to answer this query could add
+	// a key of their own next to the real one, sign with it, and have
+	// every key in the set trusted from here on down.
+	if err := verifyAnyRRSIG(".", toRR(keys), dns.TypeDNSKEY, sigs, anchored); err != nil {
 		return nil, chainErr("root-dnskey", "%v", err)
 	}
 	return keys, nil
 }
 
 // fetchAndVerifyDNSKEY fetches zone's own DNSKEY RRset and verifies it
-// against a DS RRset already trusted from its parent: a matching key must
-// be present, and the whole RRset must carry a verifying RRSIG from a key
-// in the same set.
+// against a DS RRset already trusted from its parent: the whole RRset
+// must carry a verifying RRSIG from a key that matches that DS (RFC 4035
+// §5.2) -- not from just any key in the set, which whoever answered the
+// query could have added themselves.
 func (v *Validator) fetchAndVerifyDNSKEY(zone string, servers []string, trustedDS []*dns.DS) ([]*dns.DNSKEY, error) {
 	resp, err := v.queryDO(zone, dns.TypeDNSKEY, servers)
 	if err != nil {
@@ -246,19 +282,20 @@ func (v *Validator) fetchAndVerifyDNSKEY(zone string, servers []string, trustedD
 		return nil, chainErr("dnskey", "no DNSKEY records found for %s", zone)
 	}
 
-	matched := false
+	var matched []*dns.DNSKEY
 	for _, k := range keys {
 		for _, ds := range trustedDS {
 			if dsMatchesKey(ds, k) {
-				matched = true
+				matched = append(matched, k)
+				break
 			}
 		}
 	}
-	if !matched {
+	if len(matched) == 0 {
 		return nil, chainErr("dnskey", "no DNSKEY in %s's key set matches the trusted DS", zone)
 	}
 
-	if err := verifyAnyRRSIG(zone, toRR(keys), dns.TypeDNSKEY, sigs, keys); err != nil {
+	if err := verifyAnyRRSIG(zone, toRR(keys), dns.TypeDNSKEY, sigs, matched); err != nil {
 		return nil, chainErr("dnskey", "%s: %v", zone, err)
 	}
 	return keys, nil

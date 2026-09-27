@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/coredns/coredns/plugin/sazu"
 )
@@ -30,7 +31,16 @@ type zoneState struct {
 	// being looked at; its stale entry here is harmless and never
 	// checked again.
 	zskPresent map[uint16]bool
+
+	// expiring records whether the last pass found the zone's earliest
+	// RRSIG expiration inside the warning window -- see
+	// checkSignatureExpiry.
+	expiring bool
 }
+
+// expiryWarning is how far ahead of a zone's earliest RRSIG expiration
+// checkSignatureExpiry starts warning. Set from -expiry-warning.
+var expiryWarning = 7 * 24 * time.Hour
 
 // AlertKind distinguishes what a given Alert is actually reporting --
 // Notifier renders each kind with its own subject/body text (alert.go).
@@ -41,6 +51,12 @@ const (
 	// matching the pinned KSK) transitioned. The zero value, so every
 	// existing call site that never sets Kind keeps meaning this.
 	AlertChainOfTrust AlertKind = iota
+	// AlertSignatureExpiry: the zone's earliest RRSIG expiration moved
+	// into (or, Recovered, back out of) the warning window. This server
+	// never re-signs anything, so a zone whose owner stops pushing goes
+	// bogus for validating resolvers the moment that RRSIG expires, with
+	// no other symptom on the server side at all.
+	AlertSignatureExpiry
 	// AlertZSKMissing: a specific, currently-registered ZSK's presence
 	// in the zone's live-served DNSKEY RRset transitioned -- see
 	// keys.go's KeyRole doc comment (plugin/sazu) for why a dropped ZSK
@@ -65,6 +81,9 @@ type Alert struct {
 	Recovered bool
 	Err       error
 	KeyTag    uint16
+	// Expires is meaningful only for AlertSignatureExpiry: the zone's
+	// earliest RRSIG expiration.
+	Expires time.Time
 }
 
 // checkOnce runs one pass over every zone db knows about: re-validating
@@ -122,7 +141,35 @@ func checkOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher
 		if len(zk.ZSKs) > 0 {
 			alerts = append(alerts, checkZSKPresence(db, zone, zk, dnskeys, st, seen)...)
 		}
+		expiryAlerts, err := checkSignatureExpiry(db, zone, st, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		alerts = append(alerts, expiryAlerts...)
 	}
+	return alerts, nil
+}
+
+// checkSignatureExpiry warns when zone's earliest stored RRSIG expires
+// within expiryWarning of now. Unlike the other checks, a zone already
+// inside the window on its very first observation alerts right away: a
+// deadline isn't a change to establish a baseline for first, and waiting
+// a pass could mean warning only after the zone already went bogus.
+// Moving back out of the window (a fresh push) sends a recovery.
+func checkSignatureExpiry(db *sazu.DB, zone string, st *zoneState, now time.Time) ([]Alert, error) {
+	earliest, ok, err := db.EarliestRRSIGExpiration(zone)
+	if err != nil {
+		return nil, fmt.Errorf("reading RRSIG expirations for %s: %w", zone, err)
+	}
+	nowExpiring := ok && earliest.Before(now.Add(expiryWarning))
+	var alerts []Alert
+	switch {
+	case nowExpiring && !st.expiring:
+		alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertSignatureExpiry, Expires: earliest})
+	case !nowExpiring && st.expiring:
+		alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertSignatureExpiry, Recovered: true})
+	}
+	st.expiring = nowExpiring
 	return alerts, nil
 }
 

@@ -504,13 +504,14 @@ func TestNODATACarriesValidNSECProof(t *testing.T) {
 	}
 }
 
-// TestPartialPushInvalidatesNSECUntilNextFullPush proves the documented
-// trade-off (see ZoneData.PurgeNSEC): a partial push, which never
-// includes NSEC records of its own, invalidates any existing chain
-// rather than risk it going stale -- an NXDOMAIN answer right afterward
-// carries no NSEC at all -- and a subsequent full push, which always
-// recomputes the whole chain, restores it.
-func TestPartialPushInvalidatesNSECUntilNextFullPush(t *testing.T) {
+// TestPartialPushIsRefusedAndNSECChainSurvives proves a content change
+// that isn't a complete replacement of the zone (no apex SOA) is
+// refused with ERR_FULL_ZONE_REQUIRED instead of being applied: applying
+// it would leave the NSEC chain describing content that no longer
+// exists, and the server can't compute a replacement chain itself. The
+// existing chain, and the content it describes, stay exactly as they
+// were.
+func TestPartialPushIsRefusedAndNSECChainSurvives(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
 
@@ -554,20 +555,20 @@ func TestPartialPushInvalidatesNSECUntilNextFullPush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("signing partial update: %v", err)
 	}
-	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("partial push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	resp := sendRaw(t, addr, wire)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("partial push rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
-
-	during := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
-	if nsecs, _ := splitNSECAndRRSIGs(t, during.Ns); len(nsecs) != 0 {
-		t.Fatalf("expected the partial push to invalidate the NSEC chain, still got %+v", nsecs)
+	if status, ok := diagnosticStatus(resp); !ok || status != statusErrFullZoneRequired {
+		t.Fatalf("expected %s diagnostic, got status=%q ok=%v", statusErrFullZoneRequired, status, ok)
 	}
-
-	fullPush() // recomputes the chain from the same rrs given to BuildFullZonePush
+	if got := query(t, addr, "mail.example.org.", dns.TypeA); len(got.Answer) != 0 {
+		t.Fatalf("expected the refused partial push's record to never be served, got %+v", got.Answer)
+	}
 
 	after := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
 	if nsecs, _ := splitNSECAndRRSIGs(t, after.Ns); len(nsecs) == 0 {
-		t.Fatalf("expected a subsequent full push to restore the NSEC chain, got none")
+		t.Fatalf("expected the NSEC chain to survive a refused partial push, got none")
 	}
 }
 
@@ -648,7 +649,7 @@ func TestOnboardWithoutSOAIsAccepted(t *testing.T) {
 	dnskeyRR := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
 		Flags: key.Flags, Protocol: key.Protocol, Algorithm: key.Algorithm, PublicKey: key.PublicKey}
 	now := time.Now()
-	signed, err := SignZoneContent([]dns.RR{dnskeyRR, testA("www.example.org.", net.IPv4(203, 0, 113, 10))},
+	signed, err := SignZoneContent([]dns.RR{dnskeyRR},
 		dnskeyRR, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
 	if err != nil {
 		t.Fatalf("SignZoneContent: %v", err)
@@ -749,44 +750,38 @@ func TestRateLimiterExceededRejectsFurtherKeyManagementPushes(t *testing.T) {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
-	partial := func(rr dns.RR) *dns.Msg {
+	// A contact registration changes no served content, so it is metered
+	// as a key-management push.
+	contact := func(address string) *dns.Msg {
 		t.Helper()
-		signedRR, err := SignZoneContent([]dns.RR{rr}, key, priv, time.Now().Add(-DefaultSignatureInceptionSkew), time.Now().Add(DefaultSignatureValidity))
+		op, err := BuildContactOp("example.org.", []string{address})
 		if err != nil {
-			t.Fatalf("SignZoneContent: %v", err)
+			t.Fatalf("BuildContactOp: %v", err)
 		}
 		m := new(dns.Msg)
 		m.SetQuestion("example.org.", dns.TypeSOA)
 		m.Opcode = dns.OpcodeUpdate
-		m.Insert(signedRR)
-		return m
+		m.Insert([]dns.RR{op})
+		now := time.Now()
+		wire, err := SignUpdate(m, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("signing contact push: %v", err)
+		}
+		return sendRaw(t, addr, wire)
 	}
 
-	first := partial(testA("mail.example.org.", net.IPv4(203, 0, 113, 20)))
-	now = time.Now()
-	firstWire, err := SignUpdate(first, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing first partial push: %v", err)
+	if resp := contact("mailto:first@example.org"); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("first key-management push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	if resp := sendRaw(t, addr, firstWire); resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("first partial push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
-	}
-
-	second := partial(testA("ftp.example.org.", net.IPv4(203, 0, 113, 21)))
-	now = time.Now()
-	secondWire, err := SignUpdate(second, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing second partial push: %v", err)
-	}
-	resp := sendRaw(t, addr, secondWire)
+	resp := contact("mailto:second@example.org")
 	if resp.Rcode != dns.RcodeRefused {
-		t.Fatalf("second partial push rcode = %s, want REFUSED (quota exceeded)", dns.RcodeToString[resp.Rcode])
+		t.Fatalf("second key-management push rcode = %s, want REFUSED (quota exceeded)", dns.RcodeToString[resp.Rcode])
 	}
 	if status, ok := diagnosticStatus(resp); !ok || status != statusErrQuotaExceeded {
 		t.Fatalf("expected %s diagnostic, got status=%q ok=%v", statusErrQuotaExceeded, status, ok)
 	}
-	if got := query(t, addr, "ftp.example.org.", dns.TypeA); len(got.Answer) != 0 {
-		t.Fatalf("expected the over-quota push's content to never have been applied, got %+v", got.Answer)
+	if addrs, _ := s.Contacts.Get("example.org."); len(addrs) != 1 || addrs[0] != "mailto:first@example.org" {
+		t.Fatalf("expected the over-quota push to never have been applied, contact is %v", addrs)
 	}
 }
 
@@ -962,7 +957,7 @@ func TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions(t *testi
 // chain: once a zone is onboarded, an ordinary push signed by the same
 // (already-pinned) key -- carrying no DNSKEY at all -- can add and
 // remove individual records without re-verifying chain-of-trust.
-func TestOrdinaryPartialPushAfterOnboarding(t *testing.T) {
+func TestPartialPushAfterOnboardingIsRefused(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
 
@@ -1003,17 +998,20 @@ func TestOrdinaryPartialPushAfterOnboarding(t *testing.T) {
 		t.Fatalf("signing partial push: %v", err)
 	}
 	resp := sendRaw(t, addr, partialWire)
-	if resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("partial push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("partial push rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	}
+	if status, ok := diagnosticStatus(resp); !ok || status != statusErrFullZoneRequired {
+		t.Fatalf("expected %s diagnostic, got status=%q ok=%v", statusErrFullZoneRequired, status, ok)
 	}
 
-	mailAnswer := query(t, addr, "mail.example.org.", dns.TypeA)
-	if len(mailAnswer.Answer) != 1 {
-		t.Fatalf("expected the partially-added record to be servable, got %d answers", len(mailAnswer.Answer))
+	// Nothing of it applied: the add didn't happen, the delete didn't
+	// either.
+	if got := query(t, addr, "mail.example.org.", dns.TypeA); len(got.Answer) != 0 {
+		t.Fatalf("expected the refused push's added record to not be served, got %d answers", len(got.Answer))
 	}
-	wwwAnswer := query(t, addr, "www.example.org.", dns.TypeA)
-	if len(wwwAnswer.Answer) != 0 {
-		t.Fatalf("expected the partially-removed record to be gone, got %d answers", len(wwwAnswer.Answer))
+	if got := query(t, addr, "www.example.org.", dns.TypeA); len(got.Answer) != 1 {
+		t.Fatalf("expected the refused push's deleted record to still be served, got %d answers", len(got.Answer))
 	}
 }
 
@@ -1219,22 +1217,7 @@ func TestKeyRolloverSwitchesToNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating new key: %v", err)
 	}
-	newKeyRR := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags: newKey.Flags, Protocol: newKey.Protocol, Algorithm: newKey.Algorithm, PublicKey: newKey.PublicKey}
-	now = time.Now()
-	signedNewKey, err := SignZoneContent([]dns.RR{newKeyRR}, newKey, newPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	rollover := new(dns.Msg)
-	rollover.SetQuestion("example.org.", dns.TypeSOA)
-	rollover.Opcode = dns.OpcodeUpdate
-	rollover.Insert(signedNewKey)
-	rolloverWire, err := SignUpdate(rollover, newKey, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing rollover push: %v", err)
-	}
-	resp := sendRaw(t, addr, rolloverWire)
+	resp := rolloverKSK(t, addr, oldKey, newKey, newPriv)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rollover push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
@@ -1259,20 +1242,7 @@ func TestKeyRolloverSwitchesToNewKey(t *testing.T) {
 	}
 
 	// The new key does.
-	now = time.Now()
-	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 20))}, newKey, newPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	newSignedPartial := new(dns.Msg)
-	newSignedPartial.SetQuestion("example.org.", dns.TypeSOA)
-	newSignedPartial.Opcode = dns.OpcodeUpdate
-	newSignedPartial.Insert(signedA)
-	newWire, err := SignUpdate(newSignedPartial, newKey, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing: %v", err)
-	}
-	if resp := sendRaw(t, addr, newWire); resp.Rcode != dns.RcodeSuccess {
+	if resp := contentPush(t, addr, "example.org.", []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 20))}, newKey, newPriv, newKey, newPriv); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("push signed by the new key rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 }

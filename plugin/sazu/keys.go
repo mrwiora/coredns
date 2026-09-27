@@ -22,7 +22,9 @@ import (
 // already-trusted key's SIG(0) authenticated the push that introduced
 // it, which is also what lets a customer register an *additional* ZSK,
 // or replace one, at any point (AddZSK/RetireZSK) with no registrar
-// interaction and no outbound chain-of-trust network walk. Nothing in
+// interaction and no outbound chain-of-trust network walk -- always
+// through a KSK-authenticated, KSK-signed update: a ZSK authenticates
+// content pushes only, never a change to the key set or the contact. Nothing in
 // KeyRegistry itself requires a zone to ever have one -- a KSK-only
 // zone is still a mechanically valid state (single-key model: the same
 // key does SIG(0) authentication and all DNSSEC signing) -- but every

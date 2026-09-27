@@ -83,9 +83,8 @@ func LoadZoneFile(path, origin string) (soa *dns.SOA, rrs []dns.RR, err error) {
 //
 // A full push is the only kind that ever computes or sends a
 // denial-of-existence chain -- it's the only one that sees the zone's
-// entire name set at once, which a correct chain needs. The server
-// invalidates any existing chain before applying a push that doesn't
-// include one (see ZoneData.PurgeNSEC); this one always does.
+// entire name set at once, which a correct chain needs -- which is why
+// the server refuses any content change that isn't a full push.
 func BuildFullZonePush(zone string, soa *dns.SOA, rrs []dns.RR, candidateKey *dns.DNSKEY, signer crypto.Signer, previousSOA *dns.SOA) (*dns.Msg, error) {
 	return BuildFullZonePushSplit(zone, soa, rrs, candidateKey, signer, nil, nil, previousSOA)
 }
@@ -248,10 +247,10 @@ func buildDNSKEYRRsetPush(zone string, current, want []*dns.DNSKEY, signer *dns.
 // current is every DNSKEY record the zone currently serves -- a live
 // query (see cmd/sazuctl's fetchCurrentDNSKEYs), since this package
 // tracks no server-side state of its own and has no other way to know
-// it. signer/signerPriv is whichever key is authenticating and content-
-// signing this transaction: ordinarily the KSK, but this package's own
-// convention (see keys.go's KeyRole doc comment) also allows an
-// already-authorized ZSK to register another.
+// it. signer/signerPriv must be the zone's KSK: it signs the DNSKEY
+// RRset, which a validating resolver only accepts from a key the
+// parent's DS matches (RFC 4035 §5.2), and the server refuses a DNSKEY
+// RRset change authenticated or signed by anything else.
 //
 // The transaction itself (SIG(0), via SignUpdate) must also be signed
 // by signer.
