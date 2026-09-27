@@ -3,7 +3,6 @@ package dnsserver
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net"
 	"time"
 
@@ -23,18 +22,13 @@ type ServerTLS struct {
 
 // NewServerTLS returns a new CoreDNS TLS server and compiles all plugin in to it.
 func NewServerTLS(addr string, group []*Config) (*ServerTLS, error) {
-	s, err := NewServer(addr, group)
+	tlsConfig, err := sharedTLSConfig(addr, group)
 	if err != nil {
 		return nil, err
 	}
-	// The *tls* plugin must make sure that multiple conflicting
-	// TLS configuration returns an error: it can only be specified once.
-	var tlsConfig *tls.Config
-	for _, z := range s.zones {
-		for _, conf := range z {
-			// Should we error if some configs *don't* have TLS?
-			tlsConfig = conf.TLSConfig
-		}
+	s, err := NewServer(addr, group)
+	if err != nil {
+		return nil, err
 	}
 
 	return &ServerTLS{Server: s, tlsConfig: tlsConfig}, nil
@@ -54,7 +48,7 @@ func (s *ServerTLS) Serve(l net.Listener) error {
 	// Only fill out the TCP server for this one.
 	s.server[tcp] = &dns.Server{Listener: l,
 		Net:           "tcp-tls",
-		TsigSecret:    s.tsigSecret,
+		TsigSecret:    s.TsigSecret,
 		MsgAcceptFunc: s.msgAcceptFunc(),
 		MaxTCPQueries: s.MaxTCPQueries,
 		ReadTimeout:   s.ReadTimeout,
@@ -100,6 +94,6 @@ func (s *ServerTLS) OnStartupComplete() {
 
 	out := startUpZones(transport.TLS+"://", s.Addr, s.zones)
 	if out != "" {
-		fmt.Print(out)
+		printStartup(out)
 	}
 }

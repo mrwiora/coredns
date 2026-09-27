@@ -54,12 +54,19 @@ type Cache struct {
 	// Positive/negative zone exceptions
 	pexcept []string
 	nexcept []string
+	bypass  []string // mutable authoritative zones discovered at startup
 
 	// Keep ttl option
 	keepttl bool
 
 	// Testing.
 	now func() time.Time
+}
+
+// ZoneBypasser identifies canonical authoritative zones that must always be
+// queried directly. Cache discovers implementations in its server block at startup.
+type ZoneBypasser interface {
+	CacheBypassZones() []string
 }
 
 // New returns an initialized Cache with default settings. It's up to the
@@ -89,6 +96,13 @@ func New() *Cache {
 func key(qname string, m *dns.Msg, t response.Type, do, cd bool) (bool, uint64) {
 	// We don't store truncated responses.
 	if m.Truncated {
+		return false, 0
+	}
+	// A response with no question cannot be keyed or cached and would panic
+	// on m.Question[0] below. Some plugins can emit such a malformed message
+	// (e.g. during prefetch); warn and skip it rather than crash the server.
+	if len(m.Question) == 0 {
+		log.Warningf("Not caching malformed response with an empty question section for %q", qname)
 		return false, 0
 	}
 	// Nor errors or Meta or Update.

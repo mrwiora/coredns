@@ -32,7 +32,8 @@ forward FROM TO...
 * **TO...** are the destination endpoints to forward to. The **TO** syntax allows you to specify
   a protocol, `tls://9.9.9.9`, `quic://94.140.14.14`, `https://9.9.9.9` (DoH defaults to `/dns-query` path) or `dns://` (or no protocol)
   for plain DNS. The number of upstreams is limited to 15. In addition to IP addresses and files (like `/etc/resolv.conf`), **TO** can also be
-  a hostname (e.g., `my-dns.svc.cluster.local`). Hostnames are resolved to IP addresses at startup.
+  a hostname (e.g., `my-dns.svc.cluster.local`). Hostnames are resolved to IP addresses at startup and are treated as
+  absolute DNS names even without a trailing dot; resolver search domains are not applied.
   See the `resolver` option below.
 
 Multiple upstreams are randomized (see `policy`) on first use. When a healthy proxy returns an error
@@ -144,6 +145,12 @@ On each endpoint, the timeouts for communication are set as follows:
 
 * The DNS and DoT dial timeout defaults to 30s and can decrease automatically down to 1s based on early results.
   The DoQ handshake timeout is 5s.
+* DoT connection setup (TCP dial plus TLS handshake) is additionally bounded by the remaining
+  5s forwarding retry window, or an earlier request deadline. When retries are enabled, each
+  setup attempt is limited to half of the window available at the start of forwarding (at most
+  2.5s), so a stalled handshake leaves time to try a fresh connection. With `max_connect_attempts 1`,
+  setup may use the full remaining window. Failed handshakes close the connection; successful
+  connections remain reusable. These setup limits do not change the DNS exchange read timeout.
 * The read timeout is static at 2s.
 
 ## Metadata
