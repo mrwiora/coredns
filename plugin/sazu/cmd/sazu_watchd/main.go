@@ -19,7 +19,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -36,6 +35,9 @@ func main() {
 	smtpUsername := flag.String("smtp-username", "", "SMTP auth username (omit for no auth)")
 	smtpPasswordFile := flag.String("smtp-password-file", "", "path to a file containing the SMTP auth password")
 	webhookTimeout := flag.Duration("webhook-timeout", 10*time.Second, "timeout for a single webhook POST")
+	webhookAllowPrivate := flag.Bool("webhook-allow-private", false,
+		"allow webhook alerts to loopback/private/link-local addresses and follow an HTTP proxy from the environment. "+
+			"Webhook URLs are chosen by zone owners, so only enable this where every zone owner is trusted")
 	flag.DurationVar(&expiryWarning, "expiry-warning", expiryWarning,
 		"warn a zone's contact once its earliest RRSIG expires within this long")
 	trustAnchorPath := flag.String("trust-anchor", "",
@@ -80,7 +82,7 @@ func main() {
 		SMTPFrom:     *smtpFrom,
 		SMTPUsername: *smtpUsername,
 		SMTPPassword: smtpPassword,
-		HTTPClient:   &http.Client{Timeout: *webhookTimeout},
+		HTTPClient:   newWebhookClient(*webhookTimeout, *webhookAllowPrivate),
 	}
 	state := make(map[string]*zoneState)
 

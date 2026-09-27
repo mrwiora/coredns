@@ -562,6 +562,14 @@ configured), `https://`/`http://` addresses via a small JSON webhook POST.
 A zone with no registered contact still gets every check logged, just
 with nothing to notify externally.
 
+Webhook addresses are chosen by zone owners, not by you, so the daemon
+only delivers webhooks to public addresses: a connection to a loopback,
+private, link-local or CGNAT address is refused (checked on the address
+actually connected to, after DNS resolution), redirects are not
+followed, and no HTTP proxy from the environment is used.
+`-webhook-allow-private` lifts this, for deployments where every zone
+owner is trusted.
+
 `-trust-anchor FILE` takes the same root trust anchor file as the
 plugin's `trust_anchor` directive; keep the two pointed at the same,
 maintained file.
