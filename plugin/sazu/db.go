@@ -90,6 +90,18 @@ CREATE INDEX IF NOT EXISTS audit_log_zone_at ON audit_log(zone, at);
 -- Deliberately not a foreign key into zones(origin) and never deleted --
 -- DeleteZone increments it instead -- so a message signed for an older
 -- version can't re-create or change a decommissioned zone later.
+-- A DS-only KSK rollover waiting out its hold-down (see rollover.go):
+-- at most one per zone. Any control change clears it (setVersion), in the
+-- same transaction as that change.
+CREATE TABLE IF NOT EXISTS pending_rollovers (
+	zone         TEXT PRIMARY KEY,
+	flags        INTEGER NOT NULL,
+	protocol     INTEGER NOT NULL,
+	algorithm    INTEGER NOT NULL,
+	public_key   TEXT NOT NULL,
+	requested_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS zone_versions (
 	zone    TEXT PRIMARY KEY,
 	version INTEGER NOT NULL
@@ -424,6 +436,13 @@ func (db *DB) CommitUpdateWithVersion(zone string, version *uint64, keyChange *K
 			return err
 		}
 	}
+	// Mirrors ZoneData.dropSupersededDNSKEYSigsLocked: new signatures
+	// over the apex DNSKEY RRset replace all earlier ones.
+	if addsApexDNSKEYSig(ops, normalizeZone(zone), zclass) {
+		if err := deleteApexRRSIGsCovering(tx, zone, dns.TypeDNSKEY); err != nil {
+			return err
+		}
+	}
 
 	for _, rr := range ops {
 		h := rr.Header()
@@ -546,10 +565,46 @@ func purgeContent(tx *sql.Tx, zone string) error {
 	return nil
 }
 
-// setVersion upserts zone's version. A nil version is a no-op.
+// deleteApexRRSIGsCovering deletes every stored RRSIG at zone's apex
+// that covers covered.
+func deleteApexRRSIGsCovering(tx *sql.Tx, zone string, covered uint16) error {
+	apex := normalizeZone(zone)
+	rows, err := tx.Query(`SELECT id, rr FROM rrs WHERE zone = ? AND name = ? AND rrtype = ?`, zone, apex, dns.TypeRRSIG)
+	if err != nil {
+		return fmt.Errorf("finding apex RRSIGs: %w", err)
+	}
+	var stale []int64
+	for rows.Next() {
+		var id int64
+		var text string
+		if err := rows.Scan(&id, &text); err != nil {
+			rows.Close()
+			return err
+		}
+		if rr, err := dns.NewRR(text); err == nil {
+			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == covered {
+				stale = append(stale, id)
+			}
+		}
+	}
+	rows.Close()
+	for _, id := range stale {
+		if _, err := tx.Exec(`DELETE FROM rrs WHERE id = ?`, id); err != nil {
+			return fmt.Errorf("deleting superseded RRSIG: %w", err)
+		}
+	}
+	return nil
+}
+
+// setVersion upserts zone's version -- and, since only a control
+// change ever sets it, cancels any pending KSK rollover for the zone in
+// the same transaction (see rollover.go). A nil version is a no-op.
 func setVersion(tx *sql.Tx, zone string, version *uint64) error {
 	if version == nil {
 		return nil
+	}
+	if _, err := tx.Exec(`DELETE FROM pending_rollovers WHERE zone = ?`, normalizeZone(zone)); err != nil {
+		return fmt.Errorf("clearing pending rollover: %w", err)
 	}
 	if _, err := tx.Exec(
 		`INSERT INTO zone_versions (zone, version) VALUES (?, ?)
@@ -558,6 +613,44 @@ func setVersion(tx *sql.Tx, zone string, version *uint64) error {
 		return fmt.Errorf("recording zone version: %w", err)
 	}
 	return nil
+}
+
+// SetPendingRollover records zone's pending DS-only KSK rollover,
+// replacing any other.
+func (db *DB) SetPendingRollover(zone string, pr PendingRollover) error {
+	_, err := db.sql.Exec(
+		`INSERT INTO pending_rollovers (zone, flags, protocol, algorithm, public_key, requested_at) VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(zone) DO UPDATE SET flags = excluded.flags, protocol = excluded.protocol,
+		   algorithm = excluded.algorithm, public_key = excluded.public_key, requested_at = excluded.requested_at`,
+		normalizeZone(zone), pr.KSK.Flags, pr.KSK.Protocol, pr.KSK.Algorithm, pr.KSK.PublicKey, pr.RequestedAt.Unix())
+	if err != nil {
+		return fmt.Errorf("recording pending rollover: %w", err)
+	}
+	return nil
+}
+
+// LoadPendingRollovers returns every persisted pending rollover, by zone.
+func (db *DB) LoadPendingRollovers() (map[string]PendingRollover, error) {
+	rows, err := db.sql.Query(`SELECT zone, flags, protocol, algorithm, public_key, requested_at FROM pending_rollovers`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]PendingRollover)
+	for rows.Next() {
+		var zone, pub string
+		var flags, protocol, algorithm int
+		var at int64
+		if err := rows.Scan(&zone, &flags, &protocol, &algorithm, &pub, &at); err != nil {
+			return nil, err
+		}
+		out[zone] = PendingRollover{
+			KSK: &dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+				Flags: uint16(flags), Protocol: uint8(protocol), Algorithm: uint8(algorithm), PublicKey: pub},
+			RequestedAt: time.Unix(at, 0),
+		}
+	}
+	return out, rows.Err()
 }
 
 // LoadVersions returns every persisted zone version, for seeding a

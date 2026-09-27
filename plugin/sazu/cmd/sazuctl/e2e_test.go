@@ -41,6 +41,10 @@ func startTestServer(t *testing.T) string {
 		// then also prove every sazuctl command that needs a version
 		// prerequisite actually sends the right one.
 		Versions: sazu.NewVersionRegistry(),
+		// Hold-down on, as setup.go defaults it: rotate-key -role ksk
+		// must then get through by co-signing with the old KSK.
+		Pending:          sazu.NewPendingRollovers(),
+		RolloverHoldDown: sazu.DefaultRolloverHoldDown,
 	}
 	cfg := &dnsserver.Config{
 		Zone:        ".",
@@ -751,5 +755,32 @@ func TestE2EContactCarriesTheZoneVersion(t *testing.T) {
 	// The version moved on, so the same explicit version is now stale.
 	if err := runContact([]string{"-zone", zone, "-key", kskPath, "-clear", "-zone-version", "1", "-target", addr}); err == nil {
 		t.Fatalf("expected a change signed for an already-used version to be refused")
+	}
+}
+
+// TestE2ELostOldKeyRolloverIsHeldAndCanBeCancelled: without the old KSK
+// (-lost-old-key) a rollover is only recorded as pending; the current
+// KSK holder can cancel it with cancel-rollover.
+func TestE2ELostOldKeyRolloverIsHeldAndCanBeCancelled(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-lost-key.example."
+	dir := t.TempDir()
+	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+
+	newKSKPath := filepath.Join(dir, "new-ksk.private")
+	err := runRotateKey([]string{"-zone", zone, "-role", "ksk", "-lost-old-key", "-new-key", newKSKPath, "-target", addr})
+	if err == nil || !strings.Contains(err.Error(), "pending") || !strings.Contains(err.Error(), "not before") {
+		t.Fatalf("expected the DS-only rollover to be held as pending with its completion time, got %v", err)
+	}
+	if err := runCancelRollover([]string{"-zone", zone, "-ksk-key", kskPath, "-target", addr}); err != nil {
+		t.Fatalf("cancel-rollover: %v", err)
+	}
+	// The original KSK still manages the zone.
+	if err := runContact([]string{"-zone", zone, "-key", kskPath, "-address", "mailto:ops@example.org", "-target", addr}); err != nil {
+		t.Fatalf("contact with the original KSK after cancelling: %v", err)
 	}
 }

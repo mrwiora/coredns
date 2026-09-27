@@ -54,6 +54,8 @@ func setup(c *caddy.Controller) error {
 		RateLimiter:                 NewRateLimiter(cfg.fullPushesPerDay, cfg.keyManagementPushesPerDay),
 		IPRateLimiter:               NewIPRateLimiter(cfg.ipUpdatesPerMinute),
 		Versions:                    NewVersionRegistry(),
+		Pending:                     NewPendingRollovers(),
+		RolloverHoldDown:            cfg.rolloverHoldDown,
 		MaxSIG0Lifetime:             cfg.maxSIG0Lifetime,
 	}
 
@@ -74,6 +76,14 @@ func setup(c *caddy.Controller) error {
 		}
 		for zone, v := range versions {
 			s.Versions.Set(zone, v)
+		}
+		pending, err := db.LoadPendingRollovers()
+		if err != nil {
+			db.Close()
+			return plugin.Error("sazu", err)
+		}
+		for zone, pr := range pending {
+			s.Pending.Set(zone, pr)
 		}
 		s.DB = db
 		s.Store = store
@@ -103,6 +113,7 @@ type sazuConfig struct {
 	ipUpdatesPerMinute          int
 	maxSIG0Lifetime             time.Duration
 	trustAnchorPath             string
+	rolloverHoldDown            time.Duration
 }
 
 func parseSazu(c *caddy.Controller) (sazuConfig, error) {
@@ -111,6 +122,7 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 		keyManagementPushesPerDay: DefaultKeyManagementPushesPerDay,
 		ipUpdatesPerMinute:        DefaultIPUpdatesPerMinute,
 		maxSIG0Lifetime:           DefaultMaxSIG0Lifetime,
+		rolloverHoldDown:          DefaultRolloverHoldDown,
 	}
 	for c.Next() {
 		args := c.RemainingArgs()
@@ -165,6 +177,18 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 					return sazuConfig{}, c.Errf("ip_rate_limit: invalid updates-per-minute %q", args[0])
 				}
 				cfg.ipUpdatesPerMinute = perMinute
+			case "rollover_hold_down":
+				// How long a KSK rollover not co-signed by the old KSK
+				// waits -- see rollover.go. 0 disables the hold-down.
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return sazuConfig{}, c.ArgErr()
+				}
+				d, err := time.ParseDuration(args[0])
+				if err != nil || d < 0 {
+					return sazuConfig{}, c.Errf("rollover_hold_down: invalid duration %q", args[0])
+				}
+				cfg.rolloverHoldDown = d
 			case "trust_anchor":
 				// A file of root DS/DNSKEY trust anchors replacing the
 				// built-in ones -- see LoadTrustAnchors.

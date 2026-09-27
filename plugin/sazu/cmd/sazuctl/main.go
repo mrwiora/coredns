@@ -163,6 +163,8 @@ func main() {
 		err = runRetireZSK(os.Args[2:])
 	case "rotate-key":
 		err = runRotateKey(os.Args[2:])
+	case "cancel-rollover":
+		err = runCancelRollover(os.Args[2:])
 	case "decommission-zone":
 		err = runDecommissionZone(os.Args[2:])
 	case "init-zone":
@@ -191,6 +193,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  sazuctl add-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-udp] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl retire-zsk -zone <zone> -ksk-key <path> -zsk-key <path> -target host:port|url [-udp] [-json] [-key-passphrase-file <path>] [-zsk-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl rotate-key -zone <zone> [-role ksk|zsk] -target host:port|url [-udp (role zsk only)] ... (run with no -role for an explanation of the choice)")
+	fmt.Fprintln(os.Stderr, "  sazuctl cancel-rollover -zone <zone> -ksk-key <path> [-target host:port|url] [-zone-version N] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr, "  sazuctl decommission-zone -zone <zone> -ksk-key <path> -yes [-target host:port|url] [-json] [-key-passphrase-file <path>]")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "-key-passphrase-file encrypts/decrypts the key file at rest (§10.8); omit it for a plain BIND-format key file (the default).")
@@ -739,6 +742,52 @@ func runContact(args []string) error {
 	return signSelfVerifyAndSend(*zone, wire, key, *target, *jsonCarrier, *udp)
 }
 
+// runCancelRollover cancels a zone's pending KSK rollover -- one sent
+// without the current KSK's co-signature, e.g. by someone who took over
+// the registrar account. Authenticated by the current KSK.
+func runCancelRollover(args []string) error {
+	fs := flag.NewFlagSet("cancel-rollover", flag.ExitOnError)
+	zone := fs.String("zone", "", "zone whose pending KSK rollover to cancel")
+	kskPath := fs.String("ksk-key", "", "path to the zone's current KSK (must already exist)")
+	target := fs.String("target", "", "host:port, or an http(s):// URL, to send the signed push to (omit to just self-verify)")
+	jsonCarrier := addJSONCarrierFlag(fs)
+	passphraseFile := addPassphraseFlag(fs)
+	zoneVersion := addZoneVersionFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *zone == "" || *kskPath == "" {
+		return fmt.Errorf("-zone and -ksk-key are required")
+	}
+	passphrase, err := readPassphraseFile(*passphraseFile)
+	if err != nil {
+		return err
+	}
+	kskPriv, err := sazu.LoadPrivateKey(*kskPath, passphrase)
+	if err != nil {
+		return fmt.Errorf("-ksk-key %s: %w", *kskPath, err)
+	}
+	ksk := sazu.DNSKEYFor(*zone, kskPriv, true)
+	printKeyInfo(*kskPath, ksk)
+
+	m := sazu.BuildCancelRolloverPush(*zone)
+	if err := addVersionPrereq(m, *zone, *zoneVersion, *target, false); err != nil {
+		return err
+	}
+	m.SetEdns0(dns.DefaultMsgSize, false) // lets the server answer with an RFC 8914 Extended DNS Error
+	inception, expiration := sig0Window()
+	wire, err := sazu.SignUpdate(m, ksk, kskPriv, inception, expiration)
+	if err != nil {
+		return err
+	}
+	return signSelfVerifyAndSend(*zone, wire, ksk, *target, *jsonCarrier, false)
+}
+
+// sameKeyMaterial reports whether a and b are the same DNSKEY.
+func sameKeyMaterial(a, b *dns.DNSKEY) bool {
+	return a.Flags == b.Flags && a.Protocol == b.Protocol && a.Algorithm == b.Algorithm && a.PublicKey == b.PublicKey
+}
+
 // runDecommissionZone requests a zone's complete removal -- see
 // sazu.BuildDecommissionPush's own doc comment for exactly what that
 // means server-side. Authenticated by the zone's own KSK, which must
@@ -958,6 +1007,9 @@ func runRotateKey(args []string) error {
 			"over UDP) attempt UDP instead of the default TCP; see add-zsk/retire-zsk's own -udp for the full reasoning")
 	passphraseFile := addPassphraseFlag(fs)
 	newPassphraseFile := fs.String("new-key-passphrase-file", "", "like -key-passphrase-file, but for the new key/ZSK")
+	lostOldKey := fs.Bool("lost-old-key", false,
+		"(-role ksk) the current KSK is lost: send the rollover without its co-signature. The server then holds it for "+
+			"its hold-down (default 72h) and alerts the zone's contact; re-run the same command after that to complete it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1006,8 +1058,8 @@ func runRotateKey(args []string) error {
 		}
 		return nil
 	case "ksk":
-		if *keyPath == "" || *newKeyPath == "" {
-			return fmt.Errorf("-role ksk needs -key (the current KSK) and -new-key")
+		if *newKeyPath == "" || (*keyPath == "" && !*lostOldKey) {
+			return fmt.Errorf("-role ksk needs -new-key, and -key (the current KSK) unless -lost-old-key")
 		}
 		if *target == "" {
 			return fmt.Errorf("-target is required: a KSK rollover needs to query the zone's current DNSKEY set live before it can correctly sign the complete resulting set")
@@ -1016,16 +1068,19 @@ func runRotateKey(args []string) error {
 		fmt.Println("zone did -- if the push below is refused with a DS-related diagnostic, follow the guidance")
 		fmt.Println("it prints (the new key's DS record, and how to publish it) before trying again.")
 		fmt.Println()
-		passphrase, err := readPassphraseFile(*passphraseFile)
-		if err != nil {
-			return err
+		var oldKSK *dns.DNSKEY
+		var oldPriv ed25519.PrivateKey
+		if !*lostOldKey {
+			passphrase, err := readPassphraseFile(*passphraseFile)
+			if err != nil {
+				return err
+			}
+			if oldPriv, err = sazu.LoadPrivateKey(*keyPath, passphrase); err != nil {
+				return fmt.Errorf("-key %s: %w", *keyPath, err)
+			}
+			oldKSK = sazu.DNSKEYFor(*zone, oldPriv, true)
+			printKeyInfo(*keyPath, oldKSK)
 		}
-		oldPriv, err := sazu.LoadPrivateKey(*keyPath, passphrase)
-		if err != nil {
-			return fmt.Errorf("-key %s: %w", *keyPath, err)
-		}
-		oldKSK := sazu.DNSKEYFor(*zone, oldPriv, true)
-		printKeyInfo(*keyPath, oldKSK)
 
 		newPassphrase, err := readPassphraseFile(*newPassphraseFile)
 		if err != nil {
@@ -1049,7 +1104,26 @@ func runRotateKey(args []string) error {
 		if err != nil {
 			return err
 		}
-		m, err := sazu.BuildKSKRolloverPush(*zone, current, oldKSK, newKSK, newPriv)
+		var m *dns.Msg
+		if *lostOldKey {
+			// Without the old key, the one to remove is whichever
+			// SEP-flagged key the zone serves today.
+			for _, k := range current {
+				if k.Flags&dns.SEP != 0 && !sameKeyMaterial(k, newKSK) {
+					oldKSK = k
+				}
+			}
+			if oldKSK == nil {
+				return fmt.Errorf("%s serves no KSK for %s to replace", *target, *zone)
+			}
+			fmt.Println("Sending the rollover WITHOUT the current KSK's co-signature: the server holds it for its")
+			fmt.Println("hold-down and alerts the zone's contact. Re-run this same command once it has passed.")
+			m, err = sazu.BuildKSKRolloverPush(*zone, current, oldKSK, newKSK, newPriv)
+		} else {
+			// Co-signed by the current KSK, so the server applies it
+			// right away instead of holding it for its hold-down.
+			m, err = sazu.BuildKSKRolloverPushCoSigned(*zone, current, oldKSK, oldPriv, newKSK, newPriv)
+		}
 		if err != nil {
 			return err
 		}
@@ -1481,6 +1555,10 @@ func interpretResponse(zone string, key *dns.DNSKEY, resp *dns.Msg) error {
 	case "ERR_STALE_VERSION":
 		return fmt.Errorf("denied: %s's version changed since this was signed (another control change was applied "+
 			"first, or this is a replay) -- re-run the command so it reads the current version", zone)
+	case "ERR_ROLLOVER_PENDING":
+		return fmt.Errorf("rollover recorded as pending: it was not co-signed by the current KSK, so the server holds it "+
+			"for its hold-down and alerts the zone's contact (%s) -- re-run the same command then to complete it",
+			diagnosticDetail(resp))
 	case "ERR_VERSION_REQUIRED":
 		return fmt.Errorf("denied: this change must carry %s's current version -- pass -target or -zone-version", zone)
 	}
@@ -1506,6 +1584,17 @@ const statusErrUnknownSigner = "ERR_UNKNOWN_SIGNER"
 
 // diagnosticStatus extracts a §12 SAZU status code from a response's
 // Additional section, if present.
+// diagnosticDetail returns the human-readable detail a server may send
+// as the diagnostic TXT record's second string, or "".
+func diagnosticDetail(m *dns.Msg) string {
+	for _, rr := range m.Extra {
+		if txt, ok := rr.(*dns.TXT); ok && len(txt.Txt) > 1 {
+			return txt.Txt[1]
+		}
+	}
+	return ""
+}
+
 func diagnosticStatus(m *dns.Msg) (string, bool) {
 	// Prefer the RFC 8914 Extended DNS Error's EXTRA-TEXT; fall back to
 	// the diagnostic TXT record for servers that don't send one.

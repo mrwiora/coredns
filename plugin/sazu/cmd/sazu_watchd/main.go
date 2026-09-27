@@ -107,6 +107,12 @@ func runOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher, 
 	}
 	for _, alert := range alerts {
 		switch alert.Kind {
+		case AlertRolloverPending:
+			if alert.Recovered {
+				log.Printf("sazu-watchd: %s: KSK rollover no longer pending", alert.Zone)
+			} else {
+				log.Printf("sazu-watchd: %s: KSK rollover to key tag %d requested without the current KSK's co-signature", alert.Zone, alert.KeyTag)
+			}
 		case AlertSignatureExpiry:
 			if alert.Recovered {
 				log.Printf("sazu-watchd: %s: signatures refreshed", alert.Zone)

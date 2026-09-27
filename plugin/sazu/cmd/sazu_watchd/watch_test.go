@@ -424,3 +424,49 @@ func TestCheckOnceNoExpiryWarningForFreshSignatures(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckOnceAlertsOnPendingRollover: a pending rollover alerts right
+// away -- first pass included -- and recovers once it's gone.
+func TestCheckOnceAlertsOnPendingRollover(t *testing.T) {
+	db := openTestDB(t)
+	onboardTestZone(t, db, "example.org.", "mailto:ops@example.org")
+	newKSK, _, err := sazu.GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested := time.Now().Truncate(time.Second)
+	if err := db.SetPendingRollover("example.org.", sazu.PendingRollover{KSK: newKSK, RequestedAt: requested}); err != nil {
+		t.Fatal(err)
+	}
+	state := make(map[string]*zoneState)
+	pendingAlerts := func() []Alert {
+		t.Helper()
+		alerts, err := checkOnce(db, fakeValidator{}, fakeDNSKEYFetcher{}, state)
+		if err != nil {
+			t.Fatalf("checkOnce: %v", err)
+		}
+		var out []Alert
+		for _, a := range alerts {
+			if a.Kind == AlertRolloverPending {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+
+	first := pendingAlerts()
+	if len(first) != 1 || first[0].Recovered || first[0].KeyTag != newKSK.KeyTag() || !first[0].Expires.Equal(requested) {
+		t.Fatalf("expected one pending-rollover alert on the first pass, got %+v", first)
+	}
+	if again := pendingAlerts(); len(again) != 0 {
+		t.Fatalf("expected no repeat alert, got %+v", again)
+	}
+	// Any control change clears it; a version bump is the simplest.
+	v := uint64(5)
+	if err := db.CommitUpdateWithVersion("example.org.", &v, nil, nil, dns.ClassINET, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rec := pendingAlerts(); len(rec) != 1 || !rec[0].Recovered {
+		t.Fatalf("expected a recovery once it's no longer pending, got %+v", rec)
+	}
+}

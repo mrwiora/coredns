@@ -256,3 +256,19 @@ func TestSetupRejectsUnreadableTrustAnchorFile(t *testing.T) {
 		t.Fatalf("expected setup to fail for a missing trust anchor file")
 	}
 }
+
+func TestParseSazuRolloverHoldDown(t *testing.T) {
+	cfg, err := parseSazu(caddy.NewTestController("dns", `sazu example.org.`))
+	if err != nil || cfg.rolloverHoldDown != DefaultRolloverHoldDown {
+		t.Fatalf("expected the default hold-down, got %s (%v)", cfg.rolloverHoldDown, err)
+	}
+	cfg, err = parseSazu(caddy.NewTestController("dns", "sazu example.org. {\nrollover_hold_down 0s\n}"))
+	if err != nil || cfg.rolloverHoldDown != 0 {
+		t.Fatalf("expected 0 to disable the hold-down, got %s (%v)", cfg.rolloverHoldDown, err)
+	}
+	for _, bad := range []string{"rollover_hold_down", "rollover_hold_down -1h", "rollover_hold_down soon"} {
+		if _, err := parseSazu(caddy.NewTestController("dns", "sazu example.org. {\n"+bad+"\n}")); err == nil {
+			t.Errorf("%q: expected an error", bad)
+		}
+	}
+}

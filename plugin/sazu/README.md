@@ -519,7 +519,7 @@ expands to before pushing it).
 ### sazu-watchd: §11 delegation-change monitoring
 
 `plugin/sazu/cmd/sazu_watchd` is a separate, standalone daemon -- never runs
-inside CoreDNS -- that periodically runs three independent checks per
+inside CoreDNS -- that periodically runs four independent checks per
 onboarded zone and alerts the zone's registered contact (`sazuctl contact`)
 when any of them needs attention:
 
@@ -530,6 +530,11 @@ when any of them needs attention:
   the kind of drift nothing else here would ever notice -- the registrar
   is outside this system entirely, so nothing short of asking it
   periodically can catch a change made there.
+* **Pending KSK rollover** -- a rollover that wasn't co-signed by the
+  zone's current KSK (see [Key rollover](#key-rollover)) alerts the
+  contact at once, first pass included: if the owner didn't start it,
+  the hold-down is their time to run `sazuctl cancel-rollover`. A
+  recovery follows once it completes or is cancelled.
 * **Signature expiry** -- this server never re-signs anything, so a zone
   whose owner's automation stops pushing goes bogus for validating
   resolvers the moment its earliest RRSIG expires, with no symptom on
@@ -619,6 +624,23 @@ Publish the new DS record at your registrar alongside the existing one
 DS TTL more so resolvers that cached the old DS set have refreshed it;
 until the push above succeeds, the old KSK keeps working normally.
 
+`rotate-key -role ksk` also signs the new DNSKEY set with the *old*
+KSK. That co-signature proves the current key holder agrees, and lets
+the server apply the rollover at once. Without it — the old KSK is lost,
+`-lost-old-key` — a rollover is proven only by the new key and its DS,
+which is exactly what someone who took over your registrar account could
+produce. So the server then only records it as **pending**
+(`ERR_ROLLOVER_PENDING`, with the earliest completion time),
+`sazu-watchd` alerts the zone's contact, and it completes only when the
+same command is run again after the hold-down (default 72 hours) with
+the DS still published. Any change the current KSK makes in the
+meantime cancels it — explicitly:
+
+```
+./sazuctl cancel-rollover -zone yourdomain.example -ksk-key client.private \
+    -target 127.0.0.1:15353
+```
+
 **Once switched, remove the old DS promptly** — as soon as the old
 DNSKEY RRset has had time to expire from caches (its TTL). For
 resolvers a dangling extra DS is harmless, but for this server it is
@@ -683,6 +705,7 @@ sazu ZONES... {
     ip_rate_limit UPDATES_PER_MINUTE
     max_sig0_lifetime DURATION
     trust_anchor FILE
+    rollover_hold_down DURATION
 }
 ```
 
@@ -775,6 +798,11 @@ sazu ZONES... {
   zone at once after a root key rollover, so point this at a maintained
   file for anything long-lived. A file that can't be loaded fails
   startup rather than falling back.
+
+* `rollover_hold_down DURATION` — how long a KSK rollover that isn't
+  co-signed by the current KSK waits before it can complete (see
+  [Key rollover](#key-rollover)). Default `72h`; `0s` disables the
+  hold-down.
 
 ### Status codes
 

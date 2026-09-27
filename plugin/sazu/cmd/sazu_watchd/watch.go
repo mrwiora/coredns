@@ -36,6 +36,10 @@ type zoneState struct {
 	// RRSIG expiration inside the warning window -- see
 	// checkSignatureExpiry.
 	expiring bool
+
+	// rolloverPending records whether the last pass saw a pending KSK
+	// rollover for the zone -- see checkPendingRollover.
+	rolloverPending bool
 }
 
 // expiryWarning is how far ahead of a zone's earliest RRSIG expiration
@@ -57,6 +61,12 @@ const (
 	// bogus for validating resolvers the moment that RRSIG expires, with
 	// no other symptom on the server side at all.
 	AlertSignatureExpiry
+	// AlertRolloverPending: a KSK rollover not co-signed by the zone's
+	// current KSK was requested (or, Recovered, is no longer pending --
+	// completed or cancelled). If the zone owner didn't start it, it's
+	// the sign of a registrar compromise, and the hold-down is the time
+	// they have to cancel it (sazuctl cancel-rollover).
+	AlertRolloverPending
 	// AlertZSKMissing: a specific, currently-registered ZSK's presence
 	// in the zone's live-served DNSKEY RRset transitioned -- see
 	// keys.go's KeyRole doc comment (plugin/sazu) for why a dropped ZSK
@@ -108,6 +118,11 @@ func checkOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher
 		return nil, fmt.Errorf("listing zones: %w", err)
 	}
 
+	pending, err := db.LoadPendingRollovers()
+	if err != nil {
+		return nil, fmt.Errorf("loading pending rollovers: %w", err)
+	}
+
 	var alerts []Alert
 	for _, zone := range zones {
 		zk, ok, err := db.LoadZoneKeys(zone)
@@ -141,6 +156,9 @@ func checkOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher
 		if len(zk.ZSKs) > 0 {
 			alerts = append(alerts, checkZSKPresence(db, zone, zk, dnskeys, st, seen)...)
 		}
+		pr, isPending := pending[sazu.NormalizeZone(zone)]
+		alerts = append(alerts, checkPendingRollover(db, zone, pr, isPending, st)...)
+
 		expiryAlerts, err := checkSignatureExpiry(db, zone, st, time.Now())
 		if err != nil {
 			return nil, err
@@ -148,6 +166,24 @@ func checkOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher
 		alerts = append(alerts, expiryAlerts...)
 	}
 	return alerts, nil
+}
+
+// checkPendingRollover alerts as soon as a KSK rollover becomes pending
+// for zone -- on the very first pass too, like checkSignatureExpiry: the
+// hold-down is a deadline for the zone owner to cancel an unwanted one,
+// and there's no baseline worth waiting for. It sends a recovery once
+// the rollover is no longer pending (completed or cancelled).
+func checkPendingRollover(db *sazu.DB, zone string, pr sazu.PendingRollover, isPending bool, st *zoneState) []Alert {
+	var alerts []Alert
+	switch {
+	case isPending && !st.rolloverPending:
+		alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertRolloverPending,
+			KeyTag: pr.KSK.KeyTag(), Expires: pr.RequestedAt})
+	case !isPending && st.rolloverPending:
+		alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertRolloverPending, Recovered: true})
+	}
+	st.rolloverPending = isPending
+	return alerts
 }
 
 // checkSignatureExpiry warns when zone's earliest stored RRSIG expires

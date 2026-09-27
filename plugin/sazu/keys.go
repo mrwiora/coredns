@@ -222,6 +222,10 @@ func (r *KeyRegistry) DeleteZone(zone string) {
 	delete(r.zones, normalizeZone(zone))
 }
 
+// NormalizeZone returns zone the way this package keys it everywhere:
+// lowercased, fully qualified.
+func NormalizeZone(zone string) string { return normalizeZone(zone) }
+
 func normalizeZone(zone string) string {
 	return strings.ToLower(dns.Fqdn(zone))
 }

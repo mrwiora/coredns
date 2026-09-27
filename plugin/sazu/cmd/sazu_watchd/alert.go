@@ -73,6 +73,8 @@ func alertKindName(k AlertKind) string {
 		return "zsk_missing"
 	case AlertSignatureExpiry:
 		return "signature_expiry"
+	case AlertRolloverPending:
+		return "rollover_pending"
 	}
 	return "chain_of_trust"
 }
@@ -121,6 +123,19 @@ func (n *Notifier) sendEmail(to string, alert Alert) error {
 	var subject, body string
 	body = fmt.Sprintf("Zone: %s\n", alert.Zone)
 	switch alert.Kind {
+	case AlertRolloverPending:
+		if alert.Recovered {
+			subject = fmt.Sprintf("SAZU: %s KSK rollover no longer pending", alert.Zone)
+			body += "The pending KSK rollover was completed or cancelled.\n"
+		} else {
+			subject = fmt.Sprintf("SAZU: KSK rollover requested for %s -- was this you?", alert.Zone)
+			body += fmt.Sprintf("At %s, someone requested a KSK rollover to key tag %d that was NOT co-signed by\n"+
+				"the zone's current KSK. It was proven only by a DS record at the parent.\n\n"+
+				"If you didn't request it, your registrar account may be compromised: cancel it now with\n"+
+				"  sazuctl cancel-rollover -zone %s -ksk-key <current KSK> -target <server>\n"+
+				"and secure the registrar account. It completes on its own once the hold-down has passed.\n",
+				alert.Expires.UTC().Format(time.RFC3339), alert.KeyTag, alert.Zone)
+		}
 	case AlertSignatureExpiry:
 		if alert.Recovered {
 			subject = fmt.Sprintf("SAZU: %s signatures refreshed", alert.Zone)

@@ -357,6 +357,7 @@ func (z *ZoneData) applyOpLocked(rr dns.RR, zclass uint16) error {
 func (z *ZoneData) ApplyOps(ops []dns.RR, zclass uint16) error {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	z.dropSupersededDNSKEYSigsLocked(ops, zclass)
 	for _, rr := range ops {
 		if err := z.applyOpLocked(rr, zclass); err != nil {
 			return err
@@ -381,6 +382,7 @@ func (z *ZoneData) PurgeContentAndApply(ops []dns.RR, zclass uint16) error {
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	z.purgeContentLocked()
+	z.dropSupersededDNSKEYSigsLocked(ops, zclass)
 	for _, rr := range ops {
 		if err := z.applyOpLocked(rr, zclass); err != nil {
 			return err
@@ -632,4 +634,41 @@ func (s *Store) FindZoneForName(name string) (origin string, zone *ZoneData, ok 
 		return "", nil, false
 	}
 	return best, bestZone, true
+}
+
+// addsApexDNSKEYSig reports whether ops adds an RRSIG over origin's
+// DNSKEY RRset.
+func addsApexDNSKEYSig(ops []dns.RR, origin string, zclass uint16) bool {
+	for _, rr := range ops {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.Hdr.Class == zclass && sig.TypeCovered == dns.TypeDNSKEY &&
+			strings.EqualFold(sig.Hdr.Name, origin) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropSupersededDNSKEYSigsLocked removes every stored RRSIG over the apex
+// DNSKEY RRset when ops brings new ones. An update that changes the
+// DNSKEY RRset always carries it complete, freshly signed by the KSK
+// (serveUpdate enforces both), so every earlier signature over it --
+// including one by a KSK that just left the set in a rollover, which
+// replaceRRSIG's same-signer rule would never catch -- is stale.
+// Callers must hold z.mu.
+func (z *ZoneData) dropSupersededDNSKEYSigsLocked(ops []dns.RR, zclass uint16) {
+	if !addsApexDNSKEYSig(ops, z.Origin, zclass) {
+		return
+	}
+	byType, ok := z.rrsets[strings.ToLower(z.Origin)]
+	if !ok {
+		return
+	}
+	kept := byType[dns.TypeRRSIG][:0]
+	for _, rr := range byType[dns.TypeRRSIG] {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeDNSKEY {
+			continue
+		}
+		kept = append(kept, rr)
+	}
+	byType[dns.TypeRRSIG] = kept
 }

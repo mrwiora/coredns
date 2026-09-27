@@ -57,6 +57,19 @@ type Sazu struct {
 	// control changes must name as a prerequisite (see version.go).
 	Versions *VersionRegistry
 
+	// Pending holds DS-only KSK rollovers waiting out RolloverHoldDown
+	// (see rollover.go).
+	Pending *PendingRollovers
+
+	// RolloverHoldDown is how long a KSK rollover not co-signed by the
+	// old KSK waits before it can complete. setup.go defaults it to
+	// DefaultRolloverHoldDown; zero applies such rollovers immediately.
+	RolloverHoldDown time.Duration
+
+	// now returns the current time; nil means time.Now. Tests override
+	// it to step past a hold-down.
+	now func() time.Time
+
 	// SkipVersionCheck turns off the version-prerequisite requirement.
 	// Only this package's own tests set it, for the many tests about
 	// something else that build control messages by hand; the zero
@@ -273,6 +286,10 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// verified is not proof of anything, and attributing an audit entry to
 	// it would let an attacker frame an arbitrary key tag in the log
 	// merely by naming it, with no need to ever prove possession of it.
+	// statusDetail, when set, adds a human-readable second string to the
+	// diagnostic TXT record (currently only a pending rollover's earliest
+	// completion time).
+	var statusDetail string
 	var authKeyTag *uint16
 	var authKeyRole string
 	// reply is the sole exit point for this function: every response,
@@ -304,7 +321,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 				log.Errorf("update for %s: recording audit entry %s: %v", zone, txID, err)
 			}
 		}
-		return replyWithStatus(w, r, rcode, status)
+		return replyWithStatusDetail(w, r, rcode, status, statusDetail)
 	}
 
 	log.Debugf("update for %s from %s: transaction %s, %d prerequisite(s), %d op(s)", zone, remoteAddr, txID, len(r.Answer), len(r.Ns))
@@ -512,6 +529,11 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Debugf("update for %s: invalid decommission directive: %v", zone, err)
 		return reply(dns.RcodeFormatError, "")
 	}
+	zoneOps, cancelRollover, err := splitCancelRolloverOps(zoneOps, zone)
+	if err != nil || (cancelRollover && (isRollover || !alreadyPinned)) {
+		log.Debugf("update for %s: invalid cancel-rollover directive: %v", zone, err)
+		return reply(dns.RcodeFormatError, "")
+	}
 	if touchesReservedName(zoneOps, zone) {
 		log.Debugf("update for %s: update touches the reserved version name, refusing", zone)
 		return reply(dns.RcodeFormatError, "")
@@ -525,7 +547,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// ordered by. A version that is present must match even where it
 	// isn't required.
 	touchesKeys := touchesDNSKEY(zoneOps, zone)
-	isControl := !alreadyPinned || isRollover || decommission || touchesKeys || contactUpdate != nil
+	isControl := !alreadyPinned || isRollover || decommission || touchesKeys || contactUpdate != nil || cancelRollover
 	currentVersion := s.Versions.Get(zone)
 	if !s.SkipVersionCheck {
 		needsVersion := isControl
@@ -560,6 +582,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			}
 		}
 		s.Versions.Set(zone, *newVersion)
+		s.Pending.Clear(zone)
 		s.Store.DeleteZone(zone)
 		s.Keys.DeleteZone(zone)
 		s.Contacts.Set(zone, nil)
@@ -581,7 +604,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// legitimate ones, or redirect where sazu-watchd's alerts go would
 	// turn a stolen ZSK into lasting control of the zone. (A rollover's
 	// new KSK and first contact's KSK are KSKs by construction.)
-	if candidateRole != RoleKSK && (touchesKeys || contactUpdate != nil) {
+	if candidateRole != RoleKSK && (touchesKeys || contactUpdate != nil || cancelRollover) {
 		log.Debugf("update for %s: key or contact change authenticated by %s key tag %d, refusing", zone, candidateRole, candidate.KeyTag())
 		return reply(dns.RcodeRefused, statusErrRequiresKSK)
 	}
@@ -668,6 +691,37 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 				}
 				return reply(dns.RcodeRefused, status)
 			}
+		}
+	}
+
+	// KSK rollover hold-down (see rollover.go): the old KSK's
+	// co-signature over the new DNSKEY RRset lets a rollover apply now;
+	// without it, the rollover must wait out s.RolloverHoldDown from its
+	// first attempt, which records it as pending so the zone's contact
+	// can be alerted and the current KSK holder can cancel it.
+	if isRollover {
+		var coSigned bool
+		zoneOps, coSigned = stripKSKCoSignature(zoneOps, zone, zk.KSK.DNSKEY)
+		if !coSigned && s.RolloverHoldDown > 0 {
+			now := s.timeNow()
+			pending, ok := s.Pending.Get(zone)
+			if !ok || !sameKey(pending.KSK, candidate) {
+				pending = PendingRollover{KSK: candidate, RequestedAt: now}
+				if s.DB != nil {
+					if err := s.DB.SetPendingRollover(zone, pending); err != nil {
+						log.Errorf("update for %s: %v", zone, err)
+						return reply(dns.RcodeServerFailure, "")
+					}
+				}
+				s.Pending.Set(zone, pending)
+				log.Warningf("update for %s: KSK rollover to key tag %d not co-signed by the current KSK; pending until %s",
+					zone, candidate.KeyTag(), pending.RequestedAt.Add(s.RolloverHoldDown).UTC().Format(time.RFC3339))
+			}
+			if notBefore := pending.RequestedAt.Add(s.RolloverHoldDown); now.Before(notBefore) {
+				statusDetail = "not before " + notBefore.UTC().Format(time.RFC3339)
+				return reply(dns.RcodeRefused, statusErrRolloverPending)
+			}
+			log.Infof("update for %s: pending KSK rollover to key tag %d completed its hold-down", zone, candidate.KeyTag())
 		}
 	}
 
@@ -878,6 +932,12 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 	if newVersion != nil {
 		s.Versions.Set(zone, *newVersion)
+		if _, pending := s.Pending.Get(zone); pending {
+			s.Pending.Clear(zone)
+			if !isRollover {
+				log.Infof("update for %s: pending KSK rollover cancelled by a control change authenticated by the current KSK", zone)
+			}
+		}
 	}
 	if contactUpdate != nil && s.Contacts != nil {
 		s.Contacts.Set(zone, contactUpdate.Addresses)
@@ -1079,6 +1139,13 @@ func changesChainRelevantContent(updateOps []dns.RR) bool {
 		}
 	}
 	return false
+}
+
+func (s *Sazu) timeNow() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 func (s *Sazu) maxSIG0Lifetime() time.Duration {
@@ -1322,6 +1389,11 @@ const statusErrStaleVersion = "ERR_STALE_VERSION"
 // longer than the server accepts -- see DefaultMaxSIG0Lifetime.
 const statusErrSIG0LifetimeTooLong = "ERR_SIG0_LIFETIME_TOO_LONG"
 
+// statusErrRolloverPending: a KSK rollover not co-signed by the current
+// KSK is waiting out its hold-down; the diagnostic TXT's second string
+// says when it can complete. See rollover.go.
+const statusErrRolloverPending = "ERR_ROLLOVER_PENDING"
+
 // statusErrWeakDSDigest: the candidate KSK matches a DS at the parent,
 // but only one with a SHA-1 digest (§7.2 accepts SHA-256/SHA-384 only).
 const statusErrWeakDSDigest = "ERR_WEAK_DS_DIGEST"
@@ -1347,6 +1419,7 @@ var edeCodes = map[string]uint16{
 	statusErrFullZoneRequired:        dns.ExtendedErrorCodeProhibited,
 	statusErrDNSKEYSetMismatch:       dns.ExtendedErrorCodeProhibited,
 	statusErrVersionRequired:         dns.ExtendedErrorCodeProhibited,
+	statusErrRolloverPending:         dns.ExtendedErrorCodeProhibited,
 }
 
 // replyWithStatus replies to r with rcode and, if status is non-empty,
@@ -1356,13 +1429,23 @@ var edeCodes = map[string]uint16{
 // and, for clients without EDNS, as a diagnostic TXT record at the zone
 // apex in the Additional section.
 func replyWithStatus(w dns.ResponseWriter, r *dns.Msg, rcode int, status string) (int, error) {
+	return replyWithStatusDetail(w, r, rcode, status, "")
+}
+
+// replyWithStatusDetail is replyWithStatus with an optional human-readable
+// detail, sent as the diagnostic TXT record's second string.
+func replyWithStatusDetail(w dns.ResponseWriter, r *dns.Msg, rcode int, status, detail string) (int, error) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Rcode = rcode
 	if status != "" {
+		txt := []string{status}
+		if detail != "" {
+			txt = append(txt, detail)
+		}
 		m.Extra = append(m.Extra, &dns.TXT{
 			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0},
-			Txt: []string{status},
+			Txt: txt,
 		})
 		if r.IsEdns0() != nil {
 			m.SetEdns0(dns.DefaultMsgSize, false)
