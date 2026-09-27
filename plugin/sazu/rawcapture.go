@@ -17,9 +17,17 @@ import (
 // at any given moment -- exactly the scope SIG(0) verification needs it
 // at, since verification happens synchronously while handling that same
 // request.
+//
+// The key includes the transport: a UDP and a TCP address print
+// identically ("ip:port"), and a spoofed UDP packet must never be able
+// to collide with a TCP client's entry. Correlation is still only a
+// hint -- serveUpdate re-parses the captured bytes and processes those,
+// never the separately parsed request, so a collision can at worst make
+// a request fail, not change what gets applied.
 type rawKey struct {
-	addr string
-	id   uint16
+	network string
+	addr    string
+	id      uint16
 }
 
 type capturedEntry struct {
@@ -82,7 +90,7 @@ func (c *RawCapture) Put(addr net.Addr, raw []byte) {
 		return // too short to even contain a message ID
 	}
 	id := binary.BigEndian.Uint16(raw[0:2])
-	key := rawKey{addr: addr.String(), id: id}
+	key := rawKey{network: addr.Network(), addr: addr.String(), id: id}
 	cp := append([]byte(nil), raw...)
 
 	c.mu.Lock()
@@ -112,7 +120,7 @@ func (c *RawCapture) evictOldestLocked() {
 // Take retrieves and removes the raw bytes captured for a request from
 // addr with the given DNS message id, if any and not yet expired.
 func (c *RawCapture) Take(addr net.Addr, id uint16) ([]byte, bool) {
-	key := rawKey{addr: addr.String(), id: id}
+	key := rawKey{network: addr.Network(), addr: addr.String(), id: id}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()

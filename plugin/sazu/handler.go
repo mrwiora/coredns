@@ -327,6 +327,23 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		return reply(dns.RcodeServerFailure, "")
 	}
 
+	// From here on, the only message this function looks at is the one
+	// parsed from raw -- the exact bytes SIG(0) is verified against --
+	// never the *dns.Msg the server handed in. The two are only
+	// correlated by source address and 16-bit message ID, so a spoofed
+	// packet with a matching ID could otherwise pair its own content
+	// with someone else's genuinely signed bytes: the signature would
+	// verify over the legitimate message while the forged one got
+	// applied.
+	signed := new(dns.Msg)
+	if err := signed.Unpack(raw); err != nil ||
+		signed.Id != r.Id || signed.Opcode != dns.OpcodeUpdate || signed.Response ||
+		len(signed.Question) != 1 || !strings.EqualFold(signed.Question[0].Name, zone) {
+		log.Warningf("update for %s from %s: captured bytes for id %d are not this request, refusing", zone, remoteAddr, r.Id)
+		return reply(dns.RcodeFormatError, "")
+	}
+	r = signed
+
 	lock := s.updateLockFor(zone)
 	log.Debugf("update for %s: waiting for its zone's update lock stripe", zone)
 	lock.Lock()
