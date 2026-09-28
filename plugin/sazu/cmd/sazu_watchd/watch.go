@@ -1,0 +1,302 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/coredns/coredns/plugin/sazu"
+)
+
+// zoneState is this process's in-memory record of a zone's last
+// chain-of-trust outcome and which registered ZSKs were last seen in the
+// served DNSKEY RRset -- the baseline each pass compares against. It is
+// not persisted: after a restart the first pass sets a fresh baseline,
+// so a zone that broke and recovered while the daemon was down goes
+// unreported. Nothing is ever misreported.
+type zoneState struct {
+	lastOK bool
+
+	// chainFlips counts consecutive passes whose chain-of-trust outcome
+	// differed from lastOK; lastOK only changes -- and an alert only
+	// fires -- once two passes in a row agree (see debounced).
+	chainFlips int
+	// zskFlips is the same, per registered ZSK key tag.
+	zskFlips map[uint16]int
+
+	// zskPresent tracks, per currently-registered ZSK key tag, whether
+	// the last pass found it present in the zone's live-served DNSKEY
+	// RRset -- so a transition (present -> missing, or the reverse) is
+	// what triggers an alert, the same debounce discipline as lastOK
+	// above, not a repeat alert on every pass a key stays missing. A
+	// key tag that stops being registered at all (retired) simply stops
+	// being looked at; its stale entry here is harmless and never
+	// checked again.
+	zskPresent map[uint16]bool
+
+	// expiring records whether the last pass found the zone's earliest
+	// RRSIG expiration inside the warning window -- see
+	// checkSignatureExpiry.
+	expiring bool
+
+	// rolloverPending records whether the last pass saw a pending KSK
+	// rollover for the zone -- see checkPendingRollover.
+	rolloverPending bool
+}
+
+// expiryWarning is how far ahead of a zone's earliest RRSIG expiration
+// checkSignatureExpiry starts warning. Set from -expiry-warning.
+var expiryWarning = 7 * 24 * time.Hour
+
+// AlertKind distinguishes what a given Alert is actually reporting --
+// Notifier renders each kind with its own subject/body text (alert.go).
+type AlertKind int
+
+const (
+	// AlertChainOfTrust: the zone's chain-of-trust check (parent DS
+	// matching the pinned KSK) transitioned. The zero value, so every
+	// existing call site that never sets Kind keeps meaning this.
+	AlertChainOfTrust AlertKind = iota
+	// AlertSignatureExpiry: the zone's earliest RRSIG expiration moved
+	// into (or, Recovered, back out of) the warning window. This server
+	// never re-signs anything, so a zone whose owner stops pushing goes
+	// bogus for validating resolvers the moment that RRSIG expires, with
+	// no other symptom on the server side at all.
+	AlertSignatureExpiry
+	// AlertRolloverPending: a KSK rollover not co-signed by the zone's
+	// current KSK was requested (or, Recovered, is no longer pending --
+	// completed or cancelled). If the zone owner didn't start it, it's
+	// the sign of a registrar compromise, and the hold-down is the time
+	// they have to cancel it (sazuctl cancel-rollover).
+	AlertRolloverPending
+	// AlertZSKMissing: a specific, currently-registered ZSK's presence
+	// in the zone's live-served DNSKEY RRset transitioned -- see
+	// keys.go's KeyRole doc comment (plugin/sazu) for why a dropped ZSK
+	// is worth knowing about even though it never breaks chain-of-trust
+	// (only the KSK is DS-anchored): a customer's own automation
+	// authenticating routine pushes with a ZSK that's silently stopped
+	// being served would otherwise have no way to notice.
+	AlertZSKMissing
+)
+
+// Alert is one notification a check pass decided should go out: some
+// per-zone check transitioned since the last pass -- either just started
+// failing/missing (Recovered false) or just started passing/present
+// again after having failed/been missing (Recovered true). KeyTag is
+// meaningful only for AlertZSKMissing; Err only for AlertChainOfTrust
+// (a missing ZSK is a comparison against a live answer, not something
+// that itself produces a Go error to report).
+type Alert struct {
+	Zone      string
+	Addresses []string
+	Kind      AlertKind
+	Recovered bool
+	Err       error
+	KeyTag    uint16
+	// Expires is meaningful only for AlertSignatureExpiry: the zone's
+	// earliest RRSIG expiration.
+	Expires time.Time
+}
+
+// checkOnce runs one pass over every zone db knows about: re-validating
+// each one's chain of trust via validator exactly the way first contact
+// (and a §8.2 key rollover) already does -- "does a DS matching this
+// zone's pinned key exist at the parent" -- and, separately, confirming
+// via dnskeys that every ZSK currently registered for the zone is still
+// present in what the zone is actually serving. Returns the alerts (if
+// any) that a state transition since the last pass warrants for either
+// check. state is mutated in place so the next call sees this pass's
+// results.
+//
+// A zone's very first observation (not yet in state at all) only
+// establishes a baseline; it never alerts on its own, even if a check
+// already fails/finds a key missing then. That's what "compares against
+// last known good" means literally -- there is no "last known" yet to
+// have changed from -- and avoids an alert storm at daemon startup for
+// every zone already in a known, unaddressed state.
+func checkOnce(db *sazu.DB, validator sazu.ChainValidator, dnskeys DNSKEYFetcher, state map[string]*zoneState) ([]Alert, error) {
+	zones, err := db.ListZones()
+	if err != nil {
+		return nil, fmt.Errorf("listing zones: %w", err)
+	}
+
+	pending, err := db.LoadPendingRollovers()
+	if err != nil {
+		return nil, fmt.Errorf("loading pending rollovers: %w", err)
+	}
+
+	var alerts []Alert
+	for _, zone := range zones {
+		zk, ok, err := db.LoadZoneKeys(zone)
+		if err != nil {
+			return nil, fmt.Errorf("loading keys for %s: %w", zone, err)
+		}
+		if !ok {
+			// Shouldn't normally happen (every zones row gets a pinned
+			// key at first contact) -- nothing to check without one.
+			continue
+		}
+
+		st, seen := state[zone]
+		if !seen {
+			st = &zoneState{}
+			state[zone] = st
+		}
+
+		checkErr := validator.VerifyChainOfTrust(zone, zk.KSK.DNSKEY)
+		nowOK := checkErr == nil
+		switch {
+		case inconclusive(checkErr):
+			// The parent (or an ancestor) couldn't be reached at all: no
+			// evidence either way, so neither an alert nor a step
+			// towards one.
+		case !seen:
+			// First observation: baseline only, no alert -- see doc comment.
+			st.lastOK = nowOK
+		default:
+			if changed := debounced(&st.lastOK, &st.chainFlips, nowOK); changed {
+				if nowOK {
+					alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertChainOfTrust, Recovered: true})
+				} else {
+					alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertChainOfTrust, Err: checkErr})
+				}
+			}
+		}
+
+		if len(zk.ZSKs) > 0 {
+			alerts = append(alerts, checkZSKPresence(db, zone, zk, dnskeys, st, seen)...)
+		}
+		pr, isPending := pending[sazu.NormalizeZone(zone)]
+		alerts = append(alerts, checkPendingRollover(db, zone, pr, isPending, st)...)
+
+		expiryAlerts, err := checkSignatureExpiry(db, zone, st, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		alerts = append(alerts, expiryAlerts...)
+	}
+	return alerts, nil
+}
+
+// debounceThreshold is how many consecutive passes must agree on a new
+// outcome before it replaces the last known one and alerts -- so a
+// single transient resolution hiccup never pages anyone.
+const debounceThreshold = 2
+
+// debounced feeds one pass's outcome into a debounced state: *last is
+// the last confirmed outcome and *flips the number of consecutive passes
+// since that disagreed with it. It reports whether *last just changed.
+func debounced(last *bool, flips *int, now bool) bool {
+	if now == *last {
+		*flips = 0
+		return false
+	}
+	*flips++
+	if *flips < debounceThreshold {
+		return false
+	}
+	*last, *flips = now, 0
+	return true
+}
+
+// inconclusive reports whether a chain-of-trust error only means the
+// servers couldn't be reached or queried -- not that anything about the
+// delegation is wrong.
+func inconclusive(err error) bool {
+	var ce *sazu.ChainError
+	return errors.As(err, &ce) && (ce.Op == "query" || ce.Op == "delegation")
+}
+
+// checkPendingRollover alerts as soon as a KSK rollover becomes pending
+// for zone -- on the very first pass too, like checkSignatureExpiry: the
+// hold-down is a deadline for the zone owner to cancel an unwanted one,
+// and there's no baseline worth waiting for. It sends a recovery once
+// the rollover is no longer pending (completed or cancelled).
+func checkPendingRollover(db *sazu.DB, zone string, pr sazu.PendingRollover, isPending bool, st *zoneState) []Alert {
+	var alerts []Alert
+	switch {
+	case isPending && !st.rolloverPending:
+		alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertRolloverPending,
+			KeyTag: pr.KSK.KeyTag(), Expires: pr.RequestedAt})
+	case !isPending && st.rolloverPending:
+		alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertRolloverPending, Recovered: true})
+	}
+	st.rolloverPending = isPending
+	return alerts
+}
+
+// checkSignatureExpiry warns when zone's earliest stored RRSIG expires
+// within expiryWarning of now. Unlike the other checks, a zone already
+// inside the window on its very first observation alerts right away: a
+// deadline isn't a change to establish a baseline for first, and waiting
+// a pass could mean warning only after the zone already went bogus.
+// Moving back out of the window (a fresh push) sends a recovery.
+func checkSignatureExpiry(db *sazu.DB, zone string, st *zoneState, now time.Time) ([]Alert, error) {
+	earliest, ok, err := db.EarliestRRSIGExpiration(zone)
+	if err != nil {
+		return nil, fmt.Errorf("reading RRSIG expirations for %s: %w", zone, err)
+	}
+	nowExpiring := ok && earliest.Before(now.Add(expiryWarning))
+	var alerts []Alert
+	switch {
+	case nowExpiring && !st.expiring:
+		alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertSignatureExpiry, Expires: earliest})
+	case !nowExpiring && st.expiring:
+		alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertSignatureExpiry, Recovered: true})
+	}
+	st.expiring = nowExpiring
+	return alerts, nil
+}
+
+// checkZSKPresence compares zone's currently-registered ZSKs against
+// what its live DNSKEY RRset actually contains, returning one alert per
+// key tag whose presence transitioned since the last pass (see
+// zoneState.zskPresent's doc comment for the debounce reasoning). A
+// fetch failure (the zone's own servers unreachable, a transient
+// network error) skips this pass's evaluation entirely, touching no
+// state and raising no alert -- a brief inability to reach a zone's own
+// servers is not evidence a key was dropped, and misreporting one as
+// such would be strictly worse than occasionally missing a real one.
+func checkZSKPresence(db *sazu.DB, zone string, zk *sazu.ZoneKeys, dnskeys DNSKEYFetcher, st *zoneState, seenBefore bool) []Alert {
+	served, err := dnskeys.FetchServedDNSKEYTags(zone)
+	if err != nil {
+		return nil
+	}
+	if st.zskPresent == nil {
+		st.zskPresent = make(map[uint16]bool, len(zk.ZSKs))
+	}
+	if st.zskFlips == nil {
+		st.zskFlips = make(map[uint16]int, len(zk.ZSKs))
+	}
+
+	var alerts []Alert
+	for _, zsk := range zk.ZSKs {
+		tag := zsk.KeyTag()
+		nowPresent := served[tag]
+		wasPresent, seen := st.zskPresent[tag]
+		if !seenBefore || !seen {
+			// First observation of this zone, or of this specific key
+			// tag (e.g. just registered) -- baseline only, no alert.
+			st.zskPresent[tag] = nowPresent
+			continue
+		}
+		flips := st.zskFlips[tag]
+		if debounced(&wasPresent, &flips, nowPresent) {
+			alerts = append(alerts, Alert{Zone: zone, Addresses: contactAddresses(db, zone), Kind: AlertZSKMissing, KeyTag: tag, Recovered: nowPresent})
+		}
+		st.zskPresent[tag] = wasPresent
+		st.zskFlips[tag] = flips
+	}
+	return alerts
+}
+
+// contactAddresses looks up zone's registered §11.4 contact, tolerating
+// a lookup failure (or no contact registered at all) by returning no
+// addresses rather than failing the whole check pass over it -- an alert
+// with nothing to notify still gets logged by the caller, which is
+// itself a useful signal ("this zone broke and nobody would have heard
+// about it").
+func contactAddresses(db *sazu.DB, zone string) []string {
+	addrs, _, _ := db.LoadContact(zone)
+	return addrs
+}

@@ -1,6 +1,7 @@
 package doh
 
 import (
+	"bytes"
 	"net/http"
 	"testing"
 
@@ -65,5 +66,64 @@ func TestDoHGETRejectsOversizedDNSQuery(t *testing.T) {
 	}
 	if err.Error() != "dns query too large" {
 		t.Fatalf("expected %q, got %v", "dns query too large", err)
+	}
+}
+
+func TestRequestToMsgWireRejectsUpdateByDefault(t *testing.T) {
+	m := new(dns.Msg)
+	m.SetUpdate("example.org.")
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatalf("packing: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://example.org"+Path, bytes.NewReader(wire))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", MimeType)
+
+	if _, _, err := RequestToMsgWire(req); err == nil {
+		t.Fatalf("expected an UPDATE-opcode message to be rejected without an accept func opting it in")
+	}
+}
+
+// allowUpdateAccept mimics core/dnsserver's Server.acceptMessage for a
+// config that has called Config.AllowOpcode(dns.OpcodeUpdate): the
+// default policy, except UPDATE (with exactly one question) is also let
+// through.
+func allowUpdateAccept(h dns.Header) dns.MsgAcceptAction {
+	action := dns.DefaultMsgAcceptFunc(h)
+	if action != dns.MsgRejectNotImplemented {
+		return action
+	}
+	opcode := int(h.Bits>>11) & 0xF
+	if opcode == dns.OpcodeUpdate && h.Qdcount == 1 {
+		return dns.MsgAccept
+	}
+	return action
+}
+
+func TestRequestToMsgWireWithAcceptAllowsOptedInOpcode(t *testing.T) {
+	m := new(dns.Msg)
+	m.SetUpdate("example.org.")
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatalf("packing: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://example.org"+Path, bytes.NewReader(wire))
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	req.Header.Set("Content-Type", MimeType)
+
+	msg, raw, err := RequestToMsgWireWithAccept(req, allowUpdateAccept)
+	if err != nil {
+		t.Fatalf("expected an opted-in UPDATE opcode to be accepted, got: %v", err)
+	}
+	if msg.Opcode != dns.OpcodeUpdate {
+		t.Fatalf("expected the unpacked message to keep its UPDATE opcode, got %d", msg.Opcode)
+	}
+	if !bytes.Equal(raw, wire) {
+		t.Fatalf("expected the returned raw bytes to exactly match the original wire bytes")
 	}
 }

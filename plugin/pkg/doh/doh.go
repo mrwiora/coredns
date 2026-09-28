@@ -93,14 +93,28 @@ func RequestToMsg(req *http.Request) (*dns.Msg, error) {
 }
 
 // RequestToMsgWire converts a http.Request to a dns message and returns the
-// original DNS wire bytes from the request.
+// original DNS wire bytes from the request. Applies miekg/dns's default
+// request policy (ordinary queries and notifies only) -- see
+// RequestToMsgWireWithAccept to also allow whatever extra opcodes the
+// server's own configuration has opted into (Config.AllowOpcode).
 func RequestToMsgWire(req *http.Request) (*dns.Msg, []byte, error) {
+	return RequestToMsgWireWithAccept(req, nil)
+}
+
+// RequestToMsgWireWithAccept is RequestToMsgWire, but unpacks the
+// message with accept's request policy instead of always requiring the
+// default one -- for a caller (core/dnsserver's HTTPS/HTTP3 transports)
+// that needs a plugin's opted-in extra opcodes (e.g. RFC 2136 dynamic
+// UPDATE) to reach it consistently across every transport its Config
+// serves, not just plain UDP/TCP/TLS. A nil accept is exactly
+// RequestToMsgWire's own, original behavior.
+func RequestToMsgWireWithAccept(req *http.Request, accept dns.MsgAcceptFunc) (*dns.Msg, []byte, error) {
 	switch req.Method {
 	case http.MethodGet:
-		return requestToMsgGet(req)
+		return requestToMsgGet(req, accept)
 
 	case http.MethodPost:
-		return requestToMsgPost(req)
+		return requestToMsgPost(req, accept)
 
 	default:
 		return nil, nil, fmt.Errorf("method not allowed: %s", req.Method)
@@ -108,13 +122,13 @@ func RequestToMsgWire(req *http.Request) (*dns.Msg, []byte, error) {
 }
 
 // requestToMsgPost extracts the dns message from the request body.
-func requestToMsgPost(req *http.Request) (*dns.Msg, []byte, error) {
+func requestToMsgPost(req *http.Request, accept dns.MsgAcceptFunc) (*dns.Msg, []byte, error) {
 	defer req.Body.Close()
 	buf, err := io.ReadAll(http.MaxBytesReader(nil, req.Body, maxDNSQuerySize))
 	if err != nil {
 		return nil, nil, err
 	}
-	m, err := dnsutil.UnpackRequest(buf)
+	m, err := dnsutil.UnpackRequestWithAcceptFunc(buf, accept)
 	return m, buf, err
 }
 
@@ -122,7 +136,7 @@ const maxDNSQuerySize = 65536
 const maxBase64Len = (maxDNSQuerySize*8 + 5) / 6
 
 // requestToMsgGet extract the dns message from the GET request.
-func requestToMsgGet(req *http.Request) (*dns.Msg, []byte, error) {
+func requestToMsgGet(req *http.Request, accept dns.MsgAcceptFunc) (*dns.Msg, []byte, error) {
 	values := req.URL.Query()
 	b64, ok := values["dns"]
 	if !ok {
@@ -134,7 +148,7 @@ func requestToMsgGet(req *http.Request) (*dns.Msg, []byte, error) {
 	if len(b64[0]) > maxBase64Len {
 		return nil, nil, fmt.Errorf("dns query too large")
 	}
-	return base64ToMsgWire(b64[0])
+	return base64ToMsgWireWithAccept(b64[0], accept)
 }
 
 func toMsg(r io.ReadCloser) (*dns.Msg, error) {
@@ -152,13 +166,13 @@ func toMsgWire(r io.ReadCloser) (*dns.Msg, []byte, error) {
 	return m, buf, err
 }
 
-func base64ToMsgWire(b64 string) (*dns.Msg, []byte, error) {
+func base64ToMsgWireWithAccept(b64 string, accept dns.MsgAcceptFunc) (*dns.Msg, []byte, error) {
 	buf, err := b64Enc.DecodeString(b64)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	m, err := dnsutil.UnpackRequest(buf)
+	m, err := dnsutil.UnpackRequestWithAcceptFunc(buf, accept)
 	return m, buf, err
 }
 

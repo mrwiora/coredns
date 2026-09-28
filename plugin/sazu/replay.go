@@ -1,0 +1,35 @@
+package sazu
+
+import (
+	"strings"
+	"time"
+
+	"github.com/miekg/dns"
+)
+
+// DefaultMaxSIG0Lifetime is the longest SIG(0) validity window
+// (expiration - inception) serveUpdate accepts: one hour plus five
+// minutes of clock-skew allowance. sazuctl signs with inception one
+// minute in the past and expiration one hour in the future, comfortably
+// inside it. This only bounds how long a captured message stays
+// cryptographically valid; replay itself is prevented by the SOA serial
+// and version rules (see version.go).
+const DefaultMaxSIG0Lifetime = time.Hour + 5*time.Minute
+
+// serialGreater reports whether a is greater than b under RFC 1982
+// serial number arithmetic (SERIAL_BITS = 32), the comparison RFC 1035
+// SOA serials are defined to use.
+func serialGreater(a, b uint32) bool {
+	return a != b && a-b < 1<<31
+}
+
+// apexSOA returns the Add-shaped SOA at zone's apex among ops, if any.
+func apexSOA(ops []dns.RR, zone string) *dns.SOA {
+	for _, rr := range ops {
+		soa, ok := rr.(*dns.SOA)
+		if ok && soa.Hdr.Rdlength > 0 && strings.EqualFold(soa.Hdr.Name, dns.Fqdn(zone)) {
+			return soa
+		}
+	}
+	return nil
+}

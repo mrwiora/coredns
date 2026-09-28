@@ -101,6 +101,55 @@ func TestServerHTTPS3RejectsUpdate(t *testing.T) {
 	}
 }
 
+// TestServerHTTPS3AllowOpcodeAcceptsUpdate mirrors
+// TestServerHTTPSAllowOpcodeAcceptsUpdate for the HTTP/3 transport: a
+// config that opts into dns.OpcodeUpdate accepts an UPDATE-opcode
+// message over DoH3, and RawRequestKey carries its exact original wire
+// bytes -- including through the JSON wire envelope's base64 decoding.
+func TestServerHTTPS3AllowOpcodeAcceptsUpdate(t *testing.T) {
+	wire := mustPackRFC2136Update(t)
+
+	newConfig := func() (*Config, *contextCapturingPlugin) {
+		p := &contextCapturingPlugin{}
+		c := testConfig("https3", p)
+		c.TLSConfig = &tls.Config{}
+		c.AllowOpcode(dns.OpcodeUpdate)
+		return c, p
+	}
+
+	rawFromContext := func(t *testing.T, p *contextCapturingPlugin) []byte {
+		t.Helper()
+		if p.capturedContext == nil {
+			t.Fatal("plugin chain was never reached")
+		}
+		raw, ok := p.capturedContext.Value(RawRequestKey{}).([]byte)
+		if !ok {
+			t.Fatal("RawRequestKey not found in context")
+		}
+		return raw
+	}
+
+	t.Run("POST raw wire bytes", func(t *testing.T) {
+		config, p := newConfig()
+		server, err := NewServerHTTPS3("127.0.0.1:443", []*Config{config})
+		if err != nil {
+			t.Fatalf("NewServerHTTPS3() failed: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(wire))
+		req.RemoteAddr = "127.0.0.1:12345"
+		recorder := httptest.NewRecorder()
+
+		server.ServeHTTP(recorder, req)
+
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("ServeHTTP() status = %d, want %d (body: %s)", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+		if !bytes.Equal(rawFromContext(t, p), wire) {
+			t.Fatal("RawRequestKey did not carry the exact original wire bytes")
+		}
+	})
+}
+
 func TestNewServerHTTPS3WithCustomLimits(t *testing.T) {
 	maxStreams := 50
 	c := Config{
