@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 )
 
 func TestNotifierSendWebhookPostsExpectedPayload(t *testing.T) {
 	var got webhookPayload
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("expected Content-Type: application/json, got %q", r.Header.Get("Content-Type"))
 		}
@@ -32,7 +33,7 @@ func TestNotifierSendWebhookPostsExpectedPayload(t *testing.T) {
 }
 
 func TestNotifierSendWebhookReportsNonOKStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -47,7 +48,7 @@ func TestNotifierSendWebhookReportsNonOKStatus(t *testing.T) {
 
 func TestNotifierSendRecoveryPayloadCarriesNoError(t *testing.T) {
 	var got webhookPayload
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -65,7 +66,7 @@ func TestNotifierSendRecoveryPayloadCarriesNoError(t *testing.T) {
 
 func TestNotifierSendWebhookZSKMissingPayloadCarriesKind(t *testing.T) {
 	var got webhookPayload
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -83,7 +84,7 @@ func TestNotifierSendWebhookZSKMissingPayloadCarriesKind(t *testing.T) {
 
 func TestNotifierSendWebhookChainOfTrustPayloadCarriesKind(t *testing.T) {
 	var got webhookPayload
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -127,7 +128,7 @@ func TestNotifierSendUnknownSchemeReportsError(t *testing.T) {
 }
 
 func TestNotifierSendDispatchesToMultipleAddressesIndependently(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -137,5 +138,20 @@ func TestNotifierSendDispatchesToMultipleAddressesIndependently(t *testing.T) {
 	errs := n.Send(alert)
 	if len(errs) != 1 {
 		t.Fatalf("expected exactly one error (the email address, since no SMTP is configured), got %+v", errs)
+	}
+}
+
+// TestNotifierSendsWebhooksOnlyOverHTTPS: an http:// address is not a
+// webhook destination; nothing is sent to it.
+func TestNotifierSendsWebhooksOnlyOverHTTPS(t *testing.T) {
+	var hit atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Store(true) }))
+	defer srv.Close()
+	n := &Notifier{HTTPClient: srv.Client()}
+	if errs := n.Send(Alert{Zone: "example.org.", Addresses: []string{srv.URL}}); len(errs) != 1 {
+		t.Fatalf("expected the http:// address to be refused, got %v", errs)
+	}
+	if hit.Load() {
+		t.Fatalf("an http:// webhook was contacted")
 	}
 }

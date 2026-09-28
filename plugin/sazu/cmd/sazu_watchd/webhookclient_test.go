@@ -31,10 +31,10 @@ func TestCheckWebhookDestination(t *testing.T) {
 // on the monitoring host itself gets nothing sent there.
 func TestWebhookClientRefusesLoopback(t *testing.T) {
 	var hit atomic.Bool
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Store(true) }))
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Store(true) }))
 	defer srv.Close()
 
-	n := &Notifier{HTTPClient: newWebhookClient(2*time.Second, false)}
+	n := &Notifier{HTTPClient: trusting(newWebhookClient(2*time.Second, false))}
 	if errs := n.Send(Alert{Zone: "example.org.", Addresses: []string{srv.URL}}); len(errs) == 0 {
 		t.Fatalf("expected the loopback webhook to be refused")
 	}
@@ -42,7 +42,7 @@ func TestWebhookClientRefusesLoopback(t *testing.T) {
 		t.Fatalf("the request reached the loopback server")
 	}
 
-	n = &Notifier{HTTPClient: newWebhookClient(2*time.Second, true)}
+	n = &Notifier{HTTPClient: trusting(newWebhookClient(2*time.Second, true))}
 	if errs := n.Send(Alert{Zone: "example.org.", Addresses: []string{srv.URL}}); len(errs) != 0 || !hit.Load() {
 		t.Fatalf("expected -webhook-allow-private to permit it, errs=%v hit=%v", errs, hit.Load())
 	}
@@ -52,18 +52,27 @@ func TestWebhookClientRefusesLoopback(t *testing.T) {
 // POST somewhere else.
 func TestWebhookClientDoesNotFollowRedirects(t *testing.T) {
 	var followed atomic.Bool
-	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Store(true) }))
+	target := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Store(true) }))
 	defer target.Close()
-	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
 	}))
 	defer redirector.Close()
 
-	n := &Notifier{HTTPClient: newWebhookClient(2*time.Second, true)}
+	n := &Notifier{HTTPClient: trusting(newWebhookClient(2*time.Second, true))}
 	if errs := n.Send(Alert{Zone: "example.org.", Addresses: []string{redirector.URL}}); len(errs) == 0 {
 		t.Fatalf("expected a redirect response to count as a failed delivery")
 	}
 	if followed.Load() {
 		t.Fatalf("the redirect was followed")
 	}
+}
+
+// trusting makes c accept the httptest TLS servers' certificate, keeping
+// everything else about the webhook client as built.
+func trusting(c *http.Client) *http.Client {
+	tlsSrv := httptest.NewTLSServer(http.NotFoundHandler())
+	defer tlsSrv.Close()
+	c.Transport.(*http.Transport).TLSClientConfig = tlsSrv.Client().Transport.(*http.Transport).TLSClientConfig.Clone()
+	return c
 }

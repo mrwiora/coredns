@@ -13,7 +13,7 @@ import (
 )
 
 // Notifier sends one Alert to each of its registered contact addresses,
-// dispatching on scheme: "mailto:" via SMTP, "http://"/"https://" via a
+// dispatching on scheme: "mailto:" via SMTP, "https://" via a
 // webhook POST -- both alerting mechanisms §11's design left "TBD"
 // between, kept both rather than picking one so a zone's registered
 // contact (sazuctl contact -address ...) decides per-address which
@@ -36,7 +36,7 @@ func (n *Notifier) Send(alert Alert) []error {
 		switch {
 		case strings.HasPrefix(addr, "mailto:"):
 			err = n.sendEmail(strings.TrimPrefix(addr, "mailto:"), alert)
-		case strings.HasPrefix(addr, "http://"), strings.HasPrefix(addr, "https://"):
+		case strings.HasPrefix(addr, "https://"):
 			err = n.sendWebhook(addr, alert)
 		default:
 			// contact.go's validateContactAddresses already restricts
