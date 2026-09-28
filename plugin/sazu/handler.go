@@ -93,10 +93,12 @@ type Sazu struct {
 	// cross-check exists to prevent.
 	InsecureSkipChainValidation bool
 
-	// updateLocks serializes the authenticate-evaluate-apply sequence of
-	// UPDATEs to the same zone, so a slow chain-of-trust walk for one
-	// zone doesn't hold up pushes to others. See zoneLockStripes.
-	updateLocks [zoneLockStripes]sync.Mutex
+	// Locks serializes the authenticate-evaluate-apply sequence of
+	// UPDATEs to the same zone, so a slow chain-of-trust walk for one zone
+	// doesn't hold up pushes to others. Shared by every instance using the
+	// same database (see sharedState). See zoneLockStripes.
+	Locks     *UpdateLocks
+	locksOnce sync.Once
 
 	// Xfer is the transfer plugin of the same server block, if any; after
 	// a zone changes, its secondaries are sent NOTIFY.
@@ -111,6 +113,9 @@ type Sazu struct {
 // zones share a stripe 1 time in 64.
 const zoneLockStripes = 64
 
+// UpdateLocks are the lock stripes serializing updates per zone.
+type UpdateLocks [zoneLockStripes]sync.Mutex
+
 // updateLockFor returns the lock stripe for zone -- the same stripe
 // every time for the same (case- and FQDN-normalized) zone name, so
 // concurrent updates to that zone still serialize correctly against
@@ -119,7 +124,12 @@ const zoneLockStripes = 64
 func (s *Sazu) updateLockFor(zone string) *sync.Mutex {
 	h := fnv.New32a()
 	h.Write([]byte(normalizeZone(zone)))
-	return &s.updateLocks[h.Sum32()%zoneLockStripes]
+	s.locksOnce.Do(func() {
+		if s.Locks == nil {
+			s.Locks = new(UpdateLocks)
+		}
+	})
+	return &s.Locks[h.Sum32()%zoneLockStripes]
 }
 
 func (s *Sazu) Name() string { return "sazu" }

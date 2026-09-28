@@ -1,350 +1,276 @@
 package sazu
 
 import (
-	"database/sql"
+	"bytes"
+	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
-	"strings"
+	"os"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
-	_ "modernc.org/sqlite" // pure-Go driver, registers as "sqlite"
+	bolt "go.etcd.io/bbolt"
 )
 
-const schema = `
-CREATE TABLE IF NOT EXISTS zones (
-	origin     TEXT PRIMARY KEY,
-	created_at INTEGER NOT NULL
-);
-
--- One row per key currently trusted for a zone: exactly one role='KSK'
--- row (first contact and every §8.2 rollover replace it, never add a
--- second) plus zero or more role='ZSK' rows (see keys.go's KeyRole doc
--- comment for what the optional ZSK split is for). can_auth_tx mirrors
--- ManagedKey.CanAuthenticateTx -- always 1 for a KSK, customer's choice
--- for a ZSK.
-CREATE TABLE IF NOT EXISTS keys (
-	zone        TEXT NOT NULL REFERENCES zones(origin),
-	keytag      INTEGER NOT NULL,
-	role        TEXT NOT NULL,
-	flags       INTEGER NOT NULL,
-	protocol    INTEGER NOT NULL,
-	algorithm   INTEGER NOT NULL,
-	public_key  TEXT NOT NULL,
-	can_auth_tx INTEGER NOT NULL,
-	pinned_at   INTEGER NOT NULL,
-	PRIMARY KEY (zone, keytag)
-);
-CREATE INDEX IF NOT EXISTS keys_zone_role ON keys(zone, role);
-
--- §11.4 registration record: a zone's registered contact address(es),
--- newline-joined when there is more than one (see ContactUpdate/
--- splitContactOps in contact.go for the wire-side convention).
-CREATE TABLE IF NOT EXISTS contacts (
-	zone          TEXT PRIMARY KEY REFERENCES zones(origin),
-	address       TEXT NOT NULL,
-	registered_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS rrs (
-	id     INTEGER PRIMARY KEY AUTOINCREMENT,
-	zone   TEXT NOT NULL REFERENCES zones(origin),
-	name   TEXT NOT NULL,
-	rrtype INTEGER NOT NULL,
-	rr     TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS rrs_zone_name_type ON rrs(zone, name, rrtype);
-
--- §11.5 audit trail: one row per UPDATE transaction this server decided on,
--- accepted or rejected. zone is NOT a foreign key into zones(origin) --
--- unlike every other table here, an audit entry is written for a zone
--- that was refused at first contact and so never got a zones row at all,
--- which is exactly the kind of attempt an audit trail exists to remember.
--- key_tag/key_role identify the key whose verified SIG(0) signature
--- authenticated this transaction -- both NULL when it never got that far
--- (see AuditEntry's own doc comment).
-CREATE TABLE IF NOT EXISTS audit_log (
-	id          TEXT PRIMARY KEY,
-	zone        TEXT NOT NULL,
-	remote_addr TEXT NOT NULL,
-	rcode       TEXT NOT NULL,
-	status      TEXT NOT NULL,
-	at          INTEGER NOT NULL,
-	key_tag     INTEGER,
-	key_role    TEXT
-);
-CREATE INDEX IF NOT EXISTS audit_log_zone_at ON audit_log(zone, at);
-
--- A DS-only KSK rollover waiting out its hold-down (see rollover.go):
--- at most one per zone. Any control change clears it (setVersion), in the
--- same transaction as that change.
-CREATE TABLE IF NOT EXISTS pending_rollovers (
-	zone         TEXT PRIMARY KEY,
-	flags        INTEGER NOT NULL,
-	protocol     INTEGER NOT NULL,
-	algorithm    INTEGER NOT NULL,
-	public_key   TEXT NOT NULL,
-	requested_at INTEGER NOT NULL
-);
-
--- Every zone's control-state version (see version.go): the counter a
--- control change must name as a prerequisite, incremented by each one.
--- Deliberately not a foreign key into zones(origin) and never deleted --
--- DeleteZone increments it instead -- so a message signed for an older
--- version can't re-create or change a decommissioned zone later.
-CREATE TABLE IF NOT EXISTS zone_versions (
-	zone    TEXT PRIMARY KEY,
-	version INTEGER NOT NULL
-);
-`
-
-// DB is SAZU's SQLite persistence backend, via modernc.org/sqlite -- a
-// pure-Go driver, no cgo, keeping this in line with the rest of the tree
-// (CoreDNS has no cgo dependencies; a cgo driver would affect
-// cross-compilation and static builds).
+// DB persists SAZU's state in a bbolt database, the embedded store CoreDNS
+// already uses (plugin/dynupdate). The in-memory Store, KeyRegistry and
+// registries are what the plugin works with; DB is written through on
+// every accepted update, before memory changes, and read once at startup.
 //
-// Store/ZoneData/KeyRegistry stay pure in-memory and untouched by this
-// file -- DB is a durability layer handler.go/setup.go add on top: every
-// successful UPDATE writes through to it (commit-then-apply-to-memory, so
-// a persistence failure can't leave memory and disk disagreeing), and
-// LoadAll hydrates memory from it once at startup. Nothing about DB is
-// required: a plugin instance configured without a `db` directive keeps
-// everything in memory only.
+// bbolt lets only one process hold a database file open for writing, and
+// sazu-watchd reads the same file from its own process. So DB never keeps
+// the file open: each operation opens it, runs one transaction and closes
+// it, and bbolt's file lock (with a timeout) makes the two processes take
+// turns. Within a process, operations on one file are serialized.
 type DB struct {
-	sql *sql.DB
+	path     string
+	readOnly bool
 }
 
-// maxOpenConns bounds how many concurrent connections Open's *sql.DB pool
-// will hand out. SQLite (even in WAL mode) still allows only one writer at
-// a time -- this isn't an attempt to parallelize CommitUpdate itself, just
-// enough headroom that a burst of concurrent zones' writes, and any reads
-// (LoadZoneKeys, the audit trail) running alongside them, don't all pile
-// up behind Go's own single-connection queue the way a strict
-// SetMaxOpenConns(1) would. A modest, fixed cap rather than unlimited
-// (0): each one is a real OS file handle, and WAL's actual concurrency
-// benefit tops out long before that would matter.
-const maxOpenConns = 8
+// Buckets. Keys are zone origins unless noted.
+var (
+	bucketZones    = []byte("zones")    // -> creation time, 8 bytes big-endian unix seconds
+	bucketRecords  = []byte("records")  // -> the zone's records, wire format (encodeRecords)
+	bucketKeys     = []byte("keys")     // -> storedKeys, JSON
+	bucketContacts = []byte("contacts") // -> storedContact, JSON
+	bucketVersions = []byte("versions") // -> the zone version, 8 bytes big-endian
+	bucketPending  = []byte("pending")  // -> storedPending, JSON
+	// bucketAudit is keyed by zone, 0x00, the time as 8 bytes big-endian
+	// unix nanoseconds, then the transaction ID, so one zone's entries are
+	// contiguous and in time order.
+	bucketAudit = []byte("audit")
+)
 
-// Open creates or opens a SQLite database at path and ensures its schema
-// exists.
+var allBuckets = [][]byte{bucketZones, bucketRecords, bucketKeys, bucketContacts, bucketVersions, bucketPending, bucketAudit}
+
+// dbLockTimeout bounds how long an operation waits for the other process
+// (CoreDNS or sazu-watchd) to finish with the file.
+const dbLockTimeout = 10 * time.Second
+
+var (
+	dbFileMu    sync.Mutex
+	dbFileLocks = map[string]*sync.Mutex{}
+)
+
+func fileLock(path string) *sync.Mutex {
+	dbFileMu.Lock()
+	defer dbFileMu.Unlock()
+	mu, ok := dbFileLocks[path]
+	if !ok {
+		mu = new(sync.Mutex)
+		dbFileLocks[path] = mu
+	}
+	return mu
+}
+
+// Open returns the database at path, creating it if it doesn't exist.
 func Open(path string) (*DB, error) {
-	// WAL mode lets readers (LoadZoneKeys, the audit trail) proceed
-	// without waiting behind a writer and allows several connections.
-	// Writers for different zones (Sazu.updateLocks serializes only per
-	// zone) still take turns at SQLite's single write lock; busy_timeout
-	// makes them wait up to 5s for it instead of failing with SQLITE_BUSY.
-	dsn := path + "?_journal_mode=WAL&_busy_timeout=5000"
-	sqlDB, err := sql.Open("sqlite", dsn)
+	abs, err := filepath.Abs(path)
 	if err != nil {
+		return nil, err
+	}
+	db := &DB{path: abs}
+	if err := db.update(func(*bolt.Tx) error { return nil }); err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
-	sqlDB.SetMaxOpenConns(maxOpenConns)
-	if _, err := sqlDB.Exec(schema); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("creating schema in %s: %w", path, err)
-	}
-	db := &DB{sql: sqlDB}
 	return db, nil
 }
 
-// Close closes the underlying database connection.
-func (db *DB) Close() error { return db.sql.Close() }
+// OpenReadOnly returns the existing database at path for reading only.
+func OpenReadOnly(path string) (*DB, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return nil, err
+	}
+	return &DB{path: abs, readOnly: true}, nil
+}
+
+// Close is a no-op: DB holds no open file between operations.
+func (db *DB) Close() error { return nil }
+
+// Path returns the database file's absolute path.
+func (db *DB) Path() string { return db.path }
+
+func (db *DB) run(write bool, fn func(*bolt.Tx) error) error {
+	mu := fileLock(db.path)
+	mu.Lock()
+	defer mu.Unlock()
+	b, err := bolt.Open(db.path, 0o600, &bolt.Options{Timeout: dbLockTimeout, ReadOnly: !write})
+	if err != nil {
+		return err
+	}
+	defer b.Close()
+	if !write {
+		return b.View(fn)
+	}
+	return b.Update(func(tx *bolt.Tx) error {
+		for _, name := range allBuckets {
+			if _, err := tx.CreateBucketIfNotExists(name); err != nil {
+				return err
+			}
+		}
+		return fn(tx)
+	})
+}
+
+func (db *DB) update(fn func(*bolt.Tx) error) error {
+	if db.readOnly {
+		return errors.New("database opened read-only")
+	}
+	return db.run(true, fn)
+}
+
+func (db *DB) view(fn func(*bolt.Tx) error) error { return db.run(false, fn) }
+
+// bucket returns name from tx, or nil in a read-only transaction on a
+// database that doesn't have it yet.
+func bucket(tx *bolt.Tx, name []byte) *bolt.Bucket { return tx.Bucket(name) }
 
 // KeyChange describes a KeyRegistry mutation for CommitUpdate to persist
-// alongside the rest of an UPDATE transaction, atomically -- at most one
-// field is normally set per real transaction (that's what serveUpdate's
-// own logic guarantees: a single push is either first contact, a KSK
-// rollover, a ZSK registration, a ZSK retirement, or none of those), but
-// CommitUpdate itself doesn't assume that; it just applies whichever are
-// non-nil.
+// alongside the rest of an UPDATE transaction, atomically. CommitUpdate
+// applies whichever fields are set.
 type KeyChange struct {
 	// PinKSK is set on first contact or a successful §8.2 KSK rollover.
 	PinKSK *dns.DNSKEY
-	// AddZSK is set when this push registers a new optional ZSK.
+	// AddZSK is set when this push registers a new ZSK.
 	AddZSK *ManagedKey
 	// RetireZSK, if non-nil, is the key tag of a ZSK this push removed.
 	RetireZSK *uint16
 }
 
-// CommitUpdate persists one accepted UPDATE transactionally: optionally
-// applying keyChange (pass nil for an ordinary push that changes no
-// key) and applying every op in ops, all in one SQLite transaction so a
-// failure partway through leaves no partial state on disk. Mirrors
-// ApplyUpdateOps' RFC 2136 §2.5 classification exactly, so the two stay
-// in lockstep for the same input.
+type storedKey struct {
+	DNSKEY            string `json:"dnskey"`
+	CanAuthenticateTx bool   `json:"can_auth_tx"`
+}
+
+type storedKeys struct {
+	KSK  storedKey   `json:"ksk"`
+	ZSKs []storedKey `json:"zsks,omitempty"`
+}
+
+type storedContact struct {
+	Addresses    []string  `json:"addresses"`
+	RegisteredAt time.Time `json:"registered_at"`
+}
+
+type storedPending struct {
+	DNSKEY      string    `json:"dnskey"`
+	RequestedAt time.Time `json:"requested_at"`
+}
+
+// CommitUpdate persists one accepted UPDATE in a single transaction:
+// keyChange (nil for none), the update ops applied to the zone's stored
+// records exactly as ZoneData applies them in memory, and contact.
 func (db *DB) CommitUpdate(zone string, keyChange *KeyChange, ops []dns.RR, zclass uint16, contact *ContactUpdate) error {
 	return db.CommitUpdateWithVersion(zone, nil, keyChange, ops, zclass, contact)
 }
 
-// CommitUpdateWithVersion is CommitUpdate that additionally sets the
-// zone's version (see version.go) to *version, if non-nil, in the same
-// transaction -- so a control change is never persisted without the
-// version bump that stops it from applying a second time.
+// CommitUpdateWithVersion is CommitUpdate that also sets the zone's
+// version (see version.go) to *version, if non-nil, in the same
+// transaction, so a control change is never persisted without the version
+// bump that stops it from applying twice.
 func (db *DB) CommitUpdateWithVersion(zone string, version *uint64, keyChange *KeyChange, ops []dns.RR, zclass uint16, contact *ContactUpdate) error {
-	tx, err := db.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
-
-	now := time.Now().Unix()
-	if _, err := tx.Exec(`INSERT OR IGNORE INTO zones (origin, created_at) VALUES (?, ?)`, zone, now); err != nil {
-		return fmt.Errorf("ensuring zone row: %w", err)
-	}
-	if err := setVersion(tx, zone, version); err != nil {
-		return err
-	}
-
-	if keyChange != nil {
-		if newKSK := keyChange.PinKSK; newKSK != nil {
-			// A rollover's new KSK usually has a different key tag than
-			// the one it replaces -- PRIMARY KEY (zone, keytag) would
-			// leave the old row behind as a second, stale "KSK" unless
-			// it's explicitly cleared first. There is always at most one
-			// role='KSK' row per zone by construction, so this is safe
-			// to do unconditionally.
-			if _, err := tx.Exec(`DELETE FROM keys WHERE zone = ? AND role = 'KSK'`, zone); err != nil {
-				return fmt.Errorf("clearing previous KSK: %w", err)
-			}
-			if _, err := tx.Exec(
-				`INSERT INTO keys (zone, keytag, role, flags, protocol, algorithm, public_key, can_auth_tx, pinned_at)
-				 VALUES (?, ?, 'KSK', ?, ?, ?, ?, 1, ?)`,
-				zone, newKSK.KeyTag(), newKSK.Flags, newKSK.Protocol, newKSK.Algorithm, newKSK.PublicKey, now,
-			); err != nil {
-				return fmt.Errorf("pinning KSK: %w", err)
+	zone = normalizeZone(zone)
+	key := []byte(zone)
+	return db.update(func(tx *bolt.Tx) error {
+		zones := tx.Bucket(bucketZones)
+		if zones.Get(key) == nil {
+			if err := zones.Put(key, u64(uint64(time.Now().Unix()))); err != nil {
+				return err
 			}
 		}
-		if zsk := keyChange.AddZSK; zsk != nil {
-			canAuth := 0
-			if zsk.CanAuthenticateTx {
-				canAuth = 1
-			}
-			if _, err := tx.Exec(
-				`INSERT OR REPLACE INTO keys (zone, keytag, role, flags, protocol, algorithm, public_key, can_auth_tx, pinned_at)
-				 VALUES (?, ?, 'ZSK', ?, ?, ?, ?, ?, ?)`,
-				zone, zsk.KeyTag(), zsk.DNSKEY.Flags, zsk.DNSKEY.Protocol, zsk.DNSKEY.Algorithm, zsk.DNSKEY.PublicKey, canAuth, now,
-			); err != nil {
-				return fmt.Errorf("registering ZSK: %w", err)
-			}
-		}
-		if keytag := keyChange.RetireZSK; keytag != nil {
-			if _, err := tx.Exec(`DELETE FROM keys WHERE zone = ? AND keytag = ? AND role = 'ZSK'`, zone, *keytag); err != nil {
-				return fmt.Errorf("retiring ZSK: %w", err)
-			}
-		}
-	}
-
-	if contact != nil {
-		if len(contact.Addresses) == 0 {
-			if _, err := tx.Exec(`DELETE FROM contacts WHERE zone = ?`, zone); err != nil {
-				return fmt.Errorf("clearing contact: %w", err)
-			}
-		} else if _, err := tx.Exec(
-			`INSERT OR REPLACE INTO contacts (zone, address, registered_at) VALUES (?, ?, ?)`,
-			zone, strings.Join(contact.Addresses, "\n"), now,
-		); err != nil {
-			return fmt.Errorf("registering contact: %w", err)
-		}
-	}
-
-	// A full push (one that adds the apex SOA) replaces the zone's whole
-	// served content, exactly like ZoneData.PurgeContentAndApply does in
-	// memory: everything except the apex DNSKEY RRset and the RRSIGs
-	// covering it is dropped before this update's own records are added.
-	// Without this, records a later push no longer contains -- with
-	// RRSIGs still inside their validity window -- would come back on
-	// the next LoadAll, along with stale NSEC/NSEC3 chains. serveUpdate
-	// refuses any other kind of content change, so this is the only
-	// purge a commit ever needs.
-	if addsApexSOA(ops, zone, zclass) {
-		if err := purgeContent(tx, zone); err != nil {
+		if err := setVersion(tx, zone, version); err != nil {
 			return err
 		}
-	}
-	// Mirrors ZoneData.dropSupersededDNSKEYSigsLocked: new signatures
-	// over the apex DNSKEY RRset replace all earlier ones.
-	if addsApexDNSKEYSig(ops, normalizeZone(zone), zclass) {
-		if err := deleteApexRRSIGsCovering(tx, zone, dns.TypeDNSKEY); err != nil {
-			return err
+		if keyChange != nil {
+			if err := applyKeyChange(tx.Bucket(bucketKeys), key, keyChange); err != nil {
+				return err
+			}
 		}
-	}
-
-	for _, rr := range ops {
-		h := rr.Header()
-		switch {
-		case h.Class == zclass:
-			// §2.5.1 Add to an RRset. A SOA at the apex replaces any
-			// existing one, mirroring ZoneData.insertLocked exactly.
-			if _, ok := rr.(*dns.SOA); ok && normalizeZone(h.Name) == normalizeZone(zone) {
-				if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ? AND name = ? AND rrtype = ?`,
-					zone, normalizeZone(h.Name), dns.TypeSOA); err != nil {
-					return fmt.Errorf("replacing SOA: %w", err)
-				}
-			}
-			if _, err := tx.Exec(`INSERT INTO rrs (zone, name, rrtype, rr) VALUES (?, ?, ?, ?)`,
-				zone, normalizeZone(h.Name), h.Rrtype, rr.String()); err != nil {
-				return fmt.Errorf("adding record: %w", err)
-			}
-		case h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY && h.Rdlength == 0:
-			// §2.5.3 Delete all RRsets from a name (apex excepted).
-			if normalizeZone(h.Name) == normalizeZone(zone) {
-				continue
-			}
-			if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ? AND name = ?`, zone, normalizeZone(h.Name)); err != nil {
-				return fmt.Errorf("deleting name: %w", err)
-			}
-		case h.Class == dns.ClassANY && h.Rdlength == 0:
-			// §2.5.2 Delete an RRset (apex SOA excepted).
-			if h.Rrtype == dns.TypeSOA && normalizeZone(h.Name) == normalizeZone(zone) {
-				continue
-			}
-			if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ? AND name = ? AND rrtype = ?`,
-				zone, normalizeZone(h.Name), h.Rrtype); err != nil {
-				return fmt.Errorf("deleting rrset: %w", err)
-			}
-		case h.Class == dns.ClassNONE:
-			// §2.5.4 Delete one RR -- fetch candidates and match by
-			// content (ignoring TTL/Class) the same way ZoneData.DeleteRR
-			// does, since matching that in SQL would need the same
-			// normalization logic duplicated as a query.
-			rows, err := tx.Query(`SELECT id, rr FROM rrs WHERE zone = ? AND name = ? AND rrtype = ?`,
-				zone, normalizeZone(h.Name), h.Rrtype)
-			if err != nil {
-				return fmt.Errorf("finding record to delete: %w", err)
-			}
-			var toDelete []int64
-			for rows.Next() {
-				var id int64
-				var text string
-				if err := rows.Scan(&id, &text); err != nil {
-					rows.Close()
+		if contact != nil {
+			contacts := tx.Bucket(bucketContacts)
+			if len(contact.Addresses) == 0 {
+				if err := contacts.Delete(key); err != nil {
 					return err
 				}
-				existing, err := dns.NewRR(text)
-				if err != nil {
-					continue // shouldn't happen; skip rather than fail the whole transaction
-				}
-				if rrEqualContent(existing, rr) {
-					toDelete = append(toDelete, id)
-				}
+			} else if err := putJSON(contacts, key, storedContact{Addresses: contact.Addresses, RegisteredAt: time.Now()}); err != nil {
+				return err
 			}
-			rows.Close()
-			for _, id := range toDelete {
-				if _, err := tx.Exec(`DELETE FROM rrs WHERE id = ?`, id); err != nil {
-					return fmt.Errorf("deleting record: %w", err)
-				}
-			}
-		default:
-			return fmt.Errorf("malformed update op for %s", h.Name)
 		}
-	}
+		if len(ops) == 0 {
+			return nil
+		}
 
-	return tx.Commit()
+		// Apply the ops with the same code the in-memory zone uses.
+		records := tx.Bucket(bucketRecords)
+		stored, err := decodeRecords(records.Get(key))
+		if err != nil {
+			return fmt.Errorf("stored records for %s: %w", zone, err)
+		}
+		z := NewZoneData(zone)
+		for _, rr := range stored {
+			z.Insert(rr)
+		}
+		if addsApexSOA(ops, zone, zclass) {
+			err = z.PurgeContentAndApply(ops, zclass)
+		} else {
+			err = z.ApplyOps(ops, zclass)
+		}
+		if err != nil {
+			return err
+		}
+		enc, err := encodeRecords(z.Records())
+		if err != nil {
+			return err
+		}
+		return records.Put(key, enc)
+	})
 }
 
-// addsApexSOA reports whether ops adds a SOA at zone's apex. Unlike
-// containsAPEXSOA it goes by class alone (an add carries the zone's
-// class; RFC 2136 deletes carry ANY or NONE), not Rdlength, so it also
-// holds for records built in Go rather than unpacked from the wire.
+func applyKeyChange(keys *bolt.Bucket, key []byte, kc *KeyChange) error {
+	var sk storedKeys
+	if v := keys.Get(key); v != nil {
+		if err := json.Unmarshal(v, &sk); err != nil {
+			return err
+		}
+	}
+	if kc.PinKSK != nil {
+		sk.KSK = storedKey{DNSKEY: kc.PinKSK.String(), CanAuthenticateTx: true}
+	}
+	if kc.AddZSK != nil {
+		zsk := storedKey{DNSKEY: kc.AddZSK.DNSKEY.String(), CanAuthenticateTx: kc.AddZSK.CanAuthenticateTx}
+		replaced := false
+		for i, k := range sk.ZSKs {
+			if dnskeyFromText(k.DNSKEY).KeyTag() == kc.AddZSK.KeyTag() {
+				sk.ZSKs[i], replaced = zsk, true
+			}
+		}
+		if !replaced {
+			sk.ZSKs = append(sk.ZSKs, zsk)
+		}
+	}
+	if kc.RetireZSK != nil {
+		kept := sk.ZSKs[:0]
+		for _, k := range sk.ZSKs {
+			if dnskeyFromText(k.DNSKEY).KeyTag() != *kc.RetireZSK {
+				kept = append(kept, k)
+			}
+		}
+		sk.ZSKs = kept
+	}
+	return putJSON(keys, key, sk)
+}
+
+// addsApexSOA reports whether ops adds a SOA at zone's apex. It goes by
+// class alone (an add carries the zone's class; RFC 2136 deletes carry ANY
+// or NONE), not Rdlength, so it also holds for records built in Go rather
+// than unpacked from the wire.
 func addsApexSOA(ops []dns.RR, zone string, zclass uint16) bool {
 	for _, rr := range ops {
 		if _, ok := rr.(*dns.SOA); ok && rr.Header().Class == zclass && normalizeZone(rr.Header().Name) == normalizeZone(zone) {
@@ -354,167 +280,78 @@ func addsApexSOA(ops []dns.RR, zone string, zclass uint16) bool {
 	return false
 }
 
-// purgeContent deletes every stored record for zone except the apex
-// DNSKEY RRset and the RRSIGs covering it -- the on-disk counterpart of
-// ZoneData.purgeContentLocked.
-func purgeContent(tx *sql.Tx, zone string) error {
-	apex := normalizeZone(zone)
-	if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ? AND NOT (name = ? AND rrtype IN (?, ?))`,
-		zone, apex, dns.TypeDNSKEY, dns.TypeRRSIG); err != nil {
-		return fmt.Errorf("purging zone content: %w", err)
-	}
-	rows, err := tx.Query(`SELECT id, rr FROM rrs WHERE zone = ? AND name = ? AND rrtype = ?`, zone, apex, dns.TypeRRSIG)
-	if err != nil {
-		return fmt.Errorf("finding apex RRSIGs to purge: %w", err)
-	}
-	var stale []int64
-	for rows.Next() {
-		var id int64
-		var text string
-		if err := rows.Scan(&id, &text); err != nil {
-			rows.Close()
-			return err
-		}
-		rr, err := dns.NewRR(text)
-		if sig, ok := rr.(*dns.RRSIG); err != nil || !ok || sig.TypeCovered != dns.TypeDNSKEY {
-			stale = append(stale, id)
-		}
-	}
-	rows.Close()
-	for _, id := range stale {
-		if _, err := tx.Exec(`DELETE FROM rrs WHERE id = ?`, id); err != nil {
-			return fmt.Errorf("purging apex RRSIG: %w", err)
-		}
-	}
-	return nil
-}
-
-// deleteApexRRSIGsCovering deletes every stored RRSIG at zone's apex
-// that covers covered.
-func deleteApexRRSIGsCovering(tx *sql.Tx, zone string, covered uint16) error {
-	apex := normalizeZone(zone)
-	rows, err := tx.Query(`SELECT id, rr FROM rrs WHERE zone = ? AND name = ? AND rrtype = ?`, zone, apex, dns.TypeRRSIG)
-	if err != nil {
-		return fmt.Errorf("finding apex RRSIGs: %w", err)
-	}
-	var stale []int64
-	for rows.Next() {
-		var id int64
-		var text string
-		if err := rows.Scan(&id, &text); err != nil {
-			rows.Close()
-			return err
-		}
-		if rr, err := dns.NewRR(text); err == nil {
-			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == covered {
-				stale = append(stale, id)
-			}
-		}
-	}
-	rows.Close()
-	for _, id := range stale {
-		if _, err := tx.Exec(`DELETE FROM rrs WHERE id = ?`, id); err != nil {
-			return fmt.Errorf("deleting superseded RRSIG: %w", err)
-		}
-	}
-	return nil
-}
-
-// setVersion upserts zone's version -- and, since only a control
-// change ever sets it, cancels any pending KSK rollover for the zone in
-// the same transaction (see rollover.go). A nil version is a no-op.
-func setVersion(tx *sql.Tx, zone string, version *uint64) error {
+// setVersion stores zone's version and, since only a control change sets
+// it, cancels any pending KSK rollover for the zone in the same
+// transaction (see rollover.go). A nil version is a no-op.
+func setVersion(tx *bolt.Tx, zone string, version *uint64) error {
 	if version == nil {
 		return nil
 	}
-	if _, err := tx.Exec(`DELETE FROM pending_rollovers WHERE zone = ?`, normalizeZone(zone)); err != nil {
-		return fmt.Errorf("clearing pending rollover: %w", err)
+	key := []byte(normalizeZone(zone))
+	if err := tx.Bucket(bucketPending).Delete(key); err != nil {
+		return err
 	}
-	if _, err := tx.Exec(
-		`INSERT INTO zone_versions (zone, version) VALUES (?, ?)
-		 ON CONFLICT(zone) DO UPDATE SET version = excluded.version`,
-		normalizeZone(zone), int64(*version)); err != nil {
-		return fmt.Errorf("recording zone version: %w", err)
-	}
-	return nil
+	return tx.Bucket(bucketVersions).Put(key, u64(*version))
 }
 
 // SetPendingRollover records zone's pending DS-only KSK rollover,
 // replacing any other.
 func (db *DB) SetPendingRollover(zone string, pr PendingRollover) error {
-	_, err := db.sql.Exec(
-		`INSERT INTO pending_rollovers (zone, flags, protocol, algorithm, public_key, requested_at) VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(zone) DO UPDATE SET flags = excluded.flags, protocol = excluded.protocol,
-		   algorithm = excluded.algorithm, public_key = excluded.public_key, requested_at = excluded.requested_at`,
-		normalizeZone(zone), pr.KSK.Flags, pr.KSK.Protocol, pr.KSK.Algorithm, pr.KSK.PublicKey, pr.RequestedAt.Unix())
-	if err != nil {
-		return fmt.Errorf("recording pending rollover: %w", err)
-	}
-	return nil
+	return db.update(func(tx *bolt.Tx) error {
+		return putJSON(tx.Bucket(bucketPending), []byte(normalizeZone(zone)),
+			storedPending{DNSKEY: pr.KSK.String(), RequestedAt: pr.RequestedAt})
+	})
 }
 
 // LoadPendingRollovers returns every persisted pending rollover, by zone.
 func (db *DB) LoadPendingRollovers() (map[string]PendingRollover, error) {
-	rows, err := db.sql.Query(`SELECT zone, flags, protocol, algorithm, public_key, requested_at FROM pending_rollovers`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	out := make(map[string]PendingRollover)
-	for rows.Next() {
-		var zone, pub string
-		var flags, protocol, algorithm int
-		var at int64
-		if err := rows.Scan(&zone, &flags, &protocol, &algorithm, &pub, &at); err != nil {
-			return nil, err
+	err := db.view(func(tx *bolt.Tx) error {
+		b := bucket(tx, bucketPending)
+		if b == nil {
+			return nil
 		}
-		out[zone] = PendingRollover{
-			KSK: &dns.DNSKEY{Hdr: dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-				Flags: uint16(flags), Protocol: uint8(protocol), Algorithm: uint8(algorithm), PublicKey: pub},
-			RequestedAt: time.Unix(at, 0),
-		}
-	}
-	return out, rows.Err()
+		return b.ForEach(func(k, v []byte) error {
+			var sp storedPending
+			if err := json.Unmarshal(v, &sp); err != nil {
+				return err
+			}
+			out[string(k)] = PendingRollover{KSK: dnskeyFromText(sp.DNSKEY), RequestedAt: sp.RequestedAt}
+			return nil
+		})
+	})
+	return out, err
 }
 
 // LoadVersions returns every persisted zone version, for seeding a
 // VersionRegistry at startup.
 func (db *DB) LoadVersions() (map[string]uint64, error) {
-	rows, err := db.sql.Query(`SELECT zone, version FROM zone_versions`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	out := make(map[string]uint64)
-	for rows.Next() {
-		var zone string
-		var v int64
-		if err := rows.Scan(&zone, &v); err != nil {
-			return nil, err
+	err := db.view(func(tx *bolt.Tx) error {
+		b := bucket(tx, bucketVersions)
+		if b == nil {
+			return nil
 		}
-		out[zone] = uint64(v)
-	}
-	return out, rows.Err()
+		return b.ForEach(func(k, v []byte) error {
+			out[string(k)] = binary.BigEndian.Uint64(v)
+			return nil
+		})
+	})
+	return out, err
 }
 
-// EarliestRRSIGExpiration returns the soonest expiration among every
-// RRSIG stored for zone -- the moment the zone starts failing
-// validation if its owner stops re-pushing, since this server never
-// re-signs anything itself. ok is false when the zone has no RRSIGs.
+// EarliestRRSIGExpiration returns the soonest expiration among zone's
+// stored RRSIGs: when the zone starts failing validation if its owner
+// stops pushing, since the server never re-signs. ok is false when the
+// zone has no RRSIGs.
 func (db *DB) EarliestRRSIGExpiration(zone string) (earliest time.Time, ok bool, err error) {
-	rows, err := db.sql.Query(`SELECT rr FROM rrs WHERE zone = ? AND rrtype = ?`, normalizeZone(zone), dns.TypeRRSIG)
+	records, err := db.zoneRecords(zone)
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var text string
-		if err := rows.Scan(&text); err != nil {
-			return time.Time{}, false, err
-		}
-		rr, err := dns.NewRR(text)
+	for _, rr := range records {
 		sig, isSig := rr.(*dns.RRSIG)
-		if err != nil || !isSig {
+		if !isSig {
 			continue
 		}
 		exp := time.Unix(int64(sig.Expiration), 0)
@@ -522,59 +359,54 @@ func (db *DB) EarliestRRSIGExpiration(zone string) (earliest time.Time, ok bool,
 			earliest, ok = exp, true
 		}
 	}
-	return earliest, ok, rows.Err()
+	return earliest, ok, nil
 }
 
-// DeleteZone removes every persisted trace of zone -- its zones row,
-// every keys row, every rrs row, and its contacts row, if any -- so a
-// subsequent LoadAll sees no trace of it. Deliberately never touches
-// audit_log: a decommissioned zone's transaction history (including the
-// decommission transaction itself) stays available for an operator
-// investigating "what happened to this zone," the same reason audit_log
-// was never a foreign key against zones(origin) to begin with -- it
-// already has to survive a zone existing only briefly, or never having
-// existed at all (a rejected first-contact attempt), let alone one that
-// existed and was later removed.
+func (db *DB) zoneRecords(zone string) ([]dns.RR, error) {
+	var records []dns.RR
+	err := db.view(func(tx *bolt.Tx) error {
+		b := bucket(tx, bucketRecords)
+		if b == nil {
+			return nil
+		}
+		var err error
+		records, err = decodeRecords(b.Get([]byte(normalizeZone(zone))))
+		return err
+	})
+	return records, err
+}
+
+// DeleteZone removes zone's records, keys, contact and pending rollover.
+// The audit trail is kept, so what happened to a removed zone can still be
+// looked up, and so is its version (see version.go).
 func (db *DB) DeleteZone(zone string) error {
 	return db.deleteZone(zone, nil)
 }
 
-// DeleteZoneWithVersion is DeleteZone that also sets the zone's version
-// (which survives the zone -- see zone_versions) in the same
-// transaction.
+// DeleteZoneWithVersion is DeleteZone that also sets the zone's version in
+// the same transaction.
 func (db *DB) DeleteZoneWithVersion(zone string, version uint64) error {
 	return db.deleteZone(zone, &version)
 }
 
 func (db *DB) deleteZone(zone string, version *uint64) error {
 	zone = normalizeZone(zone)
-	tx, err := db.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
-	if err := setVersion(tx, zone, version); err != nil {
-		return err
-	}
-
-	if _, err := tx.Exec(`DELETE FROM rrs WHERE zone = ?`, zone); err != nil {
-		return fmt.Errorf("deleting rrs: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM keys WHERE zone = ?`, zone); err != nil {
-		return fmt.Errorf("deleting keys: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM contacts WHERE zone = ?`, zone); err != nil {
-		return fmt.Errorf("deleting contact: %w", err)
-	}
-	if _, err := tx.Exec(`DELETE FROM zones WHERE origin = ?`, zone); err != nil {
-		return fmt.Errorf("deleting zone: %w", err)
-	}
-	return tx.Commit()
+	key := []byte(zone)
+	return db.update(func(tx *bolt.Tx) error {
+		if err := setVersion(tx, zone, version); err != nil {
+			return err
+		}
+		for _, name := range [][]byte{bucketZones, bucketRecords, bucketKeys, bucketContacts, bucketPending} {
+			if err := tx.Bucket(name).Delete(key); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
-// LoadAll reads every persisted zone, key, and registered contact back
-// into fresh in-memory Store/KeyRegistry/ContactRegistry instances, for
-// hydrating a plugin instance at startup.
+// LoadAll reads every persisted zone, key set and contact into fresh
+// in-memory Store, KeyRegistry and ContactRegistry instances.
 func (db *DB) LoadAll() (*Store, *KeyRegistry, *ContactRegistry, error) {
 	store := NewStore()
 	keys := NewKeyRegistry()
@@ -584,28 +416,15 @@ func (db *DB) LoadAll() (*Store, *KeyRegistry, *ContactRegistry, error) {
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("loading zones: %w", err)
 	}
-
 	for _, origin := range origins {
-		z := store.GetOrCreate(origin)
-
-		rrRows, err := db.sql.Query(`SELECT rr FROM rrs WHERE zone = ? ORDER BY id ASC`, origin)
+		records, err := db.zoneRecords(origin)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("loading records for %s: %w", origin, err)
 		}
-		for rrRows.Next() {
-			var text string
-			if err := rrRows.Scan(&text); err != nil {
-				rrRows.Close()
-				return nil, nil, nil, err
-			}
-			rr, err := dns.NewRR(text)
-			if err != nil {
-				rrRows.Close()
-				return nil, nil, nil, fmt.Errorf("parsing stored record %q for %s: %w", text, origin, err)
-			}
+		z := store.GetOrCreate(origin)
+		for _, rr := range records {
 			z.Insert(rr)
 		}
-		rrRows.Close()
 
 		switch zk, ok, err := db.LoadZoneKeys(origin); {
 		case err != nil:
@@ -617,11 +436,6 @@ func (db *DB) LoadAll() (*Store, *KeyRegistry, *ContactRegistry, error) {
 					return nil, nil, nil, fmt.Errorf("restoring ZSK for %s: %w", origin, err)
 				}
 			}
-		default:
-			// A zone row with no pinned key shouldn't normally happen
-			// (CommitUpdate always pins one at first contact), but isn't
-			// fatal to loading -- the zone just won't accept further
-			// pushes until an operator intervenes.
 		}
 
 		switch addrs, ok, err := db.LoadContact(origin); {
@@ -629,175 +443,188 @@ func (db *DB) LoadAll() (*Store, *KeyRegistry, *ContactRegistry, error) {
 			return nil, nil, nil, fmt.Errorf("loading contact for %s: %w", origin, err)
 		case ok:
 			contacts.Set(origin, addrs)
-		default:
-			// No contact registered for this zone -- fine, §11.4 is optional.
 		}
 	}
-
 	return store, keys, contacts, nil
 }
 
-// ListZones returns every onboarded zone's origin -- a lighter-weight
-// alternative to LoadAll for a caller (like sazu-watchd, §11.4) that needs
-// to enumerate zones without loading their full content.
+// ListZones returns every onboarded zone's origin.
 func (db *DB) ListZones() ([]string, error) {
-	rows, err := db.sql.Query(`SELECT origin FROM zones`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	var origins []string
-	for rows.Next() {
-		var origin string
-		if err := rows.Scan(&origin); err != nil {
-			return nil, err
+	err := db.view(func(tx *bolt.Tx) error {
+		b := bucket(tx, bucketZones)
+		if b == nil {
+			return nil
 		}
-		origins = append(origins, origin)
-	}
-	return origins, rows.Err()
+		return b.ForEach(func(k, _ []byte) error {
+			origins = append(origins, string(k))
+			return nil
+		})
+	})
+	return origins, err
 }
 
-// LoadKey returns zone's KSK, if any -- a lighter-weight alternative to
-// LoadAll/LoadZoneKeys for a caller (like sazu-watchd, §11.4) that only
-// needs the one key its chain-of-trust re-check actually cares about:
-// a ZSK is never DS-anchored, so it has nothing for that check to verify
-// in the first place.
+// LoadKey returns zone's KSK, if any.
 func (db *DB) LoadKey(zone string) (*dns.DNSKEY, bool, error) {
-	var flags, protocol, algorithm int64
-	var publicKey string
-	switch err := db.sql.QueryRow(`SELECT flags, protocol, algorithm, public_key FROM keys WHERE zone = ? AND role = 'KSK'`, zone).
-		Scan(&flags, &protocol, &algorithm, &publicKey); err {
-	case nil:
-		return &dns.DNSKEY{
-			Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET},
-			Flags:     uint16(flags),
-			Protocol:  uint8(protocol),
-			Algorithm: uint8(algorithm),
-			PublicKey: publicKey,
-		}, true, nil
-	case sql.ErrNoRows:
-		return nil, false, nil
-	default:
+	zk, ok, err := db.LoadZoneKeys(zone)
+	if err != nil || !ok {
 		return nil, false, err
 	}
+	return zk.KSK.DNSKEY, true, nil
 }
 
-// LoadZoneKeys returns zone's full key set -- its KSK plus every
-// registered ZSK -- for hydrating a KeyRegistry (LoadAll) or for a
-// caller that needs more than LoadKey's KSK-only view.
+// LoadZoneKeys returns zone's KSK and registered ZSKs.
 func (db *DB) LoadZoneKeys(zone string) (*ZoneKeys, bool, error) {
-	rows, err := db.sql.Query(
-		`SELECT keytag, role, flags, protocol, algorithm, public_key, can_auth_tx FROM keys WHERE zone = ?`, zone)
-	if err != nil {
+	var sk storedKeys
+	found := false
+	err := db.view(func(tx *bolt.Tx) error {
+		b := bucket(tx, bucketKeys)
+		if b == nil {
+			return nil
+		}
+		v := b.Get([]byte(normalizeZone(zone)))
+		if v == nil {
+			return nil
+		}
+		found = true
+		return json.Unmarshal(v, &sk)
+	})
+	if err != nil || !found || sk.KSK.DNSKEY == "" {
 		return nil, false, err
 	}
-	defer rows.Close()
-
-	zk := &ZoneKeys{}
-	for rows.Next() {
-		var keytag int64
-		var role string
-		var flags, protocol, algorithm, canAuth int64
-		var publicKey string
-		if err := rows.Scan(&keytag, &role, &flags, &protocol, &algorithm, &publicKey, &canAuth); err != nil {
-			return nil, false, err
-		}
-		dnskey := &dns.DNSKEY{
-			Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET},
-			Flags:     uint16(flags),
-			Protocol:  uint8(protocol),
-			Algorithm: uint8(algorithm),
-			PublicKey: publicKey,
-		}
-		switch role {
-		case "KSK":
-			zk.KSK = &ManagedKey{DNSKEY: dnskey, Role: RoleKSK, CanAuthenticateTx: true}
-		case "ZSK":
-			zk.ZSKs = append(zk.ZSKs, &ManagedKey{DNSKEY: dnskey, Role: RoleZSK, CanAuthenticateTx: canAuth != 0})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, false, err
-	}
-	if zk.KSK == nil {
-		return nil, false, nil
+	zk := &ZoneKeys{KSK: &ManagedKey{DNSKEY: dnskeyFromText(sk.KSK.DNSKEY), Role: RoleKSK, CanAuthenticateTx: true}}
+	for _, k := range sk.ZSKs {
+		zk.ZSKs = append(zk.ZSKs, &ManagedKey{DNSKEY: dnskeyFromText(k.DNSKEY), Role: RoleZSK, CanAuthenticateTx: k.CanAuthenticateTx})
 	}
 	return zk, true, nil
 }
 
 // LoadContact returns the registered §11.4 contact addresses for zone, if
-// any -- a lighter-weight alternative to LoadAll for a caller that only
-// needs one zone's contact.
+// any.
 func (db *DB) LoadContact(zone string) ([]string, bool, error) {
-	var address string
-	switch err := db.sql.QueryRow(`SELECT address FROM contacts WHERE zone = ?`, zone).Scan(&address); err {
-	case nil:
-		return strings.Split(address, "\n"), true, nil
-	case sql.ErrNoRows:
-		return nil, false, nil
-	default:
+	var sc storedContact
+	found := false
+	err := db.view(func(tx *bolt.Tx) error {
+		b := bucket(tx, bucketContacts)
+		if b == nil {
+			return nil
+		}
+		v := b.Get([]byte(normalizeZone(zone)))
+		if v == nil {
+			return nil
+		}
+		found = true
+		return json.Unmarshal(v, &sc)
+	})
+	if err != nil || !found {
 		return nil, false, err
 	}
+	return sc.Addresses, true, nil
 }
 
-// RecordTransaction appends one row to the §11.5 audit trail: entry.ID must
-// be unique (it's the primary key), which newTransactionID's randomness
-// already guarantees in practice. A write here is independent of, and
-// never rolled back by, CommitUpdate's own transaction -- the audit
-// record is written by the caller (serveUpdate) after that transaction
-// has already succeeded or failed, and is deliberately never itself the
-// reason an UPDATE fails: see handler.go's own comment where this is
-// called for why a logging error here only gets logged, not surfaced to
-// the client.
+// RecordTransaction appends entry to the §11.5 audit trail. It is written
+// separately from CommitUpdate, after the update succeeded or failed, and
+// a failure to write it never fails the update (see handler.go).
 func (db *DB) RecordTransaction(entry AuditEntry) error {
-	_, err := db.sql.Exec(
-		`INSERT INTO audit_log (id, zone, remote_addr, rcode, status, at, key_tag, key_role) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		entry.ID, entry.Zone, entry.RemoteAddr, entry.Rcode, entry.Status, entry.At.Unix(), entry.KeyTag, nullIfEmpty(entry.KeyRole),
-	)
-	return err
-}
-
-// nullIfEmpty maps "" to a real SQL NULL rather than storing it as a
-// zero-length string -- used for AuditEntry.KeyRole, which is only ever
-// "" in step with KeyTag being nil (see AuditEntry's doc comment), so
-// the two columns stay symmetric: both NULL, or both set.
-func nullIfEmpty(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
-}
-
-// RecentTransactions returns up to limit audit-log entries for zone,
-// newest first -- the read side of the §11.5 audit trail, for an operator
-// (or a future admin surface) asking "what happened to this zone's
-// pushes recently."
-func (db *DB) RecentTransactions(zone string, limit int) ([]AuditEntry, error) {
-	rows, err := db.sql.Query(
-		`SELECT id, zone, remote_addr, rcode, status, at, key_tag, key_role FROM audit_log WHERE zone = ? ORDER BY at DESC, rowid DESC LIMIT ?`,
-		zone, limit,
-	)
+	v, err := json.Marshal(entry)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer rows.Close()
+	return db.update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketAudit).Put(auditKey(entry.Zone, entry.At, entry.ID), v)
+	})
+}
 
+func auditKey(zone string, at time.Time, id string) []byte {
+	k := make([]byte, 0, len(zone)+1+8+len(id))
+	k = append(k, normalizeZone(zone)...)
+	k = append(k, 0)
+	k = binary.BigEndian.AppendUint64(k, uint64(at.UnixNano()))
+	return append(k, id...)
+}
+
+// RecentTransactions returns up to limit audit-trail entries for zone,
+// newest first.
+func (db *DB) RecentTransactions(zone string, limit int) ([]AuditEntry, error) {
+	prefix := append([]byte(normalizeZone(zone)), 0)
 	var entries []AuditEntry
-	for rows.Next() {
-		var e AuditEntry
-		var at int64
-		var keyTag sql.NullInt64
-		var keyRole sql.NullString
-		if err := rows.Scan(&e.ID, &e.Zone, &e.RemoteAddr, &e.Rcode, &e.Status, &at, &keyTag, &keyRole); err != nil {
+	err := db.view(func(tx *bolt.Tx) error {
+		b := bucket(tx, bucketAudit)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		// Position after the zone's last entry, then walk backwards.
+		after := append(append([]byte(nil), prefix...), bytes.Repeat([]byte{0xff}, 9)...)
+		k, v := c.Seek(after)
+		if k == nil {
+			k, v = c.Last()
+		} else {
+			k, v = c.Prev()
+		}
+		for ; k != nil && bytes.HasPrefix(k, prefix) && len(entries) < limit; k, v = c.Prev() {
+			var e AuditEntry
+			if err := json.Unmarshal(v, &e); err != nil {
+				return err
+			}
+			entries = append(entries, e)
+		}
+		return nil
+	})
+	return entries, err
+}
+
+// encodeRecords packs rrs in wire format, each preceded by its length.
+func encodeRecords(rrs []dns.RR) ([]byte, error) {
+	var out []byte
+	for _, rr := range rrs {
+		buf := make([]byte, dns.Len(rr)+len(rr.Header().Name)+16)
+		n, err := dns.PackRR(rr, buf, 0, nil, false)
+		if err != nil {
+			return nil, fmt.Errorf("packing %s: %w", rr.Header().Name, err)
+		}
+		out = binary.BigEndian.AppendUint16(out, uint16(n))
+		out = append(out, buf[:n]...)
+	}
+	return out, nil
+}
+
+func decodeRecords(b []byte) ([]dns.RR, error) {
+	var out []dns.RR
+	for len(b) > 0 {
+		if len(b) < 2 {
+			return nil, errors.New("truncated record")
+		}
+		n := int(binary.BigEndian.Uint16(b))
+		b = b[2:]
+		if len(b) < n {
+			return nil, errors.New("truncated record")
+		}
+		rr, _, err := dns.UnpackRR(b[:n], 0)
+		if err != nil {
 			return nil, err
 		}
-		e.At = time.Unix(at, 0)
-		if keyTag.Valid {
-			tag := uint16(keyTag.Int64)
-			e.KeyTag = &tag
-		}
-		e.KeyRole = keyRole.String
-		entries = append(entries, e)
+		out = append(out, rr)
+		b = b[n:]
 	}
-	return entries, rows.Err()
+	return out, nil
 }
+
+func dnskeyFromText(s string) *dns.DNSKEY {
+	rr, err := dns.NewRR(s)
+	if err != nil {
+		return nil
+	}
+	k, _ := rr.(*dns.DNSKEY)
+	return k
+}
+
+func putJSON(b *bolt.Bucket, key []byte, v any) error {
+	enc, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return b.Put(key, enc)
+}
+
+func u64(v uint64) []byte { return binary.BigEndian.AppendUint64(nil, v) }

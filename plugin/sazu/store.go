@@ -27,6 +27,24 @@ type ZoneData struct {
 	dirty bool
 }
 
+// Records returns copies of all the zone's records, SOA first.
+func (z *ZoneData) Records() []dns.RR {
+	z.mu.RLock()
+	defer z.mu.RUnlock()
+	var out []dns.RR
+	if z.soa != nil {
+		out = append(out, dns.Copy(z.soa))
+	}
+	for _, byType := range z.rrsets {
+		for _, rrs := range byType {
+			for _, rr := range rrs {
+				out = append(out, dns.Copy(rr))
+			}
+		}
+	}
+	return out
+}
+
 // View returns the file.Zone serving the zone's current data, or nil while
 // the zone has no SOA (onboarded, but no content pushed yet).
 func (z *ZoneData) View() *file.Zone {

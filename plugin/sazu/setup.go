@@ -54,36 +54,17 @@ func setup(c *caddy.Controller) error {
 	}
 
 	if cfg.dbPath != "" {
-		db, err := Open(cfg.dbPath)
+		st, err := acquireState(cfg.dbPath)
 		if err != nil {
 			return plugin.Error("sazu", err)
 		}
-		store, keys, contacts, err := db.LoadAll()
-		if err != nil {
-			db.Close()
-			return plugin.Error("sazu", err)
-		}
-		versions, err := db.LoadVersions()
-		if err != nil {
-			db.Close()
-			return plugin.Error("sazu", err)
-		}
-		for zone, v := range versions {
-			s.Versions.Set(zone, v)
-		}
-		pending, err := db.LoadPendingRollovers()
-		if err != nil {
-			db.Close()
-			return plugin.Error("sazu", err)
-		}
-		for zone, pr := range pending {
-			s.Pending.Set(zone, pr)
-		}
-		s.DB = db
-		s.Store = store
-		s.Keys = keys
-		s.Contacts = contacts
-		c.OnShutdown(db.Close)
+		path := st.db.Path()
+		c.OnShutdown(func() error {
+			releaseState(path)
+			return nil
+		})
+		s.DB, s.Store, s.Keys, s.Contacts = st.db, st.store, st.keys, st.contacts
+		s.Versions, s.Pending, s.Locks = st.versions, st.pending, st.locks
 	} else {
 		s.Store = NewStore()
 		s.Keys = NewKeyRegistry()

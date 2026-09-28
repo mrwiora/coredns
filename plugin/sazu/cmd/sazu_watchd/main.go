@@ -11,7 +11,7 @@
 // request-driven, and its own failure mode (a slow or flaky query to some
 // TLD server) must never be able to add latency to actual DNS answers, or
 // tie monitoring continuity to the query-serving process's uptime. It
-// reads the exact same SQLite database file CoreDNS's sazu plugin writes
+// reads the exact same database file CoreDNS's sazu plugin writes
 // to (via -db), never anything of its own.
 package main
 
@@ -27,7 +27,7 @@ import (
 )
 
 func main() {
-	dbPath := flag.String("db", "", "path to the SQLite database CoreDNS's sazu plugin is using (required)")
+	dbPath := flag.String("db", "", "path to the database CoreDNS's sazu plugin is using (required)")
 	interval := flag.Duration("interval", 5*time.Minute, "how often to re-check every onboarded zone's chain of trust")
 	once := flag.Bool("once", false, "run a single check pass and exit, instead of looping forever")
 	smtpAddr := flag.String("smtp-addr", "", "SMTP server host:port for mailto: contact alerts (omit to disable email alerts)")
@@ -60,7 +60,7 @@ func main() {
 		smtpPassword = strings.TrimRight(string(data), "\r\n")
 	}
 
-	db, err := sazu.Open(*dbPath)
+	db, err := sazu.OpenReadOnly(*dbPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sazu-watchd: opening %s: %v\n", *dbPath, err)
 		os.Exit(1)

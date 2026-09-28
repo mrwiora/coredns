@@ -1,9 +1,9 @@
 package sazu
 
 import (
-	"database/sql"
 	"net"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,33 +21,43 @@ func openTestDB(t *testing.T) *DB {
 	return db
 }
 
-// TestDBUsesPureGoSQLiteDriver is NFR-01: db.go opens its connection via
-// sql.Open("sqlite", ...), the name modernc.org/sqlite (pure Go, no cgo)
-// registers itself under -- never "sqlite3", the name mattn/go-sqlite3
-// (cgo) uses. Checking sql.Drivers() proves it's actually this driver
-// wired up at runtime, not just imported and unused; the broader "the
-// whole suite builds and runs" property (no cgo toolchain required at
-// all) is still what Test Specification §3.14 relies on, since nothing
-// short of an actual CGO_ENABLED=0 build proves that -- this test proves
-// the narrower, still-real property that this package specifically
-// isn't using the cgo alternative.
-func TestDBUsesPureGoSQLiteDriver(t *testing.T) {
-	openTestDB(t)
-
-	var found, foundCGOAlternative bool
-	for _, name := range sql.Drivers() {
-		switch name {
-		case "sqlite":
-			found = true
-		case "sqlite3":
-			foundCGOAlternative = true
+// TestDBWriterAndReadOnlyReaderShareTheFile: CoreDNS writes while
+// sazu-watchd reads the same file; neither holds it open between
+// operations, so both proceed.
+func TestDBWriterAndReadOnlyReaderShareTheFile(t *testing.T) {
+	db := openTestDB(t)
+	reader, err := OpenReadOnly(db.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.CommitUpdate("example.org.", nil, nil, dns.ClassINET, nil); err == nil {
+		t.Fatalf("a read-only database must refuse writes")
+	}
+	key, _, err := GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			if err := db.CommitUpdate("example.org.", &KeyChange{PinKSK: key}, nil, dns.ClassINET, nil); err != nil {
+				t.Errorf("commit: %v", err)
+			}
 		}
-	}
-	if !found {
-		t.Fatalf("expected modernc.org/sqlite's pure-Go driver registered as %q, got %v", "sqlite", sql.Drivers())
-	}
-	if foundCGOAlternative {
-		t.Fatalf("mattn/go-sqlite3's cgo driver is registered as %q -- NFR-01 requires the pure-Go driver only", "sqlite3")
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			if _, err := reader.ListZones(); err != nil {
+				t.Errorf("list: %v", err)
+			}
+		}
+	}()
+	wg.Wait()
+	if zones, err := reader.ListZones(); err != nil || len(zones) != 1 {
+		t.Fatalf("ListZones = %v, %v", zones, err)
 	}
 }
 
@@ -537,13 +547,6 @@ func TestDBCommitUpdateKSKRolloverReplacesRowNotAdds(t *testing.T) {
 		t.Fatalf("expected the KSK to be the new one, got %+v", zk.KSK)
 	}
 
-	var kskRowCount int
-	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM keys WHERE zone = ? AND role = 'KSK'`, "example.org.").Scan(&kskRowCount); err != nil {
-		t.Fatalf("counting KSK rows: %v", err)
-	}
-	if kskRowCount != 1 {
-		t.Fatalf("expected exactly one KSK row after a rollover, got %d", kskRowCount)
-	}
 }
 
 // TestDBDeleteZoneRemovesEverythingButAuditLog proves DeleteZone's exact
@@ -602,5 +605,37 @@ func TestDBDeleteZoneRemovesEverythingButAuditLog(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].ID != "tx-1" {
 		t.Fatalf("expected the audit-trail history to survive DeleteZone, got %+v", entries)
+	}
+}
+
+// TestInstancesOnOneDatabaseShareState: the instances that overlap during
+// a Corefile reload use the same in-memory state and locks, and the state
+// is reloaded from disk once no instance uses it.
+func TestInstancesOnOneDatabaseShareState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sazu.db")
+	old, err := acquireState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := acquireState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if old != reloaded || old.store != reloaded.store || old.locks != reloaded.locks {
+		t.Fatalf("instances on one database must share their state")
+	}
+	old.versions.Set("example.org.", 7)
+	if reloaded.versions.Get("example.org.") != 7 {
+		t.Fatalf("a version set by one instance must be seen by the other")
+	}
+	releaseState(old.db.Path())
+	releaseState(reloaded.db.Path())
+	again, err := acquireState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseState(again.db.Path())
+	if again == old {
+		t.Fatalf("expected the state to be loaded afresh once unused")
 	}
 }
