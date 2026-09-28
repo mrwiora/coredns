@@ -295,12 +295,9 @@ func TestNXDOMAINCarriesValidNSEC3Proof(t *testing.T) {
 	}
 }
 
-// TestPartialPushInvalidatesNSEC3UntilNextFullPush mirrors
-// TestPartialPushInvalidatesNSECUntilNextFullPush for the NSEC3 case:
-// PurgeNSEC purges NSEC3(PARAM) too, so a partial push right after an
-// NSEC3 onboarding still leaves the zone with no denial-of-existence
-// proof at all until the next full push.
-func TestPartialPushInvalidatesNSEC3UntilNextFullPush(t *testing.T) {
+// TestPartialPushIsRefusedAndNSEC3ChainSurvives: a partial content push
+// is refused, so the NSEC3 chain from the last full push keep serving.
+func TestPartialPushIsRefusedAndNSEC3ChainSurvives(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
 
@@ -344,19 +341,12 @@ func TestPartialPushInvalidatesNSEC3UntilNextFullPush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("signing partial update: %v", err)
 	}
-	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("partial push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("partial push rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
-
-	during := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
-	if n3s, _ := splitNSEC3AndRRSIGs(during.Ns); len(n3s) != 0 {
-		t.Fatalf("expected the partial push to invalidate the NSEC3 chain, still got %+v", n3s)
-	}
-
-	fullPush() // recomputes the chain from the same rrs given to BuildFullZonePushNSEC3
 
 	after := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
 	if n3s, _ := splitNSEC3AndRRSIGs(after.Ns); len(n3s) == 0 {
-		t.Fatalf("expected a subsequent full push to restore the NSEC3 chain, got none")
+		t.Fatalf("expected the NSEC3 chain to survive a refused partial push, got none")
 	}
 }

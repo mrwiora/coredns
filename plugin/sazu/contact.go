@@ -8,7 +8,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// contactOwnerPrefix names the reserved owner SAZU treats as its §10.6
+// contactOwnerPrefix names the reserved owner SAZU treats as its §11.4
 // registration-contact record: a TXT RRset at "_sazu-contact.<zone>"
 // rather than a new field bolted onto the wire format. Piggybacking on an
 // ordinary Add/Delete RRset op lets a contact address ride the exact same
@@ -26,13 +26,13 @@ func contactOwnerName(zone string) string {
 }
 
 // ContactOwnerName returns the reserved owner name a client (sazuctl,
-// sazu-watchd) addresses a §10.6 registration-contact op to for zone.
+// sazu-watchd) addresses a §11.4 registration-contact op to for zone.
 // Exported so a client can construct the op itself with dns.Msg.Insert/
 // Remove -- see BuildContactOp for the common case.
 func ContactOwnerName(zone string) string { return contactOwnerName(zone) }
 
 // BuildContactOp builds the TXT record a client sends, as an ordinary
-// Insert-shaped RFC 2136 Add op, to register addrs as zone's §10.6
+// Insert-shaped RFC 2136 Add op, to register addrs as zone's §11.4
 // contact. It is deliberately NOT run through SignZoneContent: a contact
 // registration is not zone content and is never itself DNSSEC-signed
 // (SIG(0) on the containing UPDATE already authenticates it) -- a client
@@ -112,7 +112,7 @@ func splitContactOps(ops []dns.RR, zone string) (rest []dns.RR, update *ContactU
 }
 
 // validateContactAddresses checks each address carries a scheme
-// sazu-watchd (§11) knows how to alert through: "mailto:" (RFC 6068) for
+// sazu-watchd (§11.4) knows how to alert through: "mailto:" (RFC 6068) for
 // email, or "http"/"https" for a webhook POST. Keeping this a closed set,
 // rather than accepting an opaque string, is what lets sazu-watchd
 // dispatch on scheme alone with no further per-zone configuration.
@@ -123,10 +123,8 @@ func validateContactAddresses(addrs []string) ([]string, error) {
 		if a == "" {
 			continue
 		}
-		if !hasNonEmptySchemePrefix(a, "mailto:") &&
-			!hasNonEmptySchemePrefix(a, "http://") &&
-			!hasNonEmptySchemePrefix(a, "https://") {
-			return nil, fmt.Errorf("contact address %q: must start with mailto:, http://, or https://", a)
+		if !hasNonEmptySchemePrefix(a, "mailto:") && !hasNonEmptySchemePrefix(a, "https://") {
+			return nil, fmt.Errorf("contact address %q: must start with mailto: or https://", a)
 		}
 		out = append(out, a)
 	}
@@ -140,9 +138,9 @@ func hasNonEmptySchemePrefix(s, scheme string) bool {
 	return strings.HasPrefix(s, scheme) && len(s) > len(scheme)
 }
 
-// ContactRegistry tracks each zone's registered contact addresses (§10.6)
+// ContactRegistry tracks each zone's registered contact addresses (§11.4)
 // in memory -- read by sazu-watchd, via the same DB that backs this, to
-// know where to send delegation-change alerts (§11).
+// know where to send delegation-change alerts (§11.4).
 type ContactRegistry struct {
 	mu       sync.RWMutex
 	contacts map[string][]string

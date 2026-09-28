@@ -9,25 +9,16 @@ import (
 )
 
 // KeyRole distinguishes a zone's key-signing key (KSK) from its
-// zone-signing key (ZSK). Every onboarded zone has exactly one KSK --
-// it is what the §10.2 chain-of-trust walk anchors to a parent DS
-// record, and there is no other way a key becomes trusted for a zone in
-// the first place, so SAZU never supports a ZSK-only zone. `sazuctl
-// publish-trust` always generates a ZSK together with the KSK at
-// onboarding, precisely so an automation box running routine
-// `publish-zone` pushes never needs to hold the KSK at all -- see
-// plugin/sazu/docs/SAZU-PLAN.md's KSK/ZSK section, and plugin/sazu/README.md's "Keys and
-// validity: quick reference", for why this split exists. A ZSK is never
-// DS-anchored itself; it's trusted transitively, solely because an
-// already-trusted key's SIG(0) authenticated the push that introduced
-// it, which is also what lets a customer register an *additional* ZSK,
-// or replace one, at any point (AddZSK/RetireZSK) with no registrar
-// interaction and no outbound chain-of-trust network walk. Nothing in
-// KeyRegistry itself requires a zone to ever have one -- a KSK-only
-// zone is still a mechanically valid state (single-key model: the same
-// key does SIG(0) authentication and all DNSSEC signing) -- but every
-// onboarding path `sazuctl` actually offers today establishes both
-// together from the start.
+// zone-signing keys (ZSKs). Every onboarded zone has exactly one KSK: the
+// key the §7.2 chain-of-trust check anchors to a DS at the parent, and
+// the only way a key becomes trusted for a zone. A ZSK is never anchored
+// itself; it is trusted because a KSK-authenticated, KSK-signed update
+// added it to the DNSKEY RRset, and it can authenticate content pushes
+// only -- never a change to the key set or the contact. That lets an
+// automation host push content without holding the KSK (see README.md,
+// "Keys and validity: quick reference"). A KSK-only zone is valid (the
+// KSK then signs everything), but sazuctl publish-trust always creates
+// both.
 type KeyRole int
 
 const (
@@ -142,7 +133,7 @@ func (r *KeyRegistry) Get(zone string) (*ZoneKeys, bool) {
 }
 
 // PinKSK records key as zone's KSK, replacing any previous one --
-// called at successful first contact, and again on a successful §10.4
+// called at successful first contact, and again on a successful §8.2
 // KSK rollover. Deliberately leaves any already-registered ZSKs
 // untouched: a KSK rollover does not invalidate them. That mirrors real
 // DNSSEC practice (RFC 6781) -- a ZSK's trust never actually rested on
@@ -219,6 +210,10 @@ func (r *KeyRegistry) DeleteZone(zone string) {
 	defer r.mu.Unlock()
 	delete(r.zones, normalizeZone(zone))
 }
+
+// NormalizeZone returns zone the way this package keys it everywhere:
+// lowercased, fully qualified.
+func NormalizeZone(zone string) string { return normalizeZone(zone) }
 
 func normalizeZone(zone string) string {
 	return strings.ToLower(dns.Fqdn(zone))

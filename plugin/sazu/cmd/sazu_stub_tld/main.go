@@ -1,6 +1,5 @@
 // Command sazu-stub-tld is a minimal parent-zone stand-in for testing
-// SAZU's chain-of-trust cross-check without a real TLD -- the Go/CoreDNS
-// counterpart to the earlier Rust/rDNS port's sazu-stub-tld.
+// SAZU's chain-of-trust cross-check without a real TLD.
 //
 // It loads the same key file a sazuctl push uses, derives its DNSKEY and
 // the real RFC 4034 §5.1.4 DS digest for it, and answers exactly two query

@@ -26,6 +26,8 @@ func newTestSazu(zone string) *Sazu {
 		Zones:                       []string{dns.Fqdn(zone)},
 		Store:                       NewStore(),
 		Keys:                        NewKeyRegistry(),
+		Versions:                    NewVersionRegistry(),
+		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Contacts:                    NewContactRegistry(),
 		Validator:                   NewValidator(),
 		Capture:                     NewRawCapture(5*time.Second, 64),
@@ -169,10 +171,8 @@ func queryDO(t *testing.T, addr, name string, qtype uint16) *dns.Msg {
 // real signatures actually reach a validating client: once onboarded (via
 // BuildFullZonePush, which signs everything), a DO-bit query for A gets
 // back both the A record and its covering RRSIG in the same answer --
-// what a real validating resolver needs, and specifically what was
-// missing when this was tested against a real domain (a published DS
-// with no RRSIGs served at all produces exactly the "bogus"/SERVFAIL
-// state this closes). A query without the DO bit gets no RRSIG, matching
+// what a validating resolver needs (a published DS with no RRSIGs served
+// makes the zone bogus). A query without the DO bit gets no RRSIG, matching
 // ordinary non-DNSSEC client expectations.
 func TestOnboardedZoneServesRRSIGsWithDOBit(t *testing.T) {
 	s := newTestSazu("example.org.")
@@ -264,8 +264,8 @@ func TestRequireValidRRSIGsRejectsUnsignedContent(t *testing.T) {
 	wire := buildUnsignedFirstContactPush(t, "example.org.", key, priv)
 
 	resp := sendRaw(t, addr, wire)
-	if resp.Rcode != dns.RcodeNotAuth {
-		t.Fatalf("rcode = %s, want NotAuth", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
 	if status, ok := diagnosticStatus(resp); !ok || status != statusErrSigInvalid {
 		t.Fatalf("diagnostic status = %q, ok=%v, want %q", status, ok, statusErrSigInvalid)
@@ -314,8 +314,8 @@ func TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic(t *testin
 	}
 
 	resp := sendRaw(t, addr, wire)
-	if resp.Rcode != dns.RcodeNotAuth {
-		t.Fatalf("rcode = %s, want NotAuth", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
 	if status, ok := diagnosticStatus(resp); !ok || status != statusErrExpiredSignature {
 		t.Fatalf("diagnostic status = %q, ok=%v, want %q", status, ok, statusErrExpiredSignature)
@@ -504,13 +504,14 @@ func TestNODATACarriesValidNSECProof(t *testing.T) {
 	}
 }
 
-// TestPartialPushInvalidatesNSECUntilNextFullPush proves the documented
-// trade-off (see ZoneData.PurgeNSEC): a partial push, which never
-// includes NSEC records of its own, invalidates any existing chain
-// rather than risk it going stale -- an NXDOMAIN answer right afterward
-// carries no NSEC at all -- and a subsequent full push, which always
-// recomputes the whole chain, restores it.
-func TestPartialPushInvalidatesNSECUntilNextFullPush(t *testing.T) {
+// TestPartialPushIsRefusedAndNSECChainSurvives proves a content change
+// that isn't a complete replacement of the zone (no apex SOA) is
+// refused with ERR_FULL_ZONE_REQUIRED instead of being applied: applying
+// it would leave the NSEC chain describing content that no longer
+// exists, and the server can't compute a replacement chain itself. The
+// existing chain, and the content it describes, stay exactly as they
+// were.
+func TestPartialPushIsRefusedAndNSECChainSurvives(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
 
@@ -554,20 +555,20 @@ func TestPartialPushInvalidatesNSECUntilNextFullPush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("signing partial update: %v", err)
 	}
-	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("partial push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	resp := sendRaw(t, addr, wire)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("partial push rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
-
-	during := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
-	if nsecs, _ := splitNSECAndRRSIGs(t, during.Ns); len(nsecs) != 0 {
-		t.Fatalf("expected the partial push to invalidate the NSEC chain, still got %+v", nsecs)
+	if status, ok := diagnosticStatus(resp); !ok || status != statusErrFullZoneRequired {
+		t.Fatalf("expected %s diagnostic, got status=%q ok=%v", statusErrFullZoneRequired, status, ok)
 	}
-
-	fullPush() // recomputes the chain from the same rrs given to BuildFullZonePush
+	if got := query(t, addr, "mail.example.org.", dns.TypeA); len(got.Answer) != 0 {
+		t.Fatalf("expected the refused partial push's record to never be served, got %+v", got.Answer)
+	}
 
 	after := queryDO(t, addr, "does-not-exist.example.org.", dns.TypeA)
 	if nsecs, _ := splitNSECAndRRSIGs(t, after.Ns); len(nsecs) == 0 {
-		t.Fatalf("expected a subsequent full push to restore the NSEC chain, got none")
+		t.Fatalf("expected the NSEC chain to survive a refused partial push, got none")
 	}
 }
 
@@ -629,8 +630,8 @@ func soaFromAuthority(t *testing.T, resp *dns.Msg) *dns.SOA {
 	return nil
 }
 
-// TestOnboardWithoutSOAIsAccepted proves first contact no longer
-// requires establishing a real SOA in the same push: sazuctl
+// TestOnboardWithoutSOAIsAccepted: first contact needn't carry a SOA:
+// sazuctl
 // publish-trust deliberately sends a KSK+ZSK-only, content-free first
 // contact (see BuildTrustPush), so the server must accept and pin a KSK
 // candidate regardless of what content, if any, rides along with it. A
@@ -648,7 +649,7 @@ func TestOnboardWithoutSOAIsAccepted(t *testing.T) {
 	dnskeyRR := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
 		Flags: key.Flags, Protocol: key.Protocol, Algorithm: key.Algorithm, PublicKey: key.PublicKey}
 	now := time.Now()
-	signed, err := SignZoneContent([]dns.RR{dnskeyRR, testA("www.example.org.", net.IPv4(203, 0, 113, 10))},
+	signed, err := SignZoneContent([]dns.RR{dnskeyRR},
 		dnskeyRR, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
 	if err != nil {
 		t.Fatalf("SignZoneContent: %v", err)
@@ -672,7 +673,7 @@ func TestOnboardWithoutSOAIsAccepted(t *testing.T) {
 	}
 }
 
-// TestOnboardWithWeakAlgorithmKeyIsRejected proves §10.7's algorithm
+// TestOnboardWithWeakAlgorithmKeyIsRejected proves §11.3's algorithm
 // floor: a first-contact push whose candidate DNSKEY declares an
 // algorithm RFC 8624 §3.1 rates MUST NOT/NOT RECOMMENDED for zone signing
 // (RSASHA1 here) is refused with the ERR_WEAK_ALGORITHM diagnostic and
@@ -720,7 +721,7 @@ func TestOnboardWithWeakAlgorithmKeyIsRejected(t *testing.T) {
 	}
 }
 
-// TestRateLimiterExceededRejectsFurtherKeyManagementPushes proves §12's
+// TestRateLimiterExceededRejectsFurtherKeyManagementPushes proves §11.2's
 // quota is actually wired into serveUpdate: once a zone's key-management
 // (non-full-content) push quota for the rolling window is used up, a
 // further otherwise perfectly valid non-full-content update is refused
@@ -749,44 +750,38 @@ func TestRateLimiterExceededRejectsFurtherKeyManagementPushes(t *testing.T) {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
-	partial := func(rr dns.RR) *dns.Msg {
+	// A contact registration changes no served content, so it is metered
+	// as a key-management push.
+	contact := func(address string) *dns.Msg {
 		t.Helper()
-		signedRR, err := SignZoneContent([]dns.RR{rr}, key, priv, time.Now().Add(-DefaultSignatureInceptionSkew), time.Now().Add(DefaultSignatureValidity))
+		op, err := BuildContactOp("example.org.", []string{address})
 		if err != nil {
-			t.Fatalf("SignZoneContent: %v", err)
+			t.Fatalf("BuildContactOp: %v", err)
 		}
 		m := new(dns.Msg)
 		m.SetQuestion("example.org.", dns.TypeSOA)
 		m.Opcode = dns.OpcodeUpdate
-		m.Insert(signedRR)
-		return m
+		m.Insert([]dns.RR{op})
+		now := time.Now()
+		wire, err := SignUpdate(m, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
+		if err != nil {
+			t.Fatalf("signing contact push: %v", err)
+		}
+		return sendRaw(t, addr, wire)
 	}
 
-	first := partial(testA("mail.example.org.", net.IPv4(203, 0, 113, 20)))
-	now = time.Now()
-	firstWire, err := SignUpdate(first, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing first partial push: %v", err)
+	if resp := contact("mailto:first@example.org"); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("first key-management push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
-	if resp := sendRaw(t, addr, firstWire); resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("first partial push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
-	}
-
-	second := partial(testA("ftp.example.org.", net.IPv4(203, 0, 113, 21)))
-	now = time.Now()
-	secondWire, err := SignUpdate(second, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing second partial push: %v", err)
-	}
-	resp := sendRaw(t, addr, secondWire)
+	resp := contact("mailto:second@example.org")
 	if resp.Rcode != dns.RcodeRefused {
-		t.Fatalf("second partial push rcode = %s, want REFUSED (quota exceeded)", dns.RcodeToString[resp.Rcode])
+		t.Fatalf("second key-management push rcode = %s, want REFUSED (quota exceeded)", dns.RcodeToString[resp.Rcode])
 	}
 	if status, ok := diagnosticStatus(resp); !ok || status != statusErrQuotaExceeded {
 		t.Fatalf("expected %s diagnostic, got status=%q ok=%v", statusErrQuotaExceeded, status, ok)
 	}
-	if got := query(t, addr, "ftp.example.org.", dns.TypeA); len(got.Answer) != 0 {
-		t.Fatalf("expected the over-quota push's content to never have been applied, got %+v", got.Answer)
+	if addrs, _ := s.Contacts.Get("example.org."); len(addrs) != 1 || addrs[0] != "mailto:first@example.org" {
+		t.Fatalf("expected the over-quota push to never have been applied, contact is %v", addrs)
 	}
 }
 
@@ -803,6 +798,8 @@ func TestIPRateLimiterCoversScanningAcrossManyDistinctZoneNames(t *testing.T) {
 		Zones:                       []string{"."}, // catch-all, like a real multi-tenant "sazu ." scope
 		Store:                       NewStore(),
 		Keys:                        NewKeyRegistry(),
+		Versions:                    NewVersionRegistry(),
+		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
 		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
@@ -897,7 +894,7 @@ func TestIPRateLimiterCountsEveryUpdateAttemptNotJustFirstContact(t *testing.T) 
 }
 
 // TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions
-// proves §12's audit trail actually captures both outcomes an operator
+// proves §11.5's audit trail actually captures both outcomes an operator
 // would want to investigate later: a successful onboarding, and a
 // rejected first-contact attempt (a non-SEP-flagged, ZSK-shaped
 // candidate -- first contact can only ever establish a KSK) that never
@@ -962,7 +959,7 @@ func TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions(t *testi
 // chain: once a zone is onboarded, an ordinary push signed by the same
 // (already-pinned) key -- carrying no DNSKEY at all -- can add and
 // remove individual records without re-verifying chain-of-trust.
-func TestOrdinaryPartialPushAfterOnboarding(t *testing.T) {
+func TestPartialPushAfterOnboardingIsRefused(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
 
@@ -1003,17 +1000,20 @@ func TestOrdinaryPartialPushAfterOnboarding(t *testing.T) {
 		t.Fatalf("signing partial push: %v", err)
 	}
 	resp := sendRaw(t, addr, partialWire)
-	if resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("partial push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("partial push rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
+	}
+	if status, ok := diagnosticStatus(resp); !ok || status != statusErrFullZoneRequired {
+		t.Fatalf("expected %s diagnostic, got status=%q ok=%v", statusErrFullZoneRequired, status, ok)
 	}
 
-	mailAnswer := query(t, addr, "mail.example.org.", dns.TypeA)
-	if len(mailAnswer.Answer) != 1 {
-		t.Fatalf("expected the partially-added record to be servable, got %d answers", len(mailAnswer.Answer))
+	// Nothing of it applied: the add didn't happen, the delete didn't
+	// either.
+	if got := query(t, addr, "mail.example.org.", dns.TypeA); len(got.Answer) != 0 {
+		t.Fatalf("expected the refused push's added record to not be served, got %d answers", len(got.Answer))
 	}
-	wwwAnswer := query(t, addr, "www.example.org.", dns.TypeA)
-	if len(wwwAnswer.Answer) != 0 {
-		t.Fatalf("expected the partially-removed record to be gone, got %d answers", len(wwwAnswer.Answer))
+	if got := query(t, addr, "www.example.org.", dns.TypeA); len(got.Answer) != 1 {
+		t.Fatalf("expected the refused push's deleted record to still be served, got %d answers", len(got.Answer))
 	}
 }
 
@@ -1185,7 +1185,7 @@ func TestOnboardDeniedForOtherChainReasonsCarriesNoDiagnostic(t *testing.T) {
 	}
 }
 
-// TestKeyRolloverSwitchesToNewKey proves §10.4: an already-pinned zone
+// TestKeyRolloverSwitchesToNewKey proves §8.2: an already-pinned zone
 // can roll over to a brand new key, without a server restart or any
 // out-of-band step, by sending a push signed by (and introducing) the new
 // key -- provided that new key also independently passes the exact same
@@ -1219,22 +1219,7 @@ func TestKeyRolloverSwitchesToNewKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating new key: %v", err)
 	}
-	newKeyRR := &dns.DNSKEY{Hdr: dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags: newKey.Flags, Protocol: newKey.Protocol, Algorithm: newKey.Algorithm, PublicKey: newKey.PublicKey}
-	now = time.Now()
-	signedNewKey, err := SignZoneContent([]dns.RR{newKeyRR}, newKey, newPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	rollover := new(dns.Msg)
-	rollover.SetQuestion("example.org.", dns.TypeSOA)
-	rollover.Opcode = dns.OpcodeUpdate
-	rollover.Insert(signedNewKey)
-	rolloverWire, err := SignUpdate(rollover, newKey, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing rollover push: %v", err)
-	}
-	resp := sendRaw(t, addr, rolloverWire)
+	resp := rolloverKSK(t, addr, oldKey, newKey, newPriv)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rollover push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
@@ -1259,20 +1244,7 @@ func TestKeyRolloverSwitchesToNewKey(t *testing.T) {
 	}
 
 	// The new key does.
-	now = time.Now()
-	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 20))}, newKey, newPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	newSignedPartial := new(dns.Msg)
-	newSignedPartial.SetQuestion("example.org.", dns.TypeSOA)
-	newSignedPartial.Opcode = dns.OpcodeUpdate
-	newSignedPartial.Insert(signedA)
-	newWire, err := SignUpdate(newSignedPartial, newKey, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing: %v", err)
-	}
-	if resp := sendRaw(t, addr, newWire); resp.Rcode != dns.RcodeSuccess {
+	if resp := contentPush(t, addr, "example.org.", []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 20))}, newKey, newPriv, newKey, newPriv); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("push signed by the new key rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 }
@@ -1341,7 +1313,7 @@ func TestKeyRolloverFailsWithoutADSForTheNewKey(t *testing.T) {
 	}
 }
 
-// TestKeyRolloverRejectedForWeakAlgorithm proves §10.7's algorithm floor
+// TestKeyRolloverRejectedForWeakAlgorithm proves §11.3's algorithm floor
 // applies to a rollover's new candidate key exactly as it does at first
 // contact -- checked before any chain-of-trust effort is spent on it.
 func TestKeyRolloverRejectedForWeakAlgorithm(t *testing.T) {
@@ -1404,15 +1376,11 @@ func TestKeyRolloverRejectedForWeakAlgorithm(t *testing.T) {
 	}
 }
 
-// diagnosticStatus extracts a §12 SAZU status code from a response's
-// Additional section, if present.
+// diagnosticStatus extracts the SAZU status code from a response's
+// Extended DNS Error, if present.
 func diagnosticStatus(m *dns.Msg) (string, bool) {
-	for _, rr := range m.Extra {
-		if txt, ok := rr.(*dns.TXT); ok && len(txt.Txt) > 0 {
-			return txt.Txt[0], true
-		}
-	}
-	return "", false
+	status, _, ok := ResponseStatus(m)
+	return status, ok
 }
 
 func onboard(t *testing.T, addr, zone string) *dns.DNSKEY {
@@ -1446,16 +1414,16 @@ func onboard(t *testing.T, addr, zone string) *dns.DNSKEY {
 // exact scenario a real multi-tenant hoster needs: one Corefile entry
 // ("sazu ." -- accept any domain), and every actual zone this instance
 // serves comes entirely from what's been onboarded at runtime, with no
-// Corefile edit or restart needed per new customer domain. This is the
-// regression test for a real bug: zone routing used to conflate "which
-// static Corefile entry matched" with "which zone is this request
-// about," which under a wildcard "." scope collapsed every distinct
-// domain onto the single literal zone ".".
+// Corefile edit or restart needed per new customer domain: the zone an
+// UPDATE names, not the Corefile entry that matched it, decides which
+// zone it changes.
 func TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges(t *testing.T) {
 	s := &Sazu{
 		Zones:                       []string{"."}, // catch-all: accept any domain
 		Store:                       NewStore(),
 		Keys:                        NewKeyRegistry(),
+		Versions:                    NewVersionRegistry(),
+		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
 		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
@@ -1495,6 +1463,8 @@ func TestWildcardScopeFallsThroughForNeverOnboardedNames(t *testing.T) {
 		Zones:                       []string{"."},
 		Store:                       NewStore(),
 		Keys:                        NewKeyRegistry(),
+		Versions:                    NewVersionRegistry(),
+		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
 		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
@@ -1513,21 +1483,32 @@ func TestWildcardScopeFallsThroughForNeverOnboardedNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
 	}
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket: %v", err)
+	// UDP and TCP must share one port number, and a free UDP port's TCP
+	// twin can already be taken (by another test's connection), so retry
+	// with a fresh port rather than fail on that race.
+	var pc net.PacketConn
+	var l net.Listener
+	for attempt := 0; ; attempt++ {
+		var err error
+		pc, err = net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("ListenPacket: %v", err)
+		}
+		_, port, err := net.SplitHostPort(pc.LocalAddr().String())
+		if err != nil {
+			t.Fatalf("SplitHostPort: %v", err)
+		}
+		if l, err = net.Listen("tcp", "127.0.0.1:"+port); err == nil {
+			break
+		}
+		pc.Close()
+		if attempt == 20 {
+			t.Fatalf("Listen: %v", err)
+		}
 	}
 	defer pc.Close()
-	go func() { _ = srv.ServePacket(pc) }()
-	_, port, err := net.SplitHostPort(pc.LocalAddr().String())
-	if err != nil {
-		t.Fatalf("SplitHostPort: %v", err)
-	}
-	l, err := net.Listen("tcp", "127.0.0.1:"+port)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
 	defer l.Close()
+	go func() { _ = srv.ServePacket(pc) }()
 	go func() { _ = srv.Serve(l) }()
 	defer srv.Stop()
 	addr := pc.LocalAddr().String()
@@ -1587,7 +1568,7 @@ func TestUpdateOutsideZoneScopeIsRefusedNotServerFailureWithNoNextPlugin(t *test
 	}
 }
 
-// TestContactRegistrationRidesOrdinaryPushAndIsNeverServed proves §10.6's
+// TestContactRegistrationRidesOrdinaryPushAndIsNeverServed proves §11.4's
 // registration record: a contact address travels inside an otherwise
 // ordinary, already-authenticated push (no separate protocol/transport of
 // its own), ends up in s.Contacts, and -- unlike a DNSKEY -- is never

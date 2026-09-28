@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNotifierSendWebhookPostsExpectedPayload(t *testing.T) {
 	var got webhookPayload
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Content-Type") != "application/json" {
 			t.Errorf("expected Content-Type: application/json, got %q", r.Header.Get("Content-Type"))
 		}
@@ -32,7 +38,7 @@ func TestNotifierSendWebhookPostsExpectedPayload(t *testing.T) {
 }
 
 func TestNotifierSendWebhookReportsNonOKStatus(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer srv.Close()
@@ -47,7 +53,7 @@ func TestNotifierSendWebhookReportsNonOKStatus(t *testing.T) {
 
 func TestNotifierSendRecoveryPayloadCarriesNoError(t *testing.T) {
 	var got webhookPayload
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -65,7 +71,7 @@ func TestNotifierSendRecoveryPayloadCarriesNoError(t *testing.T) {
 
 func TestNotifierSendWebhookZSKMissingPayloadCarriesKind(t *testing.T) {
 	var got webhookPayload
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -83,7 +89,7 @@ func TestNotifierSendWebhookZSKMissingPayloadCarriesKind(t *testing.T) {
 
 func TestNotifierSendWebhookChainOfTrustPayloadCarriesKind(t *testing.T) {
 	var got webhookPayload
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -127,7 +133,7 @@ func TestNotifierSendUnknownSchemeReportsError(t *testing.T) {
 }
 
 func TestNotifierSendDispatchesToMultipleAddressesIndependently(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -137,5 +143,48 @@ func TestNotifierSendDispatchesToMultipleAddressesIndependently(t *testing.T) {
 	errs := n.Send(alert)
 	if len(errs) != 1 {
 		t.Fatalf("expected exactly one error (the email address, since no SMTP is configured), got %+v", errs)
+	}
+}
+
+// TestNotifierSendsWebhooksOnlyOverHTTPS: an http:// address is not a
+// webhook destination; nothing is sent to it.
+func TestNotifierSendsWebhooksOnlyOverHTTPS(t *testing.T) {
+	var hit atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Store(true) }))
+	defer srv.Close()
+	n := &Notifier{HTTPClient: srv.Client()}
+	if errs := n.Send(Alert{Zone: "example.org.", Addresses: []string{srv.URL}}); len(errs) != 1 {
+		t.Fatalf("expected the http:// address to be refused, got %v", errs)
+	}
+	if hit.Load() {
+		t.Fatalf("an http:// webhook was contacted")
+	}
+}
+
+// TestComposeEmailIsRFC5322: the alert email carries the fields RFC 5322
+// requires (Date, From) and recommends (Message-ID), a MIME plain-text
+// body, CRLF line endings, and an RFC 2047-encoded non-ASCII subject.
+func TestComposeEmailIsRFC5322(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	raw := composeEmail("alerts@example.org", "owner@example.org", "SAZU: zone bücher.example", "line one\nline two\n", now)
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("not a parseable RFC 5322 message: %v", err)
+	}
+	if d, err := msg.Header.Date(); err != nil || !d.Equal(now) {
+		t.Fatalf("Date = %v (%v), want %v", d, err, now)
+	}
+	if id := msg.Header.Get("Message-Id"); !strings.HasPrefix(id, "<") || !strings.HasSuffix(id, "@example.org>") {
+		t.Fatalf("Message-ID = %q", id)
+	}
+	dec := new(mime.WordDecoder)
+	if subj, err := dec.DecodeHeader(msg.Header.Get("Subject")); err != nil || subj != "SAZU: zone bücher.example" {
+		t.Fatalf("Subject = %q (%v)", subj, err)
+	}
+	if msg.Header.Get("Content-Type") != "text/plain; charset=utf-8" || msg.Header.Get("Mime-Version") != "1.0" {
+		t.Fatalf("missing MIME headers: %v", msg.Header)
+	}
+	if strings.Contains(strings.ReplaceAll(string(raw), "\r\n", ""), "\n") {
+		t.Fatalf("bare LF in message")
 	}
 }

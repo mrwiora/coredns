@@ -2,13 +2,13 @@ package sazu
 
 import (
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 )
 
-// DefaultIPUpdatesPerMinute is §12's starting number for the global,
-// per-source-IP flood/scan throttle (the ERR_RATE_LIMITED status code
-// this document's own earlier notes named but hadn't built yet). This is
+// DefaultIPUpdatesPerMinute is §11.2's starting number for the global,
+// per-source-IP flood/scan throttle (ERR_RATE_LIMITED). This is
 // deliberately distinct from, and enforced independently of,
 // RateLimiter's per-zone daily push quota: that quota is keyed by zone
 // name, so it does nothing against an attacker who varies the *target*
@@ -74,7 +74,7 @@ func NewIPRateLimiter(perMinute int) *IPRateLimiter {
 // r.seen rather than letting it grow with every distinct address ever
 // observed.
 func (r *IPRateLimiter) Allow(remoteAddr string) bool {
-	ip := sourceIP(remoteAddr)
+	ip := rateLimitKey(remoteAddr)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	now := r.now()
@@ -93,4 +93,24 @@ func sourceIP(remoteAddr string) string {
 		return remoteAddr
 	}
 	return host
+}
+
+// rateLimitKey is the bucket a remote address is counted in: the address
+// itself for IPv4, but the whole /64 for IPv6. A single IPv6 subscriber
+// or server routinely holds a /64 -- 2^64 addresses -- so counting each
+// /128 separately would let one client spread its attempts over as many
+// fresh buckets as it likes. A /64 is the smallest block normally
+// assigned to one party. Anything that doesn't parse as an IP address is
+// counted as-is.
+func rateLimitKey(remoteAddr string) string {
+	host := sourceIP(remoteAddr)
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
+	}
+	ip = ip.Unmap()
+	if ip.Is4() {
+		return ip.String()
+	}
+	return netip.PrefixFrom(ip, 64).Masked().String()
 }

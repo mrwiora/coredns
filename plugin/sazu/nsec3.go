@@ -7,36 +7,11 @@ import (
 	"github.com/miekg/dns"
 )
 
-// This file implements RFC 5155 NSEC3, the opt-in alternative to plain
-// NSEC (nsec.go) that additionally hides a zone's actual name set from
-// enumeration ("zone walking") by proving non-existence over hashed
-// owner names instead of the names themselves. nsec.go's own top-of-file
-// comment already covers why that privacy property is separate from
-// what a *correct* NXDOMAIN/NODATA proof needs, and why plain NSEC was
-// implemented first; this is that separate property, for a customer who
-// specifically wants it. Selecting it is a push-time decision the
-// customer's own signer makes (BuildFullZonePushNSEC3 /
-// BuildFullZonePushSplitNSEC3, and sazuctl's "publish-zone -nsec3" flag) --
-// the server just stores and serves whichever chain it was given,
-// exactly as for plain NSEC.
-//
-// SAZU's split-signing model gives the server one advantage a resolver
-// walking an NSEC3 chain blind doesn't have: the server holds every
-// pushed name in plaintext in memory regardless of which scheme is in
-// use -- hiding names from wire responses never requires hiding them
-// from the server that has to serve correct answers. So
-// ZoneData.NegativeProof's NSEC3 path computes the closest encloser and
-// next-closer name directly from the real name set (reusing nsec.go's
-// own ClosestEncloser), then hashes exactly the specific candidate names
-// it needs a proof for, rather than needing to guess by hash-ring
-// traversal alone the way an external NSEC3 tool would.
-//
-// Scoped simplification, stated up front rather than left implicit: SAZU
-// zones have no delegations of their own (no NS RRset below the apex),
-// so there is no per-delegation Opt-Out distinction (RFC 5155 §6) to
-// make -- NSEC3Options.OptOut, when set, applies uniformly to every
-// record in the chain. A zone that did have its own delegations would
-// need per-delegation Opt-Out handling this package doesn't implement.
+// Authenticated denial of existence with hashed owner names (RFC 5155).
+// As with NSEC, the zone owner's signer builds and signs the complete
+// chain (BuildNSEC3Chain) and the server serves the stored records; it
+// knows the zone's real names, so it hashes exactly the names a proof
+// needs (lookup.go).
 
 // NSEC3Options configures BuildNSEC3Chain / BuildFullZonePushNSEC3.
 // Iterations and Salt default to RFC 9276's current guidance (zero
@@ -58,34 +33,50 @@ func NSEC3Hash(name string, param *dns.NSEC3PARAM) string {
 	return strings.ToLower(dns.HashName(dns.Fqdn(name), param.Hash, param.Iterations, param.Salt))
 }
 
-// BuildNSEC3Chain is BuildNSECChain's RFC 5155 equivalent: one NSEC3 RR
-// per distinct owner name in adds, ordered by hash value (RFC 5155's
-// hash order and RFC 4034's canonical name order are both total orders
-// over a fixed alphabet compared byte-by-byte; since every name hashes
-// to the same 20-byte SHA-1 output, plain string comparison of the
-// resulting fixed-length base32hex text sorts the chain correctly),
-// plus the NSEC3PARAM record identifying the hash parameters used.
-// TTL, like BuildNSECChain's, is the zone's SOA minimum (RFC 5155 §3
-// makes the same requirement RFC 4034 §4 makes for NSEC).
+// BuildNSEC3Chain builds the NSEC3 chain and NSEC3PARAM record (RFC
+// 5155 §7.1) for a full push's content adds: one NSEC3 per authoritative
+// name, delegation point and empty non-terminal, in hash order, circular.
+// Names below a zone cut (glue) are left out. With OptOut, delegations
+// without a DS (and empty non-terminals only they create) are left out
+// too, and every record carries the Opt-Out flag (RFC 5155 §6). An NSEC3's
+// bitmap lists RRSIG only when its name owns signed RRsets: not for an
+// empty non-terminal or a delegation without DS.
 func BuildNSEC3Chain(soa *dns.SOA, adds []dns.RR, opts NSEC3Options) []dns.RR {
-	apex := dns.Fqdn(soa.Hdr.Name)
+	apex := strings.ToLower(dns.Fqdn(soa.Hdr.Name))
+	ttl := denialTTL(soa)
 	param := &dns.NSEC3PARAM{
-		Hdr:        dns.RR_Header{Name: apex, Rrtype: dns.TypeNSEC3PARAM, Class: dns.ClassINET, Ttl: soa.Minttl},
+		Hdr:        dns.RR_Header{Name: apex, Rrtype: dns.TypeNSEC3PARAM, Class: dns.ClassINET, Ttl: ttl},
 		Hash:       dns.SHA1,
 		Iterations: opts.Iterations,
 		SaltLength: uint8(len(opts.Salt)) / 2,
 		Salt:       opts.Salt,
 	}
 
-	typesByName := map[string]map[uint16]bool{strings.ToLower(apex): {}}
-	for _, rr := range adds {
-		name := strings.ToLower(dns.Fqdn(rr.Header().Name))
-		if typesByName[name] == nil {
-			typesByName[name] = make(map[uint16]bool)
+	typesByName, cuts := denialTypes(apex, adds)
+	typesByName[apex][dns.TypeNSEC3PARAM] = true
+	insecure := func(name string) bool { return cuts[name] && !typesByName[name][dns.TypeDS] }
+	if opts.OptOut {
+		for name := range typesByName {
+			if insecure(name) {
+				delete(typesByName, name)
+			}
 		}
-		typesByName[name][rr.Header().Rrtype] = true
 	}
-	typesByName[strings.ToLower(apex)][dns.TypeNSEC3PARAM] = true
+	signed := make(map[string]bool, len(typesByName))
+	for name := range typesByName {
+		signed[name] = !insecure(name)
+	}
+	// Empty non-terminals between each name and the apex.
+	for name := range signed {
+		for n := name; n != apex; {
+			i, _ := dns.NextLabel(n, 0)
+			n = n[i:]
+			if _, ok := typesByName[n]; ok || n == "" {
+				break
+			}
+			typesByName[n] = map[uint16]bool{}
+		}
+	}
 
 	type hashedName struct{ hash, name string }
 	hashed := make([]hashedName, 0, len(typesByName))
@@ -102,23 +93,19 @@ func BuildNSEC3Chain(soa *dns.SOA, adds []dns.RR, opts NSEC3Options) []dns.RR {
 	out := make([]dns.RR, 0, len(hashed)+1)
 	for i, h := range hashed {
 		types := typesByName[h.name]
-		types[dns.TypeRRSIG] = true
-		bitmap := make([]uint16, 0, len(types))
-		for t := range types {
-			bitmap = append(bitmap, t)
+		if signed[h.name] {
+			types[dns.TypeRRSIG] = true
 		}
-		sort.Slice(bitmap, func(a, b int) bool { return bitmap[a] < bitmap[b] }) // packDataNsec requires ascending order
-
 		out = append(out, &dns.NSEC3{
-			Hdr:        dns.RR_Header{Name: h.hash + "." + apex, Rrtype: dns.TypeNSEC3, Class: dns.ClassINET, Ttl: soa.Minttl},
+			Hdr:        dns.RR_Header{Name: h.hash + "." + apex, Rrtype: dns.TypeNSEC3, Class: dns.ClassINET, Ttl: ttl},
 			Hash:       dns.SHA1,
 			Flags:      flags,
 			Iterations: opts.Iterations,
 			SaltLength: param.SaltLength,
 			Salt:       opts.Salt,
-			HashLength: 20, // SHA-1: RFC 5155 defines no other hash algorithm yet
+			HashLength: 20, // SHA-1, the only hash RFC 5155 defines
 			NextDomain: hashed[(i+1)%len(hashed)].hash,
-			TypeBitMap: bitmap,
+			TypeBitMap: sortedTypes(types),
 		})
 	}
 	return append(out, param)
@@ -128,9 +115,7 @@ func BuildNSEC3Chain(soa *dns.SOA, adds []dns.RR, opts NSEC3Options) []dns.RR {
 // path from closestEncloser to qname: closestEncloser itself, plus
 // exactly one more label toward qname. Well-defined whenever
 // closestEncloser is a true suffix of qname with strictly fewer labels,
-// which is always the case for the closest encloser NegativeProof's
-// NSEC3 path computes (ClosestEncloser never returns qname itself for a
-// name proven not to exist).
+// which holds for the closest encloser of a name that doesn't exist.
 func NextCloserName(qname, closestEncloser string) string {
 	qLabels := dns.SplitDomainName(dns.Fqdn(qname))
 	ceLabels := len(dns.SplitDomainName(dns.Fqdn(closestEncloser)))

@@ -10,13 +10,10 @@ import (
 	"github.com/miekg/dns"
 )
 
-// GenerateEd25519Key creates a fresh Ed25519 zone key for owner, suitable
-// for both SIG(0) transaction signing and DNSSEC -- SAZU's central design
-// decision (the design doc's §9.1): one key does both jobs, so there is
-// never a separate key-placement step. Ed25519 is the default here for the
-// same reason the earlier Rust/rDNS client tooling defaulted to it: it's
-// what Go's stdlib (like `ring` on the Rust side) can generate and sign
-// with directly, no external key material or ASN.1 wrangling required.
+// GenerateEd25519Key creates an Ed25519 zone key for owner (a KSK when
+// ksk is set), usable both for DNSSEC and for SIG(0) (§13.1). Ed25519 is
+// the default because Go's standard library generates and signs with it
+// directly.
 func GenerateEd25519Key(owner string, ksk bool) (*dns.DNSKEY, ed25519.PrivateKey, error) {
 	k := newDNSKEY(owner, ksk)
 	priv, err := k.Generate(256)
@@ -53,10 +50,9 @@ func SavePrivateKey(path string, key *dns.DNSKEY, priv ed25519.PrivateKey) error
 
 // SaveEncryptedPrivateKey writes priv to path exactly as SavePrivateKey
 // would, except encrypted at rest with a key derived from passphrase --
-// §10.8's key custody hardening (see keycrypt.go). The file is no longer
-// directly readable by standard DNSSEC tooling; decrypt it back to plain
-// BIND format first (LoadPrivateKey with the same passphrase, then
-// SavePrivateKey) if that's ever needed.
+// §11.6's key custody hardening (see keycrypt.go). Standard DNSSEC
+// tooling can't read the result; LoadPrivateKey with the passphrase, then
+// SavePrivateKey, turns it back into a plain BIND-format file.
 func SaveEncryptedPrivateKey(path string, key *dns.DNSKEY, priv ed25519.PrivateKey, passphrase []byte) error {
 	enc, err := encryptKeyFileBytes([]byte(key.PrivateKeyString(priv)), passphrase)
 	if err != nil {

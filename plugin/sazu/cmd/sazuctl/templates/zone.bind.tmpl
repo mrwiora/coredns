@@ -1,7 +1,7 @@
 {{define "zone.bind.tmpl"}}; SAZU zone definition for {{.Zone}}
 ;
 ; Edit this file, then push it:
-;   sazuctl push-zone -zone {{.Zone}} -key <your-key> -zonefile {{.FileName}} -target <host:port>
+;   sazuctl publish-zone -zone {{.Zone}} -zsk-key <your-zsk> -zonefile {{.FileName}} -target <host:port>
 ;
 ; The serial below is today's date as YYYYMMDD00 (a common convention,
 ; not a requirement) -- if you push this zone more than once today, bump

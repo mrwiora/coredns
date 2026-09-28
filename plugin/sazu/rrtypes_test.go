@@ -73,11 +73,11 @@ func rrTypeCases(zone string) []rrTypeCase {
 		{
 			name: "NS",
 			rr: func(z string) dns.RR {
-				return &dns.NS{Hdr: dns.RR_Header{Name: "delegated." + z, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300},
-					Ns: "ns1.delegated." + z}
+				return &dns.NS{Hdr: dns.RR_Header{Name: z, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300},
+					Ns: "ns1." + z}
 			},
 			qtype: dns.TypeNS,
-			qname: func(z string) string { return "delegated." + z },
+			qname: func(z string) string { return z },
 		},
 		{
 			name: "SRV",

@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
-	"mime"
 	"net/http"
 	"strings"
 
@@ -19,37 +17,8 @@ import (
 // MimeType is the DoH mimetype that should be used.
 const MimeType = "application/dns-message"
 
-// JSONMimeType marks a POST body as a JSONWireEnvelope rather than raw
-// DNS wire bytes -- not an RFC 8484 content type (DoH itself defines
-// none for JSON), but a minimal convention this package also recognizes
-// so a caller with no easy way to send a raw binary POST body (some
-// HTTP client libraries, browser fetch() call sites, etc.) still has a
-// byte-exact way to carry an arbitrary DNS message, opcode included, in
-// JSON. See JSONWireEnvelope's own doc comment for why this wraps raw
-// bytes rather than representing the message's fields structurally.
-const JSONMimeType = "application/dns-message+json"
-
 // Path is the URL path that should be used.
 const Path = "/dns-query"
-
-// JSONWireEnvelope carries a DNS message's exact wire bytes as base64
-// inside a small JSON object, for a POST body with Content-Type
-// JSONMimeType (or the generic "application/json"). This is
-// deliberately NOT a structural (RFC 8427) JSON representation of the
-// message's individual fields: some DNS message authentication schemes
-// (e.g. SIG(0), RFC 2931) sign the literal wire bytes a sender
-// transmitted, and there is no generally lossless mapping back from
-// parsed JSON fields to that exact byte sequence (canonical name
-// compression, casing, and section ordering are all wire-level details
-// a structural JSON encoding does not have to preserve). Wrapping the
-// same raw bytes in base64 has no such problem -- decoding it recovers
-// them exactly, so any authentication computed over the original wire
-// form still verifies.
-type JSONWireEnvelope struct {
-	// Wire is the message's raw wire bytes, base64-encoded (standard
-	// encoding, i.e. encoding/base64.StdEncoding).
-	Wire string `json:"wire"`
-}
 
 // NewRequest returns a new DoH request given a HTTP method, URL and dns.Msg.
 //
@@ -152,53 +121,15 @@ func RequestToMsgWireWithAccept(req *http.Request, accept dns.MsgAcceptFunc) (*d
 	}
 }
 
-// requestToMsgPost extracts the dns message from the request body: for
-// Content-Type JSONMimeType or "application/json", the body is a
-// JSONWireEnvelope wrapping the wire bytes in base64; for anything else
-// (including the RFC 8484 default, MimeType, and an unset Content-Type),
-// the body is exactly the wire bytes themselves.
+// requestToMsgPost extracts the dns message from the request body.
 func requestToMsgPost(req *http.Request, accept dns.MsgAcceptFunc) (*dns.Msg, []byte, error) {
 	defer req.Body.Close()
 	buf, err := io.ReadAll(http.MaxBytesReader(nil, req.Body, maxDNSQuerySize))
 	if err != nil {
 		return nil, nil, err
 	}
-	if isJSONContentType(req.Header.Get("Content-Type")) {
-		buf, err = decodeJSONWireEnvelope(buf)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
 	m, err := dnsutil.UnpackRequestWithAcceptFunc(buf, accept)
 	return m, buf, err
-}
-
-// isJSONContentType reports whether ct names a JSON-envelope POST body
-// (JSONMimeType, or the generic "application/json" for a caller that has
-// no easy way to set a bespoke content type).
-func isJSONContentType(ct string) bool {
-	if ct == "" {
-		return false
-	}
-	mt, _, err := mime.ParseMediaType(ct)
-	if err != nil {
-		return false
-	}
-	return mt == JSONMimeType || mt == "application/json"
-}
-
-// decodeJSONWireEnvelope parses buf as a JSONWireEnvelope and returns
-// the raw wire bytes it carries.
-func decodeJSONWireEnvelope(buf []byte) ([]byte, error) {
-	var env JSONWireEnvelope
-	if err := json.Unmarshal(buf, &env); err != nil {
-		return nil, fmt.Errorf("decoding JSON wire envelope: %w", err)
-	}
-	wire, err := base64.StdEncoding.DecodeString(env.Wire)
-	if err != nil {
-		return nil, fmt.Errorf("decoding JSON wire envelope's base64 wire field: %w", err)
-	}
-	return wire, nil
 }
 
 const maxDNSQuerySize = 65536

@@ -17,9 +17,17 @@ import (
 // at any given moment -- exactly the scope SIG(0) verification needs it
 // at, since verification happens synchronously while handling that same
 // request.
+//
+// The key includes the transport: a UDP and a TCP address print
+// identically ("ip:port"), and a spoofed UDP packet must never be able
+// to collide with a TCP client's entry. Correlation is still only a
+// hint -- serveUpdate re-parses the captured bytes and processes those,
+// never the separately parsed request, so a collision can at worst make
+// a request fail, not change what gets applied.
 type rawKey struct {
-	addr string
-	id   uint16
+	network string
+	addr    string
+	id      uint16
 }
 
 type capturedEntry struct {
@@ -82,7 +90,7 @@ func (c *RawCapture) Put(addr net.Addr, raw []byte) {
 		return // too short to even contain a message ID
 	}
 	id := binary.BigEndian.Uint16(raw[0:2])
-	key := rawKey{addr: addr.String(), id: id}
+	key := rawKey{network: addr.Network(), addr: addr.String(), id: id}
 	cp := append([]byte(nil), raw...)
 
 	c.mu.Lock()
@@ -112,7 +120,7 @@ func (c *RawCapture) evictOldestLocked() {
 // Take retrieves and removes the raw bytes captured for a request from
 // addr with the given DNS message id, if any and not yet expired.
 func (c *RawCapture) Take(addr net.Addr, id uint16) ([]byte, bool) {
-	key := rawKey{addr: addr.String(), id: id}
+	key := rawKey{network: addr.Network(), addr: addr.String(), id: id}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -151,7 +159,7 @@ type capturingReader struct {
 
 func (r *capturingReader) ReadTCP(conn net.Conn, timeout time.Duration) ([]byte, error) {
 	m, err := r.inner.ReadTCP(conn, timeout)
-	if err == nil {
+	if err == nil && isUpdateRequest(m) {
 		r.capture.Put(conn.RemoteAddr(), m)
 	}
 	return m, err
@@ -159,7 +167,7 @@ func (r *capturingReader) ReadTCP(conn net.Conn, timeout time.Duration) ([]byte,
 
 func (r *capturingReader) ReadUDP(conn *net.UDPConn, timeout time.Duration) ([]byte, *dns.SessionUDP, error) {
 	m, s, err := r.inner.ReadUDP(conn, timeout)
-	if err == nil && s != nil {
+	if err == nil && s != nil && isUpdateRequest(m) {
 		r.capture.Put(s.RemoteAddr(), m)
 	}
 	return m, s, err
@@ -167,8 +175,21 @@ func (r *capturingReader) ReadUDP(conn *net.UDPConn, timeout time.Duration) ([]b
 
 func (r *capturingReader) ReadPacketConn(conn net.PacketConn, timeout time.Duration) ([]byte, net.Addr, error) {
 	m, addr, err := r.innerPC.ReadPacketConn(conn, timeout)
-	if err == nil && addr != nil {
+	if err == nil && addr != nil && isUpdateRequest(m) {
 		r.capture.Put(addr, m)
 	}
 	return m, addr, err
+}
+
+// isUpdateRequest reports whether m's header marks it as an UPDATE
+// request (QR clear, opcode 5) -- the only messages anything ever Takes
+// bytes for. Everything else on the listener (every ordinary query) is
+// passed through without being stored, so a flood of cheap queries can't
+// evict a pending UPDATE's entry from the bounded table. Only the header
+// is inspected; the message itself is parsed later, as usual.
+func isUpdateRequest(m []byte) bool {
+	if len(m) < 12 {
+		return false
+	}
+	return m[2]&0x80 == 0 && (m[2]>>3)&0x0f == dns.OpcodeUpdate
 }

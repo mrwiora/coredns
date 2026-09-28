@@ -2,8 +2,6 @@ package sazu
 
 import (
 	"bytes"
-	"encoding/base64"
-	"encoding/json"
 	"io"
 	"net"
 	"net/http"
@@ -29,8 +27,7 @@ import (
 //
 // No TLS: httptest.NewServer wraps ServerHTTPS.ServeHTTP with its own
 // real listener over plain HTTP, which exercises this transport's actual
-// request-processing logic (opcode gating, raw-byte propagation, the
-// JSON wire envelope) exactly as thoroughly as doing it over a real TLS
+// request-processing logic (opcode gating, raw-byte propagation) exactly as thoroughly as doing it over a real TLS
 // handshake would -- TLS termination itself is core/dnsserver's own,
 // already-tested concern, not something this plugin's tests need to
 // re-verify.
@@ -57,24 +54,12 @@ func serveThroughRealHTTPSServer(t *testing.T, s *Sazu) string {
 	return httpSrv.URL
 }
 
-// sendOverHTTPS POSTs wire to baseURL+doh.Path -- as raw
-// application/dns-message bytes, or (asJSON) as a doh.JSONWireEnvelope
-// -- and returns the parsed response.
-func sendOverHTTPS(t *testing.T, baseURL string, wire []byte, asJSON bool) *dns.Msg {
+// sendOverHTTPS POSTs wire to baseURL+doh.Path as an RFC 8484
+// application/dns-message body and returns the parsed response.
+func sendOverHTTPS(t *testing.T, baseURL string, wire []byte) *dns.Msg {
 	t.Helper()
-
-	var body io.Reader
+	body := bytes.NewReader(wire)
 	contentType := doh.MimeType
-	if asJSON {
-		envelope, err := json.Marshal(doh.JSONWireEnvelope{Wire: base64.StdEncoding.EncodeToString(wire)})
-		if err != nil {
-			t.Fatalf("marshaling JSON wire envelope: %v", err)
-		}
-		body = bytes.NewReader(envelope)
-		contentType = doh.JSONMimeType
-	} else {
-		body = bytes.NewReader(wire)
-	}
 
 	req, err := http.NewRequest(http.MethodPost, baseURL+doh.Path, body)
 	if err != nil {
@@ -98,7 +83,7 @@ func sendOverHTTPS(t *testing.T, baseURL string, wire []byte, asJSON bool) *dns.
 	return m
 }
 
-// TestOnboardOverHTTPSRawWireBytes proves §7.3's HTTPS carrier for
+// TestOnboardOverHTTPSRawWireBytes proves §9.2's HTTPS carrier for
 // real: a first-contact push sent as a raw application/dns-message POST
 // -- the RFC 8484 DoH convention, reused as-is -- reaches this plugin's
 // exact same authenticate-evaluate-apply pipeline every other transport
@@ -125,48 +110,9 @@ func TestOnboardOverHTTPSRawWireBytes(t *testing.T) {
 		t.Fatalf("signing: %v", err)
 	}
 
-	resp := sendOverHTTPS(t, baseURL, wire, false)
+	resp := sendOverHTTPS(t, baseURL, wire)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("onboarding push over HTTPS rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
-	}
-	if pinned, ok := s.Keys.Get("example.org."); !ok || pinned.KSK.DNSKEY.PublicKey != key.PublicKey {
-		t.Fatalf("expected the candidate key to be pinned after a successful HTTPS push")
-	}
-}
-
-// TestOnboardOverHTTPSJSONWireEnvelope is the same proof as
-// TestOnboardOverHTTPSRawWireBytes, but via the JSON wire envelope --
-// {"wire": "<base64>"} -- rather than a raw binary POST body. The
-// envelope is decoded back to the exact original wire bytes entirely
-// inside core/dnsserver/plugin/pkg/doh, before this plugin ever sees the
-// request, so SIG(0) verification succeeds identically either way: this
-// specifically proves that decoding step preserves byte-for-byte
-// fidelity all the way through to a real SIG(0) verification, not just
-// that the bytes come back equal in isolation (already covered by the
-// doh package's own unit tests).
-func TestOnboardOverHTTPSJSONWireEnvelope(t *testing.T) {
-	s := newTestSazu("example.org.")
-	baseURL := serveThroughRealHTTPSServer(t, s)
-
-	key, priv, err := GenerateEd25519Key("example.org.", true)
-	if err != nil {
-		t.Fatalf("generating key: %v", err)
-	}
-	soa := testSOA(1)
-	rrs := []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}
-	push, err := BuildFullZonePush("example.org.", soa, rrs, key, priv, nil)
-	if err != nil {
-		t.Fatalf("building push: %v", err)
-	}
-	now := time.Now()
-	wire, err := SignUpdate(push, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing: %v", err)
-	}
-
-	resp := sendOverHTTPS(t, baseURL, wire, true)
-	if resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("onboarding push over the JSON wire envelope rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 	if pinned, ok := s.Keys.Get("example.org."); !ok || pinned.KSK.DNSKEY.PublicKey != key.PublicKey {
 		t.Fatalf("expected the candidate key to be pinned after a successful HTTPS push")
@@ -177,7 +123,7 @@ func TestOnboardOverHTTPSJSONWireEnvelope(t *testing.T) {
 // already-pinned-key push also works over HTTPS, not just first
 // contact -- the same two-step onboard-then-push-again shape
 // TestOrdinaryPartialPushAfterOnboarding already proves for UDP/TCP.
-func TestPartialPushOverHTTPSAfterOnboarding(t *testing.T) {
+func TestContentPushOverHTTPSAfterOnboarding(t *testing.T) {
 	s := newTestSazu("example.org.")
 	baseURL := serveThroughRealHTTPSServer(t, s)
 
@@ -196,24 +142,22 @@ func TestPartialPushOverHTTPSAfterOnboarding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("signing onboarding push: %v", err)
 	}
-	if resp := sendOverHTTPS(t, baseURL, onboardWire, false); resp.Rcode != dns.RcodeSuccess {
+	if resp := sendOverHTTPS(t, baseURL, onboardWire); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
+	push, err := BuildContentPush("example.org.", testSOA(2),
+		[]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10)), testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, nil)
+	if err != nil {
+		t.Fatalf("BuildContentPush: %v", err)
+	}
 	now = time.Now()
-	signedMail, err := SignZoneContent([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	pushWire, err := SignUpdate(push, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
+		t.Fatalf("signing content push: %v", err)
 	}
-	partial := new(dns.Msg)
-	partial.SetUpdate("example.org.")
-	partial.Insert(signedMail)
-	partialWire, err := SignUpdate(partial, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing partial push: %v", err)
-	}
-	if resp := sendOverHTTPS(t, baseURL, partialWire, false); resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("partial push over HTTPS rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+	if resp := sendOverHTTPS(t, baseURL, pushWire); resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("content push over HTTPS rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
 	z, ok := s.Store.Get("example.org.")

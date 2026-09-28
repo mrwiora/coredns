@@ -104,9 +104,8 @@ func sendRawUDP(t *testing.T, addr string, wire []byte) *dns.Msg {
 // bigger than this: every extra byte only costs them packets-per-second,
 // buying nothing. This is deliberately smaller than a realistic
 // legitimate push (which always includes at least a SOA and, from a full
-// push, an NSEC chain and RRSIGs -- routinely well over 512 bytes, as
-// found the hard way testing this package against real UDP paths
-// elsewhere) specifically so the test exercises connectionOriented's own
+// push, an NSEC chain and RRSIGs -- routinely well over 512 bytes)
+// specifically so the test exercises connectionOriented's own
 // gate rather than incidentally tripping RFC 1035's unrelated 512-byte
 // UDP truncation limit first.
 func minimalFirstContactWire(t *testing.T, zone string, key *dns.DNSKEY, priv ed25519.PrivateKey) []byte {
@@ -244,11 +243,11 @@ func TestKeyRolloverOverUDPIsRefused(t *testing.T) {
 	}
 }
 
-// TestOrdinaryPartialPushOverUDPStillWorks proves the gate is scoped to
+// TestOrdinaryContentPushOverUDPStillWorks proves the gate is scoped to
 // first-contact/rollover specifically -- an ordinary push to an
 // already-pinned zone (which never touches the chain-of-trust walk this
 // gate protects) still works over UDP exactly as before.
-func TestOrdinaryPartialPushOverUDPStillWorks(t *testing.T) {
+func TestOrdinaryContentPushOverUDPStillWorks(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
 
@@ -269,21 +268,20 @@ func TestOrdinaryPartialPushOverUDPStillWorks(t *testing.T) {
 		t.Fatalf("onboarding push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
+	// Deliberately content-free (SOA and its chain only), so the whole
+	// signed push still fits one plain, EDNS-less UDP datagram.
+	push, err := BuildContentPush("example.org.", testSOA(2), nil, key, priv, nil)
+	if err != nil {
+		t.Fatalf("BuildContentPush: %v", err)
+	}
 	now = time.Now()
-	signedMail, err := SignZoneContent([]dns.RR{testA("mail.example.org.", net.IPv4(203, 0, 113, 20))}, key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	pushWire, err := SignUpdate(push, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
+		t.Fatalf("signing content push: %v", err)
 	}
-	partial := new(dns.Msg)
-	partial.SetUpdate("example.org.")
-	partial.Insert(signedMail)
-	partialWire, err := SignUpdate(partial, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing partial push: %v", err)
-	}
-	resp := sendRawUDP(t, addr, partialWire)
+	resp := sendRawUDP(t, addr, pushWire)
 	if resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("ordinary partial push over UDP rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+		t.Fatalf("ordinary content push over UDP rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 }
 

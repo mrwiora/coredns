@@ -144,6 +144,7 @@ func TestRawCaptureEndToEndThroughUDPDecorateReaderFunc(t *testing.T) {
 	}
 	cfg.AddPlugin(func(plugin.Handler) plugin.Handler { return handler })
 	cfg.UDPDecorateReaderFunc = capture.DecorateReaderFunc
+	cfg.AllowOpcode(dns.OpcodeUpdate)
 
 	s, err := dnsserver.NewServer("127.0.0.1:0", []*dnsserver.Config{cfg})
 	if err != nil {
@@ -160,7 +161,7 @@ func TestRawCaptureEndToEndThroughUDPDecorateReaderFunc(t *testing.T) {
 	defer s.Stop()
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	m.SetUpdate("example.com.") // only UPDATE requests are captured
 	if _, err := dns.Exchange(m, pc.LocalAddr().String()); err != nil {
 		t.Fatalf("dns.Exchange failed: %v", err)
 	}
@@ -190,6 +191,7 @@ func TestRawCaptureEndToEndThroughTCPDecorateReaderFunc(t *testing.T) {
 	}
 	cfg.AddPlugin(func(plugin.Handler) plugin.Handler { return handler })
 	cfg.TCPDecorateReaderFunc = capture.DecorateReaderFunc
+	cfg.AllowOpcode(dns.OpcodeUpdate)
 
 	s, err := dnsserver.NewServer("127.0.0.1:0", []*dnsserver.Config{cfg})
 	if err != nil {
@@ -206,7 +208,7 @@ func TestRawCaptureEndToEndThroughTCPDecorateReaderFunc(t *testing.T) {
 	defer s.Stop()
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	m.SetUpdate("example.com.") // only UPDATE requests are captured
 	co, err := dns.DialTimeout("tcp", l.Addr().String(), 2*time.Second)
 	if err != nil {
 		t.Fatalf("DialTimeout failed: %v", err)
@@ -224,5 +226,38 @@ func TestRawCaptureEndToEndThroughTCPDecorateReaderFunc(t *testing.T) {
 	}
 	if !handler.matched.Load() {
 		t.Fatalf("expected the captured bytes to decode to the same question that was sent")
+	}
+}
+
+// TestIsUpdateRequest: only UPDATE requests are captured, so a flood of
+// ordinary queries can't evict a pending UPDATE's entry.
+func TestIsUpdateRequest(t *testing.T) {
+	pack := func(m *dns.Msg) []byte {
+		t.Helper()
+		b, err := m.Pack()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	u := new(dns.Msg)
+	u.SetUpdate("example.com.")
+	resp := new(dns.Msg)
+	resp.SetUpdate("example.com.")
+	resp.Response = true
+
+	if isUpdateRequest(pack(q)) {
+		t.Errorf("an ordinary query must not be captured")
+	}
+	if !isUpdateRequest(pack(u)) {
+		t.Errorf("an UPDATE request must be captured")
+	}
+	if isUpdateRequest(pack(resp)) {
+		t.Errorf("an UPDATE response must not be captured")
+	}
+	if isUpdateRequest([]byte{0, 1, 0x28}) {
+		t.Errorf("a truncated header must not be captured")
 	}
 }

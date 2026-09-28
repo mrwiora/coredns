@@ -10,7 +10,7 @@ import (
 // decommissionOwnerPrefix names the reserved owner SAZU treats as a
 // request to remove a zone entirely: a TXT RRset at
 // "_sazu-decommission.<zone>", the same piggyback-on-an-ordinary-RRset-op
-// convention contact.go already uses for the §10.6 registration-contact
+// convention contact.go already uses for the §11.4 registration-contact
 // record. This is the one operation that removes a zone's KSK along with
 // everything else -- there is otherwise no way to fully un-onboard a
 // zone at all: every ordinary RFC 2136 delete-shaped op deliberately

@@ -29,8 +29,7 @@ so they aren't relitigated from scratch later:
 - **A dedicated cluster port**, then **reusing the HTTPS/DoH carrier**,
   before settling on plain DNS-over-TCP (§3). A dedicated port needs a
   second listener with its own lifecycle; the HTTPS/DoH carrier drags in
-  HTTP semantics (POST bodies, content types, a JSON envelope option) that
-  buy nothing for server-to-server traffic and, worse, would make gossip
+  HTTP semantics that buy nothing for server-to-server traffic and, worse, would make gossip
   depend on an operator having configured DoH at all -- plenty of real
   deployments run plain DNS only. Reserved-name DNS messages over the
   existing plain listener need no new listener and no such dependency.

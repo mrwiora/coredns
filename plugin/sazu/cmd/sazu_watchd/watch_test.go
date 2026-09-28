@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/coredns/coredns/plugin/sazu"
 
@@ -96,6 +97,9 @@ func TestCheckOnceAlertsOnTransitionFromOKToFailing(t *testing.T) {
 	}
 
 	v.err = map[string]error{"example.org.": fmt.Errorf("no DS published")}
+	if early, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -123,6 +127,9 @@ func TestCheckOnceAlertsOnRecovery(t *testing.T) {
 	}
 
 	v.err = nil
+	if early, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -164,6 +171,9 @@ func TestCheckOnceHandlesMultipleZonesIndependently(t *testing.T) {
 	}
 
 	v.err = map[string]error{"a.example.": fmt.Errorf("broken")}
+	if early, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -221,6 +231,9 @@ func TestCheckOnceAlertsWhenARegisteredZSKGoesMissing(t *testing.T) {
 	}
 
 	f.served["example.org."] = map[uint16]bool{} // key no longer served
+	if early, err := checkOnce(db, fakeValidator{}, f, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, fakeValidator{}, f, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -249,6 +262,9 @@ func TestCheckOnceAlertsWhenAMissingZSKIsRestored(t *testing.T) {
 	}
 
 	f.served["example.org."] = map[uint16]bool{tag: true}
+	if early, err := checkOnce(db, fakeValidator{}, f, state); err != nil || len(early) != 0 {
+		t.Fatalf("expected no alert after a single differing pass (debounce), got %+v (%v)", early, err)
+	}
 	alerts, err := checkOnce(db, fakeValidator{}, f, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
@@ -336,11 +352,161 @@ func TestCheckOnceAlertWithNoRegisteredContactStillReported(t *testing.T) {
 		t.Fatalf("first checkOnce: %v", err)
 	}
 	v.err = map[string]error{"example.org.": fmt.Errorf("broken")}
+	if _, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil { // debounce: first differing pass
+		t.Fatal(err)
+	}
 	alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
 	if err != nil {
 		t.Fatalf("second checkOnce: %v", err)
 	}
 	if len(alerts) != 1 || len(alerts[0].Addresses) != 0 {
 		t.Fatalf("expected the transition still reported, with no addresses, got %+v", alerts)
+	}
+}
+
+// commitSignedSOA stores a SOA plus an RRSIG over it expiring at expires
+// -- enough for checkSignatureExpiry, which only reads expirations.
+func commitSignedSOA(t *testing.T, db *sazu.DB, zone string, serial uint32, expires time.Time) {
+	t.Helper()
+	soa := &dns.SOA{Hdr: dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600},
+		Ns: "ns1." + dns.Fqdn(zone), Mbox: "hostmaster." + dns.Fqdn(zone), Serial: serial, Refresh: 3600, Retry: 900, Expire: 604800, Minttl: 3600}
+	sig := &dns.RRSIG{Hdr: dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		TypeCovered: dns.TypeSOA, Algorithm: dns.ED25519, Labels: 2, OrigTtl: 3600, KeyTag: 1, SignerName: dns.Fqdn(zone),
+		Inception: uint32(time.Now().Add(-time.Hour).Unix()), Expiration: uint32(expires.Unix()), Signature: "AAAA"}
+	if err := db.CommitUpdate(zone, nil, []dns.RR{soa, sig}, dns.ClassINET, nil); err != nil {
+		t.Fatalf("CommitUpdate: %v", err)
+	}
+}
+
+// TestCheckOnceWarnsBeforeSignaturesExpire: a zone whose earliest RRSIG
+// expires within the warning window alerts immediately -- even on the
+// first pass, since a deadline has no baseline to establish -- stays
+// quiet while nothing changes, and recovers once a fresh push moves the
+// expiration out again.
+func TestCheckOnceWarnsBeforeSignaturesExpire(t *testing.T) {
+	db := openTestDB(t)
+	onboardTestZone(t, db, "example.org.", "mailto:ops@example.org")
+	soon := time.Now().Add(2 * 24 * time.Hour)
+	commitSignedSOA(t, db, "example.org.", 2, soon)
+
+	state := make(map[string]*zoneState)
+	validator := fakeValidator{}
+	fetcher := fakeDNSKEYFetcher{}
+
+	expiryAlerts := func() []Alert {
+		t.Helper()
+		alerts, err := checkOnce(db, validator, fetcher, state)
+		if err != nil {
+			t.Fatalf("checkOnce: %v", err)
+		}
+		var out []Alert
+		for _, a := range alerts {
+			if a.Kind == AlertSignatureExpiry {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+
+	first := expiryAlerts()
+	if len(first) != 1 || first[0].Recovered || first[0].Expires.Unix() != soon.Unix() {
+		t.Fatalf("expected one expiry warning on the first pass, got %+v", first)
+	}
+	if len(first[0].Addresses) != 1 {
+		t.Fatalf("expected the warning to go to the registered contact, got %v", first[0].Addresses)
+	}
+	if again := expiryAlerts(); len(again) != 0 {
+		t.Fatalf("expected no repeat warning while nothing changed, got %+v", again)
+	}
+
+	commitSignedSOA(t, db, "example.org.", 3, time.Now().Add(30*24*time.Hour))
+	recovered := expiryAlerts()
+	if len(recovered) != 1 || !recovered[0].Recovered {
+		t.Fatalf("expected a recovery once signatures were refreshed, got %+v", recovered)
+	}
+}
+
+// TestCheckOnceNoExpiryWarningForFreshSignatures: nothing to say about a
+// zone well outside the window, first pass included.
+func TestCheckOnceNoExpiryWarningForFreshSignatures(t *testing.T) {
+	db := openTestDB(t)
+	onboardTestZone(t, db, "example.org.")
+	commitSignedSOA(t, db, "example.org.", 2, time.Now().Add(30*24*time.Hour))
+	alerts, err := checkOnce(db, fakeValidator{}, fakeDNSKEYFetcher{}, make(map[string]*zoneState))
+	if err != nil {
+		t.Fatalf("checkOnce: %v", err)
+	}
+	for _, a := range alerts {
+		if a.Kind == AlertSignatureExpiry {
+			t.Fatalf("expected no expiry warning, got %+v", a)
+		}
+	}
+}
+
+// TestCheckOnceAlertsOnPendingRollover: a pending rollover alerts right
+// away -- first pass included -- and recovers once it's gone.
+func TestCheckOnceAlertsOnPendingRollover(t *testing.T) {
+	db := openTestDB(t)
+	onboardTestZone(t, db, "example.org.", "mailto:ops@example.org")
+	newKSK, _, err := sazu.GenerateEd25519Key("example.org.", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requested := time.Now().Truncate(time.Second)
+	if err := db.SetPendingRollover("example.org.", sazu.PendingRollover{KSK: newKSK, RequestedAt: requested}); err != nil {
+		t.Fatal(err)
+	}
+	state := make(map[string]*zoneState)
+	pendingAlerts := func() []Alert {
+		t.Helper()
+		alerts, err := checkOnce(db, fakeValidator{}, fakeDNSKEYFetcher{}, state)
+		if err != nil {
+			t.Fatalf("checkOnce: %v", err)
+		}
+		var out []Alert
+		for _, a := range alerts {
+			if a.Kind == AlertRolloverPending {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+
+	first := pendingAlerts()
+	if len(first) != 1 || first[0].Recovered || first[0].KeyTag != newKSK.KeyTag() || !first[0].Expires.Equal(requested) {
+		t.Fatalf("expected one pending-rollover alert on the first pass, got %+v", first)
+	}
+	if again := pendingAlerts(); len(again) != 0 {
+		t.Fatalf("expected no repeat alert, got %+v", again)
+	}
+	// Any control change clears it; a version bump is the simplest.
+	v := uint64(5)
+	if err := db.CommitUpdateWithVersion("example.org.", &v, nil, nil, dns.ClassINET, nil); err != nil {
+		t.Fatal(err)
+	}
+	if rec := pendingAlerts(); len(rec) != 1 || !rec[0].Recovered {
+		t.Fatalf("expected a recovery once it's no longer pending, got %+v", rec)
+	}
+}
+
+// TestCheckOnceTreatsUnreachableParentAsInconclusive: a pass that can't
+// reach the parent at all neither alerts nor counts towards the debounce.
+func TestCheckOnceTreatsUnreachableParentAsInconclusive(t *testing.T) {
+	db := openTestDB(t)
+	onboardTestZone(t, db, "example.org.")
+	v := fakeValidator{}
+	state := make(map[string]*zoneState)
+	if _, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state); err != nil {
+		t.Fatal(err)
+	}
+	v.err = map[string]error{"example.org.": &sazu.ChainError{Op: "query", Msg: "timeout"}}
+	for i := 0; i < 3; i++ {
+		alerts, err := checkOnce(db, v, fakeDNSKEYFetcher{}, state)
+		if err != nil || len(alerts) != 0 {
+			t.Fatalf("pass %d: expected no alert for an unreachable parent, got %+v (%v)", i, alerts, err)
+		}
+	}
+	if !state["example.org."].lastOK {
+		t.Fatalf("an unreachable parent must not change the last known outcome")
 	}
 }

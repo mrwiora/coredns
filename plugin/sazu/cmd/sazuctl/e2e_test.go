@@ -37,6 +37,14 @@ func startTestServer(t *testing.T) string {
 		Validator:                   sazu.NewValidator(),
 		Capture:                     sazu.NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
+		// Version checks enforced, as setup.go always does: these tests
+		// then also prove every sazuctl command that needs a version
+		// prerequisite actually sends the right one.
+		Versions: sazu.NewVersionRegistry(),
+		// Hold-down on, as setup.go defaults it: rotate-key -role ksk
+		// must then get through by co-signing with the old KSK.
+		Pending:          sazu.NewPendingRollovers(),
+		RolloverHoldDown: sazu.DefaultRolloverHoldDown,
 	}
 	cfg := &dnsserver.Config{
 		Zone:        ".",
@@ -715,5 +723,64 @@ func TestE2EZoneConvertProducesAPushableZoneFile(t *testing.T) {
 	}
 	if answer := queryA(t, addr, "www."+zone); len(answer) != 1 {
 		t.Fatalf("expected the converted zone file's www record to be servable, got %d answers", len(answer))
+	}
+}
+
+// TestE2EContactCarriesTheZoneVersion: contact is a control change, so
+// it needs the zone's current version -- read from -target, or given
+// with -zone-version for signing offline -- and a stale one is refused.
+func TestE2EContactCarriesTheZoneVersion(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-contact.example."
+	dir := t.TempDir()
+	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+
+	if err := runContact([]string{"-zone", zone, "-key", kskPath, "-address", "mailto:ops@example.org"}); err == nil {
+		t.Fatalf("expected contact with neither -target nor -zone-version to be refused up front")
+	}
+	if err := runContact([]string{"-zone", zone, "-key", kskPath, "-address", "mailto:ops@example.org", "-zone-version", "1"}); err != nil {
+		t.Fatalf("offline signing with -zone-version: %v", err)
+	}
+	err := runContact([]string{"-zone", zone, "-key", kskPath, "-address", "mailto:ops@example.org", "-zone-version", "0", "-target", addr})
+	if err == nil || !strings.Contains(err.Error(), "version changed") {
+		t.Fatalf("expected a stale -zone-version to be denied as such, got %v", err)
+	}
+	if err := runContact([]string{"-zone", zone, "-key", kskPath, "-address", "mailto:ops@example.org", "-target", addr}); err != nil {
+		t.Fatalf("contact: %v", err)
+	}
+	// The version moved on, so the same explicit version is now stale.
+	if err := runContact([]string{"-zone", zone, "-key", kskPath, "-clear", "-zone-version", "1", "-target", addr}); err == nil {
+		t.Fatalf("expected a change signed for an already-used version to be refused")
+	}
+}
+
+// TestE2ELostOldKeyRolloverIsHeldAndCanBeCancelled: without the old KSK
+// (-lost-old-key) a rollover is only recorded as pending; the current
+// KSK holder can cancel it with cancel-rollover.
+func TestE2ELostOldKeyRolloverIsHeldAndCanBeCancelled(t *testing.T) {
+	addr := startTestServer(t)
+	zone := "e2e-lost-key.example."
+	dir := t.TempDir()
+	kskPath := filepath.Join(dir, "ksk.private")
+	zskPath := filepath.Join(dir, "zsk.private")
+	if err := runPublishTrust([]string{"-zone", zone, "-key", kskPath, "-zsk-key", zskPath, "-target", addr}); err != nil {
+		t.Fatalf("publish-trust: %v", err)
+	}
+
+	newKSKPath := filepath.Join(dir, "new-ksk.private")
+	err := runRotateKey([]string{"-zone", zone, "-role", "ksk", "-lost-old-key", "-new-key", newKSKPath, "-target", addr})
+	if err == nil || !strings.Contains(err.Error(), "pending") || !strings.Contains(err.Error(), "not before") {
+		t.Fatalf("expected the DS-only rollover to be held as pending with its completion time, got %v", err)
+	}
+	if err := runCancelRollover([]string{"-zone", zone, "-ksk-key", kskPath, "-target", addr}); err != nil {
+		t.Fatalf("cancel-rollover: %v", err)
+	}
+	// The original KSK still manages the zone.
+	if err := runContact([]string{"-zone", zone, "-key", kskPath, "-address", "mailto:ops@example.org", "-target", addr}); err != nil {
+		t.Fatalf("contact with the original KSK after cancelling: %v", err)
 	}
 }

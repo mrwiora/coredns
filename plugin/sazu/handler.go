@@ -11,26 +11,20 @@ import (
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
 )
 
-// log follows the same convention as every other CoreDNS plugin (see
-// e.g. plugin/hosts): log.Info/Warning/Error are always visible; log.Debug
-// only prints once the Corefile also loads the `debug` plugin. There was
-// no logging anywhere in this plugin before -- added specifically because
-// a real production hang (a first-contact push that got no response at
-// all, even after a minute) turned out to be undiagnosable without it:
-// nothing here distinguished "stuck in the chain-of-trust network walk"
-// from "silently dropped" from the outside.
+// log follows the CoreDNS convention: Info/Warning/Error always print;
+// Debug only once the Corefile loads the debug plugin.
 var log = clog.NewWithPlugin("sazu")
 
-// Sazu is the CoreDNS plugin implementing SAZU (Self-Authenticated Zone
-// Update): a customer's own signer pushes DNSSEC-signed zone content,
-// authenticated purely by SIG(0) (RFC 2931) riding on an RFC 2136 dynamic
-// UPDATE, with no separate account/API-key handshake (§10.1/§10.2), over
-// UDP, TCP, or HTTPS (§7.3). See sazu-protocol.md for the full design;
-// see plugin/sazu/docs/SAZU-PLAN.md for exactly what of it this port implements today.
+// Sazu is the CoreDNS plugin implementing SAZU: zone owners push
+// DNSSEC-signed zone content in RFC 2136 UPDATE messages authenticated by
+// SIG(0) (RFC 2931) with the zone's own keys, over UDP, TCP or DNS over
+// HTTPS (§9). See the protocol specification (readme.md in
+// github.com/mrwiora/sazu).
 type Sazu struct {
 	Next plugin.Handler
 
@@ -43,7 +37,7 @@ type Sazu struct {
 	RateLimiter *RateLimiter
 
 	// IPRateLimiter enforces a global, per-source-IP flood/scan throttle
-	// (§12's ERR_RATE_LIMITED), independent of RateLimiter's per-zone
+	// (§11.2's ERR_RATE_LIMITED), independent of RateLimiter's per-zone
 	// daily quota: it bounds total UPDATE attempt volume from one address
 	// regardless of which zone name(s) it targets, closing the gap a
 	// per-zone-only quota leaves open against an attacker probing many
@@ -53,6 +47,33 @@ type Sazu struct {
 	// authenticated ones.
 	IPRateLimiter *IPRateLimiter
 
+	// Versions holds every zone's control-state version -- the counter
+	// control changes must name as a prerequisite (see version.go).
+	Versions *VersionRegistry
+
+	// Pending holds DS-only KSK rollovers waiting out RolloverHoldDown
+	// (see rollover.go).
+	Pending *PendingRollovers
+
+	// RolloverHoldDown is how long a KSK rollover not co-signed by the
+	// old KSK waits before it can complete. setup.go defaults it to
+	// DefaultRolloverHoldDown; zero applies such rollovers immediately.
+	RolloverHoldDown time.Duration
+
+	// now returns the current time; nil means time.Now. Tests override
+	// it to step past a hold-down.
+	now func() time.Time
+
+	// SkipVersionCheck turns off the version-prerequisite requirement.
+	// Only this package's own tests set it, for the many tests about
+	// something else that build control messages by hand; the zero
+	// value, and everything setup.go builds, enforces it.
+	SkipVersionCheck bool
+
+	// MaxSIG0Lifetime caps a SIG(0) record's validity window
+	// (expiration - inception). Zero means DefaultMaxSIG0Lifetime.
+	MaxSIG0Lifetime time.Duration
+
 	// DB, if non-nil, persists every accepted UPDATE (see db.go): a
 	// restart replays it back into Store/Keys instead of starting empty.
 	// Nil is a fully supported mode -- purely in-memory, matching every
@@ -60,7 +81,7 @@ type Sazu struct {
 	// this package's unit tests still use).
 	DB *DB
 
-	// InsecureSkipChainValidation disables the §10.2 chain-of-trust
+	// InsecureSkipChainValidation disables the §7.2 chain-of-trust
 	// cross-check at first contact. It exists purely for local testing,
 	// where there is no real parent zone to publish a DS record against
 	// -- see the onboarding guide. Never set true in production: with it
@@ -69,33 +90,16 @@ type Sazu struct {
 	// cross-check exists to prevent.
 	InsecureSkipChainValidation bool
 
-	// updateLocks serializes the whole authenticate-evaluate-apply
-	// sequence for UPDATE requests -- but only against other requests
-	// for the *same* zone, not every zone this instance serves. See
-	// zoneLockStripes' own doc comment for why this is a fixed-size
-	// array of stripes rather than one lock per zone name, or (the
-	// original design) one lock for every zone at once: with a single
-	// global lock, an expensive first-contact/rollover chain-of-trust
-	// walk for one zone -- a real outbound network round trip that can
-	// take a real amount of time -- blocked every *other* zone's
-	// ordinary, already-authenticated pushes for its entire duration,
-	// even though the two share no state that actually needs it.
+	// updateLocks serializes the authenticate-evaluate-apply sequence of
+	// UPDATEs to the same zone, so a slow chain-of-trust walk for one
+	// zone doesn't hold up pushes to others. See zoneLockStripes.
 	updateLocks [zoneLockStripes]sync.Mutex
 }
 
 // zoneLockStripes is how many lock stripes updateLockFor spreads zone
-// names across. Fixed-size and allocated once as part of the Sazu
-// struct itself (see updateLocks), rather than a map that would grow by
-// one entry per distinct zone name ever presented -- exactly the kind
-// of attacker-controllable unbounded growth the per-source-IP and
-// per-zone rate limiters already have to guard against (see
-// ipratelimit.go's own doc comment on why that matters), avoided here
-// by construction instead of a sweep. 64 stripes make two different
-// zones collide onto the same lock only 1-in-64 of the time at random
-// -- more than enough to eliminate the original design's actual
-// problem (one global lock, 1-in-1 collision, always) for the request
-// volumes this plugin serves, without the complexity of an exact
-// per-zone lock that would need its own lifecycle management.
+// names across: a fixed array rather than a map with an entry per zone
+// name ever presented, which an attacker could grow without bound. Two
+// zones share a stripe 1 time in 64.
 const zoneLockStripes = 64
 
 // updateLockFor returns the lock stripe for zone -- the same stripe
@@ -120,6 +124,16 @@ func (s *Sazu) Name() string { return "sazu" }
 // what lets a new customer domain be onboarded by sending it a signed
 // push, with no Corefile edit or server restart needed per domain.
 func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	// Claim this UPDATE's captured bytes first, whatever happens to the
+	// request next: an entry left behind by a request refused early (out
+	// of scope, malformed, rate-limited) would otherwise sit in the
+	// bounded capture table until evicted, crowding out legitimate ones.
+	var raw []byte
+	var haveRaw bool
+	if r.Opcode == dns.OpcodeUpdate {
+		raw, haveRaw = s.Capture.Take(w.RemoteAddr(), r.Id)
+	}
+
 	if len(r.Question) != 1 {
 		return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
 	}
@@ -130,9 +144,19 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 		// section, naming the zone directly -- no suffix matching, and
 		// it may well be a zone never seen before (first contact).
 		if plugin.Zones(s.Zones).Matches(qname) == "" {
-			return s.nextOrRefuse(ctx, w, r, qname, "outside this instance's configured zone scope")
+			if s.Next == nil {
+				// RFC 2136 §3.1.1: not authoritative for the zone named.
+				return dns.RcodeNotAuth, nil
+			}
+			return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
 		}
-		return s.serveUpdate(ctx, w, r, qname)
+		return s.serveUpdate(ctx, w, r, qname, raw, haveRaw)
+	}
+
+	if m, ok := s.versionAnswer(r); ok {
+		state := request.Request{W: w, Req: r}
+		state.SizeAndDo(m)
+		return writeMsg(w, m)
 	}
 
 	// Ordinary query: find which *onboarded* zone (if any) qname falls
@@ -171,59 +195,32 @@ func (s *Sazu) nextOrRefuse(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 }
 
 func (s *Sazu) serveQuery(w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, error) {
+	q := r.Question[0]
+	qname := strings.ToLower(dns.Fqdn(q.Name))
+	// The DS RRset at a zone cut belongs to the parent (RFC 4035 §3.1.4.1):
+	// when this server also hosts the parent, answer DS at the child's
+	// apex from there.
+	if q.Qtype == dns.TypeDS && qname == z.Origin && qname != "." {
+		i, _ := dns.NextLabel(qname, 0)
+		if _, parent, ok := s.Store.FindZoneForName(qname[i:]); ok {
+			z = parent
+		}
+	}
+
+	state := request.Request{W: w, Req: r}
+	a := z.Answer(qname, q.Qtype, QueryOptions{DO: isDNSSECRequested(r), MinimalANY: state.Proto() == "udp"})
 	m := new(dns.Msg)
 	m.SetReply(r)
-	m.Authoritative = true
+	m.Authoritative = a.Authoritative
+	m.Rcode = a.Rcode
+	m.Answer, m.Ns, m.Extra = a.Answer, a.Ns, a.Extra
+	log.Debugf("query %s/%s (zone %s): rcode=%s answer=%d authority=%d additional=%d",
+		q.Name, dns.TypeToString[q.Qtype], z.Origin, dns.RcodeToString[m.Rcode], len(m.Answer), len(m.Ns), len(m.Extra))
 
-	q := r.Question[0]
-	rrs := z.Lookup(q.Name, q.Qtype)
-	nameExists := z.NameExists(q.Name)
-	log.Debugf("query %s/%s (zone %s, DO=%v): %d matching RRset(s), nameExists=%v",
-		q.Name, dns.TypeToString[q.Qtype], z.Origin, isDNSSECRequested(r), len(rrs), nameExists)
-	if len(rrs) == 0 && !nameExists {
-		m.Rcode = dns.RcodeNameError
-	} else {
-		m.Answer = rrs // NOERROR/NODATA when the name exists but this type doesn't
-		if len(rrs) > 0 && isDNSSECRequested(r) {
-			// A validating resolver needs the covering RRSIG(s) in the
-			// *same* answer as the RRset they cover, not as a separate
-			// query -- without this, the zone would carry real
-			// signatures (once actually pushed signed) that never
-			// reached anyone asking for them, still producing exactly
-			// the "RRSIGs Missing" bogus state this whole feature exists
-			// to avoid.
-			m.Answer = append(m.Answer, z.LookupRRSIG(q.Name, q.Qtype)...)
-		}
-	}
-
-	if len(rrs) == 0 {
-		// RFC 2308 §3: every negative response (NXDOMAIN here, or NODATA
-		// in the "name exists but not this type" branch above) MUST
-		// carry the zone's SOA in the authority section, so a resolver
-		// knows how long it may cache the negative result for. Omitting
-		// it doesn't make the *answer* wrong, but it silently defeats
-		// negative caching -- every repeat query for the same
-		// nonexistent name or type would otherwise bypass cache and hit
-		// this server directly every time.
-		if soa := z.SOA(); soa != nil {
-			m.Ns = append(m.Ns, soa)
-			if isDNSSECRequested(r) {
-				m.Ns = append(m.Ns, z.LookupRRSIG(z.Origin, dns.TypeSOA)...)
-				// RFC 4035 §3.1.3: the authenticated denial-of-existence
-				// proof itself, without which a validating resolver has
-				// to treat this negative answer as Bogus rather than
-				// Insecure or Secure once a DS is published for this
-				// zone. See ZoneData.NegativeProof and nsec.go's
-				// top-of-file comment for why this can be empty (no NSEC
-				// chain currently exists) even on a zone that has one on
-				// other names, and why that's a safe degradation rather
-				// than a bug.
-				m.Ns = append(m.Ns, z.NegativeProof(q.Name, nameExists)...)
-			}
-		}
-	}
-	log.Debugf("query %s/%s: replying rcode=%s answer=%v authority=%v",
-		q.Name, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode], m.Answer, m.Ns)
+	// EDNS (RFC 6891) and the DO bit (RFC 3225) are echoed, and the reply
+	// is truncated to what the client can receive.
+	state.SizeAndDo(m)
+	m = state.Scrub(m)
 	return writeMsg(w, m)
 }
 
@@ -235,7 +232,7 @@ func isDNSSECRequested(r *dns.Msg) bool {
 	return opt != nil && opt.Do()
 }
 
-func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, zone string) (int, error) {
+func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, zone string, raw []byte, ok bool) (int, error) {
 	txID := newTransactionID()
 	remoteAddr := w.RemoteAddr().String()
 	// authKeyTag/authKeyRole identify the key whose SIG(0) signature
@@ -245,10 +242,14 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// verified is not proof of anything, and attributing an audit entry to
 	// it would let an attacker frame an arbitrary key tag in the log
 	// merely by naming it, with no need to ever prove possession of it.
+	// statusDetail, when set, is appended to the status in the Extended
+	// DNS Error's EXTRA-TEXT (e.g. a pending rollover's earliest
+	// completion time).
+	var statusDetail string
 	var authKeyTag *uint16
 	var authKeyRole string
 	// reply is the sole exit point for this function: every response,
-	// accepted or refused, goes through it, so the §12 audit trail (when
+	// accepted or refused, goes through it, so the §11.5 audit trail (when
 	// s.DB is configured) sees every transaction this server decided on,
 	// not just the successful ones -- an operator investigating "why did
 	// my push fail" needs the rejected attempts at least as much as the
@@ -276,7 +277,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 				log.Errorf("update for %s: recording audit entry %s: %v", zone, txID, err)
 			}
 		}
-		return replyWithStatus(w, r, rcode, status)
+		return replyWithStatusDetail(w, r, rcode, status, statusDetail)
 	}
 
 	log.Debugf("update for %s from %s: transaction %s, %d prerequisite(s), %d op(s)", zone, remoteAddr, txID, len(r.Answer), len(r.Ns))
@@ -294,18 +295,12 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		return reply(dns.RcodeRefused, statusErrRateLimited)
 	}
 
-	raw, ok := s.Capture.Take(w.RemoteAddr(), r.Id)
 	if !ok {
-		// §7.3 HTTPS/JSON carrier: UDP/TCP get here via
-		// UDPDecorateReaderFunc/TCPDecorateReaderFunc into s.Capture, but
-		// HTTPS/HTTP3 never go through a dns.Server's DecorateReader at
-		// all -- core/dnsserver's ServerHTTPS/ServerHTTPS3 instead stash
-		// the exact wire bytes doh.RequestToMsgWireWithAccept already
-		// extracted (already decoded out of a JSON wire envelope, if the
-		// client used one) directly on the request context, precisely so
-		// a plugin like this one -- whose SIG(0)/RFC 2931 authentication
-		// must verify against literal wire bytes, never a re-encoding --
-		// has something to check over that transport too.
+		// DNS over HTTPS (§9.2): UDP and TCP requests are captured by
+		// s.Capture's DecorateReaderFunc, but HTTPS and HTTP/3 never pass
+		// a dns.Server's reader. core/dnsserver puts the exact request
+		// bytes on the context instead, since SIG(0) verifies literal wire
+		// bytes, never a re-encoding.
 		if httpRaw, isHTTP := ctx.Value(dnsserver.RawRequestKey{}).([]byte); isHTTP {
 			raw, ok = httpRaw, true
 		}
@@ -317,6 +312,24 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Warningf("update for %s from %s: no raw bytes captured for id %d, refusing", zone, w.RemoteAddr(), r.Id)
 		return reply(dns.RcodeServerFailure, "")
 	}
+
+	// From here on, the only message this function looks at is the one
+	// parsed from raw -- the exact bytes SIG(0) is verified against --
+	// never the *dns.Msg the server handed in. The two are only
+	// correlated by source address and 16-bit message ID, so a spoofed
+	// packet with a matching ID could otherwise pair its own content
+	// with someone else's genuinely signed bytes: the signature would
+	// verify over the legitimate message while the forged one got
+	// applied.
+	signed := new(dns.Msg)
+	if err := signed.Unpack(raw); err != nil ||
+		signed.Id != r.Id || signed.Opcode != dns.OpcodeUpdate || signed.Response ||
+		len(signed.Question) != 1 || !strings.EqualFold(signed.Question[0].Name, zone) ||
+		signed.Question[0].Qtype != dns.TypeSOA || signed.Question[0].Qclass != dns.ClassINET {
+		log.Warningf("update for %s from %s: captured bytes for id %d are not this request, refusing", zone, remoteAddr, r.Id)
+		return reply(dns.RcodeFormatError, "")
+	}
+	r = signed
 
 	lock := s.updateLockFor(zone)
 	log.Debugf("update for %s: waiting for its zone's update lock stripe", zone)
@@ -346,7 +359,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			}
 		}
 		if candidate == nil {
-			// §10.4 KSK rollover: none of today's authenticators signed
+			// §8.2 KSK rollover: none of today's authenticators signed
 			// this transaction -- before giving up, check whether a
 			// *different*, KSK-shaped (SEP-flagged) candidate DNSKEY
 			// also present in these ops does. If so, this zone already
@@ -416,7 +429,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 	if sigErr != nil {
 		log.Debugf("update for %s: SIG(0) verification failed: %v", zone, sigErr)
-		return reply(dns.RcodeNotAuth, "")
+		return reply(dns.RcodeRefused, "")
 	}
 	log.Debugf("update for %s: SIG(0) verified (rollover=%v)", zone, isRollover)
 	// Recorded only now that verification has actually succeeded -- see
@@ -425,7 +438,40 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	authKeyTag = &keyTag
 	authKeyRole = candidateRole.String()
 
-	// §10.6 registration record: a contact address (if this push carries
+	// A SIG(0) window longer than the server's maximum would keep a
+	// captured message cryptographically valid for longer than needed.
+	// (Replay itself is prevented by the SOA serial and version rules
+	// below; this only bounds the window those have to hold across.)
+	sig0 := isSig0(r)
+	if sig0 == nil {
+		// Can't happen once VerifySIG0 succeeded against the raw bytes,
+		// but never index a nil record on the strength of that alone.
+		return reply(dns.RcodeFormatError, "")
+	}
+	if !strings.EqualFold(sig0.SignerName, dns.Fqdn(zone)) {
+		// The SIG(0) key is always one of the zone's own DNSKEYs, so its
+		// signer name is the zone apex; anything else names some other
+		// principal this server knows nothing about.
+		log.Debugf("update for %s: SIG(0) signer name %s is not the zone apex, refusing", zone, sig0.SignerName)
+		return reply(dns.RcodeRefused, "")
+	}
+	if lifetime := time.Duration(sig0.Expiration-sig0.Inception) * time.Second; lifetime > s.maxSIG0Lifetime() {
+		log.Debugf("update for %s: SIG(0) validity window %s exceeds the %s maximum, refusing", zone, lifetime, s.maxSIG0Lifetime())
+		return reply(dns.RcodeRefused, statusErrSIG0LifetimeTooLong)
+	}
+
+	if rcode, err := Prescan(zone, r.Answer, r.Ns, dns.ClassINET); err != nil {
+		log.Debugf("update for %s: %v", zone, err)
+		return reply(rcode, "")
+	}
+
+	prereqs, claimedVersion, versionPresent, err := splitVersionPrereq(r.Answer, zone)
+	if err != nil {
+		log.Debugf("update for %s: %v", zone, err)
+		return reply(dns.RcodeFormatError, "")
+	}
+
+	// §11.4 registration record: a contact address (if this push carries
 	// one) rides the same authenticated UPDATE as everything else, at a
 	// reserved owner name -- see contact.go. Stripped out here, before
 	// anything below treats r.Ns as zone content: it needs SIG(0)'s
@@ -447,17 +493,60 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		log.Debugf("update for %s: invalid decommission directive: %v", zone, err)
 		return reply(dns.RcodeFormatError, "")
 	}
+	zoneOps, cancelRollover, err := splitCancelRolloverOps(zoneOps, zone)
+	if err != nil || (cancelRollover && (isRollover || !alreadyPinned)) {
+		log.Debugf("update for %s: invalid cancel-rollover directive: %v", zone, err)
+		return reply(dns.RcodeFormatError, "")
+	}
+	if touchesReservedName(zoneOps, zone) {
+		log.Debugf("update for %s: update touches the reserved version name, refusing", zone)
+		return reply(dns.RcodeFormatError, "")
+	}
+
+	// Replay protection for control changes (see version.go): anything
+	// that changes the zone's control state -- onboarding, a rollover,
+	// its DNSKEY RRset, its contact, decommission -- must name the
+	// zone's current version, and increments it once applied. So must a
+	// zone's first content push, which has no SOA serial yet to be
+	// ordered by. A version that is present must match even where it
+	// isn't required.
+	touchesKeys := touchesDNSKEY(zoneOps, zone)
+	isControl := !alreadyPinned || isRollover || decommission || touchesKeys || contactUpdate != nil || cancelRollover
+	currentVersion := s.Versions.Get(zone)
+	if !s.SkipVersionCheck {
+		needsVersion := isControl
+		if !needsVersion && containsAPEXSOA(zoneOps, zone) {
+			existing, ok := s.Store.Get(zone)
+			needsVersion = !ok || existing.SOA() == nil
+		}
+		switch {
+		case needsVersion && !versionPresent:
+			log.Debugf("update for %s: control change without a version prerequisite, refusing", zone)
+			return reply(dns.RcodeRefused, statusErrVersionRequired)
+		case versionPresent && claimedVersion != currentVersion:
+			log.Debugf("update for %s: version prerequisite %d, zone is at %d, refusing", zone, claimedVersion, currentVersion)
+			return reply(dns.RcodeNXRrset, statusErrStaleVersion)
+		}
+	}
+	var newVersion *uint64
+	if isControl {
+		v := currentVersion + 1
+		newVersion = &v
+	}
+
 	if decommission {
 		if !alreadyPinned || isRollover || candidateRole != RoleKSK {
 			log.Debugf("update for %s: decommission attempted by other than the zone's own pinned KSK, refusing", zone)
 			return reply(dns.RcodeRefused, statusErrDecommissionRequiresKSK)
 		}
 		if s.DB != nil {
-			if err := s.DB.DeleteZone(zone); err != nil {
+			if err := s.DB.DeleteZoneWithVersion(zone, *newVersion); err != nil {
 				log.Errorf("update for %s: DB.DeleteZone failed: %v", zone, err)
 				return reply(dns.RcodeServerFailure, "")
 			}
 		}
+		s.Versions.Set(zone, *newVersion)
+		s.Pending.Clear(zone)
 		s.Store.DeleteZone(zone)
 		s.Keys.DeleteZone(zone)
 		s.Contacts.Set(zone, nil)
@@ -466,15 +555,57 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 
 	// isFullPush: a real content push always carries the apex SOA
-	// (sazuctl publish-zone) -- used for §12 quota metering, below, to
+	// (sazuctl publish-zone) -- used for §11.2 quota metering, below, to
 	// bucket it separately from a pure key-management push
 	// (publish-trust's first contact, a KSK rollover, or a ZSK
 	// add/retire), which changes no served content at all and costs this
 	// server far less to process.
 	isFullPush := containsAPEXSOA(zoneOps, zone)
 
+	// Every update must be one of the message kinds (or an allowed
+	// combination of them). One that changes nothing at all matches none.
+	if len(zoneOps) == 0 && !isControl {
+		log.Debugf("update for %s: carries no operation of any message kind, refusing", zone)
+		return reply(dns.RcodeFormatError, "")
+	}
+	// A content push replaces the whole zone, so it has nothing to delete
+	// -- except DNSKEYs, when it's combined with a key update.
+	if isFullPush && hasNonDNSKEYDeletes(zoneOps) {
+		log.Debugf("update for %s: content push carries delete operations, refusing", zone)
+		return reply(dns.RcodeFormatError, "")
+	}
+	if isFullPush {
+		if err := checkZoneContent(zoneOps, dns.ClassINET); err != nil {
+			log.Debugf("update for %s: %v", zone, err)
+			statusDetail = err.Error()
+			return reply(dns.RcodeRefused, statusErrInvalidZoneContent)
+		}
+	}
+
+	// Only the KSK may change the zone's key set or its contact: a ZSK
+	// is the warm key an automation host holds for routine content
+	// pushes, and letting it also register further ZSKs, retire the
+	// legitimate ones, or redirect where sazu-watchd's alerts go would
+	// turn a stolen ZSK into lasting control of the zone. (A rollover's
+	// new KSK and first contact's KSK are KSKs by construction.)
+	if candidateRole != RoleKSK && (touchesKeys || contactUpdate != nil || cancelRollover) {
+		log.Debugf("update for %s: key or contact change authenticated by %s key tag %d, refusing", zone, candidateRole, candidate.KeyTag())
+		return reply(dns.RcodeRefused, statusErrRequiresKSK)
+	}
+
+	// Every change to served content is a complete replacement of the
+	// zone (the apex SOA marks one). A partial change would leave the
+	// zone's NSEC/NSEC3 chain describing content that no longer exists,
+	// and nothing here could produce a correct one in its place -- the
+	// server never signs -- so negative answers would stop validating
+	// until the next full push. Refused outright instead.
+	if !isFullPush && changesChainRelevantContent(zoneOps) {
+		log.Debugf("update for %s: partial content change without an apex SOA, refusing", zone)
+		return reply(dns.RcodeRefused, statusErrFullZoneRequired)
+	}
+
 	if s.RateLimiter != nil {
-		// §12 quota: a content push and a key-management push are
+		// §11.2 quota: a content push and a key-management push are
 		// metered separately, since they cost very different amounts of
 		// server effort. Checked here, before the expensive first-contact
 		// chain-of-trust walk below, so an
@@ -518,13 +649,17 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 				if ce, ok := err.(*ChainError); ok {
 					switch ce.Op {
 					case "no-ds-published":
-						// §12's status-code convention: the specific, by far
+						// §10's status-code convention: the specific, by far
 						// most common first-contact failure -- "you haven't
 						// told your registrar about this key yet" -- gets its
 						// own diagnostic so a client can say exactly that,
 						// rather than a bare REFUSED indistinguishable from a
 						// wrong key or a broken chain elsewhere.
 						status = statusErrNoDSPublished
+					case "weak-ds-digest":
+						// The key does match a published DS, but only a
+						// SHA-1 one -- the §11.3 digest floor.
+						status = statusErrWeakDSDigest
 					case "key-mismatch":
 						// A DS *is* published for this zone, just not for
 						// this key. Distinct from ERR_NO_DS_PUBLISHED and
@@ -540,6 +675,37 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 				}
 				return reply(dns.RcodeRefused, status)
 			}
+		}
+	}
+
+	// KSK rollover hold-down (see rollover.go): the old KSK's
+	// co-signature over the new DNSKEY RRset lets a rollover apply now;
+	// without it, the rollover must wait out s.RolloverHoldDown from its
+	// first attempt, which records it as pending so the zone's contact
+	// can be alerted and the current KSK holder can cancel it.
+	if isRollover {
+		var coSigned bool
+		zoneOps, coSigned = stripKSKCoSignature(zoneOps, zone, zk.KSK.DNSKEY)
+		if !coSigned && s.RolloverHoldDown > 0 {
+			now := s.timeNow()
+			pending, ok := s.Pending.Get(zone)
+			if !ok || !sameKey(pending.KSK, candidate) {
+				pending = PendingRollover{KSK: candidate, RequestedAt: now}
+				if s.DB != nil {
+					if err := s.DB.SetPendingRollover(zone, pending); err != nil {
+						log.Errorf("update for %s: %v", zone, err)
+						return reply(dns.RcodeServerFailure, "")
+					}
+				}
+				s.Pending.Set(zone, pending)
+				log.Warningf("update for %s: KSK rollover to key tag %d not co-signed by the current KSK; pending until %s",
+					zone, candidate.KeyTag(), pending.RequestedAt.Add(s.RolloverHoldDown).UTC().Format(time.RFC3339))
+			}
+			if notBefore := pending.RequestedAt.Add(s.RolloverHoldDown); now.Before(notBefore) {
+				statusDetail = "not before " + notBefore.UTC().Format(time.RFC3339)
+				return reply(dns.RcodeRefused, statusErrRolloverPending)
+			}
+			log.Infof("update for %s: pending KSK rollover to key tag %d completed its hold-down", zone, candidate.KeyTag())
 		}
 	}
 
@@ -574,10 +740,65 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		retiredZSKTag, hasRetiredZSK = findRetiredZSKKeytag(r.Ns, zone, zk)
 	}
 
+	// The KSK the zone will be pinned to once this update applies --
+	// the only key allowed to sign its DNSKEY RRset (see
+	// VerifySignedRRsetsSplit).
+	kskAfter := candidate
+	if alreadyPinned && !isRollover {
+		kskAfter = zk.KSK.DNSKEY
+	}
+
+	// Any update that touches the DNSKEY RRset must carry that RRset
+	// complete, exactly as it will be served afterwards, and it must be
+	// exactly the pinned KSK plus the registered ZSKs this update leaves
+	// behind. The first half is what makes signature verification
+	// (which checks the records the update carries) a check on what
+	// will actually be served; the second keeps the served key set and
+	// the key registry from ever drifting apart -- e.g. a rollover that
+	// also slips in an unregistered key, or one update adding one ZSK
+	// while silently dropping another.
+	if touchesKeys || !alreadyPinned || isRollover {
+		var current []dns.RR
+		if existing, ok := s.Store.Get(zone); ok {
+			current = existing.Lookup(dns.Fqdn(zone), dns.TypeDNSKEY)
+		}
+		expected := []*dns.DNSKEY{kskAfter}
+		if alreadyPinned {
+			for _, zsk := range zk.ZSKs {
+				if hasRetiredZSK && zsk.KeyTag() == retiredZSKTag {
+					continue
+				}
+				expected = append(expected, zsk.DNSKEY)
+			}
+		}
+		if newZSK != nil {
+			expected = append(expected, newZSK)
+		}
+		resulting := resultingDNSKEYSet(current, zoneOps, zone)
+		if !sameKeySet(resulting, expected) || !sameKeySet(addedDNSKEYs(zoneOps, zone), resulting) {
+			log.Debugf("update for %s: DNSKEY RRset after this update (%d key(s)) does not match the pinned KSK plus registered ZSKs (%d key(s)), or is not carried complete",
+				zone, len(resulting), len(expected))
+			return reply(dns.RcodeRefused, statusErrDNSKEYSetMismatch)
+		}
+	}
+
 	z := s.Store.GetOrCreate(zone)
-	if rcode, status, err := EvaluatePrerequisites(z, r.Answer, dns.ClassINET); err != nil {
+	if rcode, status, err := EvaluatePrerequisites(z, prereqs, dns.ClassINET); err != nil {
 		log.Debugf("update for %s: prerequisite failed: %v", zone, err)
 		return reply(rcode, status)
+	}
+
+	// Replay protection for content: a full push's SOA serial must move
+	// forward (RFC 1982 arithmetic), the same rule secondaries and
+	// resolvers already rely on -- so an older complete zone can never
+	// be re-installed over a newer one.
+	if isFullPush {
+		if current := z.SOA(); current != nil {
+			if pushed := apexSOA(zoneOps, zone); pushed != nil && !serialGreater(pushed.Serial, current.Serial) {
+				log.Debugf("update for %s: SOA serial %d is not greater than the current %d, refusing", zone, pushed.Serial, current.Serial)
+				return reply(dns.RcodeRefused, statusErrStaleSerial)
+			}
+		}
 	}
 
 	// §4's full content verification: confirm the content being pushed
@@ -604,12 +825,15 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	} else if alreadyPinned {
 		contentCandidates = zk.ContentSigners()
 	}
-	if status, err := VerifySignedRRsets(contentCandidates, zoneOps, dns.ClassINET, time.Now()); err != nil {
+	if status, err := VerifySignedRRsetsSplit(contentCandidates, []*dns.DNSKEY{kskAfter}, zoneOps, dns.ClassINET, time.Now()); err != nil {
 		log.Debugf("update for %s: content signature verification failed: %v", zone, err)
 		if status == "" {
 			status = statusErrSigInvalid
 		}
-		return reply(dns.RcodeNotAuth, status)
+		// Name the failing RRset, so the client can say exactly what to
+		// fix (the protocol's §6.2).
+		statusDetail = strings.TrimPrefix(err.Error(), "sazu: ")
+		return reply(dns.RcodeRefused, status)
 	}
 
 	// Persist before mutating memory: if the disk write fails, memory
@@ -644,56 +868,25 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		keyChange.RetireZSK = &tag
 	}
 	if s.DB != nil {
-		if err := s.DB.CommitUpdate(zone, keyChange, zoneOps, dns.ClassINET, contactUpdate); err != nil {
+		if err := s.DB.CommitUpdateWithVersion(zone, newVersion, keyChange, zoneOps, dns.ClassINET, contactUpdate); err != nil {
 			log.Errorf("update for %s: DB.CommitUpdate failed: %v", zone, err)
 			return reply(dns.RcodeServerFailure, "")
 		}
 		log.Debugf("update for %s: committed to DB", zone)
 	}
 
-	// Two cases:
-	//
-	//   - A real content push (containsAPEXSOA -- publish-zone is the
-	//     only command that ever sends one, always the zone's complete
-	//     content) always carries a complete fresh replacement of
-	//     everything it serves, but never emits deletes for anything
-	//     it's dropped since the last push, so without a purge first a
-	//     removed record would linger forever. PurgeContent clears every
-	//     ordinary RRset (DNSKEY excepted -- key management is
-	//     independent of content) and the NSEC/NSEC3 chain along with
-	//     it, then applies every op in zoneOps -- all under one lock
-	//     acquisition (ZoneData.PurgeContentAndApply), so a concurrent
-	//     query can never observe the zone in between with a record
-	//     transiently missing that both existed a moment before this
-	//     push and will exist again a moment after it.
-	//   - Anything else that changes ordinary zone content invalidates
-	//     the existing chain's correctness about that content -- purge
-	//     just the chain (PurgeNSEC) rather than risk serving a
-	//     stale/incorrect proof; this can't drop content itself (it
-	//     isn't a full replacement), so PurgeContent would be wrong
-	//     here. Nothing sazuctl builds can reach this case today
-	//     (publish-zone is the only command that ever changes ordinary
-	//     content, and it's always a full push), but the protocol itself
-	//     doesn't forbid a different, arbitrary SIG(0)-signed client from
-	//     sending a partial content change -- purging the chain is the
-	//     only safe response to one, since nothing here validates that
-	//     such a push's own chain-shaped records (if it included any)
-	//     are actually a correct, complete replacement.
-	//
-	// A first-contact/publish-trust push, a KSK rollover, or a ZSK
-	// add/retire carries an apex DNSKEY but changes no other served
-	// content, so it matches neither case here and both the chain and
-	// the rest of the zone's content are left exactly as correct as they
-	// were (or, for first contact, stay empty until publish-zone's first
-	// real content push populates them).
+	// A full push (containsAPEXSOA -- always the zone's complete content)
+	// replaces everything served except the apex DNSKEY RRset, all under
+	// one lock acquisition (ZoneData.PurgeContentAndApply), so a
+	// concurrent query never observes a record transiently missing that
+	// both existed before this push and exists after it. Anything else
+	// that got this far only changes the DNSKEY RRset (partial content
+	// changes were refused above), which the NSEC/NSEC3 chain doesn't
+	// describe, so it is applied as-is.
 	var applyErr error
-	switch {
-	case containsAPEXSOA(zoneOps, zone):
+	if isFullPush {
 		applyErr = z.PurgeContentAndApply(zoneOps, dns.ClassINET)
-	default:
-		if changesChainRelevantContent(zoneOps) {
-			z.PurgeNSEC()
-		}
+	} else {
 		applyErr = ApplyUpdateOps(z, zoneOps, dns.ClassINET)
 	}
 	if applyErr != nil {
@@ -723,6 +916,15 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	case hasRetiredZSK:
 		s.Keys.RetireZSK(zone, retiredZSKTag)
 		log.Infof("update for %s: retired ZSK key tag %d", zone, retiredZSKTag)
+	}
+	if newVersion != nil {
+		s.Versions.Set(zone, *newVersion)
+		if _, pending := s.Pending.Get(zone); pending {
+			s.Pending.Clear(zone)
+			if !isRollover {
+				log.Infof("update for %s: pending KSK rollover cancelled by a control change authenticated by the current KSK", zone)
+			}
+		}
 	}
 	if contactUpdate != nil && s.Contacts != nil {
 		s.Contacts.Set(zone, contactUpdate.Addresses)
@@ -767,12 +969,12 @@ func connectionOriented(ctx context.Context, w dns.ResponseWriter) bool {
 
 // findCandidateKey looks for the Add-shaped, SEP-flagged (KSK-shaped)
 // DNSKEY at zone's apex among update ops -- the candidate key a
-// first-contact or §10.4 KSK-rollover push introduces itself with. A
+// first-contact or §8.2 KSK-rollover push introduces itself with. A
 // first-contact push (sazuctl publish-trust) always establishes a KSK
-// and a ZSK together; the accompanying, non-SEP ZSK is not itself a
-// candidate here and is deliberately ignored by this function -- its
-// presence never counts toward "more than one candidate" -- see
-// findNewZSKCandidate, which looks for exactly that key separately.
+// and a ZSK together, and a rollover re-asserts every registered ZSK
+// alongside the new KSK; those non-SEP keys are never candidates here
+// and never count toward "more than one candidate" -- only a second
+// SEP-flagged key does. See findNewZSKCandidate for the ZSK side.
 func findCandidateKey(updateOps []dns.RR, zone string) (*dns.DNSKEY, error) {
 	zoneLower := strings.ToLower(dns.Fqdn(zone))
 	var ksk, zsk *dns.DNSKEY
@@ -795,10 +997,9 @@ func findCandidateKey(updateOps []dns.RR, zone string) (*dns.DNSKEY, error) {
 			ksk = key
 			continue
 		}
-		if zsk != nil {
-			return nil, fmt.Errorf("more than one candidate DNSKEY in update")
+		if zsk == nil {
+			zsk = key
 		}
-		zsk = key
 	}
 	if ksk != nil {
 		return ksk, nil
@@ -905,10 +1106,9 @@ func containsAPEXSOA(updateOps []dns.RR, zone string) bool {
 // covering any of those (content-signature verification is mandatory on
 // every push, so a key-management push always carries one covering its
 // DNSKEY, which is exactly as chain-irrelevant as the DNSKEY it covers).
-// Used to decide whether an update that isn't a full push
-// (containsAPEXSOA) still needs its existing chain purged (it changed
-// real content) or can leave it exactly as it was (it didn't touch
-// anything the chain describes at all) -- see the PurgeNSEC call site.
+// serveUpdate refuses an update that isn't a full push (containsAPEXSOA)
+// yet reports true here: it would change content the chain describes,
+// with no replacement chain the server could trust or compute.
 func changesChainRelevantContent(updateOps []dns.RR) bool {
 	for _, rr := range updateOps {
 		switch rr.Header().Rrtype {
@@ -928,6 +1128,141 @@ func changesChainRelevantContent(updateOps []dns.RR) bool {
 	return false
 }
 
+func (s *Sazu) timeNow() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+func (s *Sazu) maxSIG0Lifetime() time.Duration {
+	if s.MaxSIG0Lifetime > 0 {
+		return s.MaxSIG0Lifetime
+	}
+	return DefaultMaxSIG0Lifetime
+}
+
+// touchesDNSKEY reports whether updateOps changes, or re-signs, zone's
+// apex DNSKEY RRset in any way: an add or delete of a DNSKEY at the
+// apex, a delete of the apex's whole RRset or name, or an RRSIG covering
+// the DNSKEY RRset.
+func touchesDNSKEY(updateOps []dns.RR, zone string) bool {
+	for _, rr := range updateOps {
+		h := rr.Header()
+		if !strings.EqualFold(h.Name, dns.Fqdn(zone)) {
+			continue
+		}
+		switch h.Rrtype {
+		case dns.TypeDNSKEY:
+			return true
+		case dns.TypeANY:
+			if h.Class == dns.ClassANY {
+				return true // §2.5.3 delete all RRsets from the apex name
+			}
+		case dns.TypeRRSIG:
+			if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeDNSKEY {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasNonDNSKEYDeletes reports whether updateOps contains an RFC 2136
+// delete (class ANY or NONE) of anything but a DNSKEY.
+func hasNonDNSKEYDeletes(updateOps []dns.RR) bool {
+	for _, rr := range updateOps {
+		h := rr.Header()
+		if (h.Class == dns.ClassANY || h.Class == dns.ClassNONE) && h.Rrtype != dns.TypeDNSKEY {
+			return true
+		}
+	}
+	return false
+}
+
+// addedDNSKEYs returns every Add-shaped DNSKEY at zone's apex among
+// updateOps.
+func addedDNSKEYs(updateOps []dns.RR, zone string) []*dns.DNSKEY {
+	var out []*dns.DNSKEY
+	for _, rr := range updateOps {
+		key, ok := rr.(*dns.DNSKEY)
+		if ok && key.Hdr.Class == dns.ClassINET && key.Hdr.Rdlength > 0 && strings.EqualFold(key.Hdr.Name, dns.Fqdn(zone)) {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+// resultingDNSKEYSet applies updateOps' DNSKEY-relevant operations, in
+// order and with RFC 2136 §2.5 semantics, to current (the apex DNSKEY
+// RRset served today) and returns the set that would be served after the
+// update. A full push's purge never touches the DNSKEY RRset, so this
+// holds for every kind of update.
+func resultingDNSKEYSet(current []dns.RR, updateOps []dns.RR, zone string) []*dns.DNSKEY {
+	var set []*dns.DNSKEY
+	for _, rr := range current {
+		if key, ok := rr.(*dns.DNSKEY); ok {
+			set = append(set, key)
+		}
+	}
+	for _, rr := range updateOps {
+		h := rr.Header()
+		if !strings.EqualFold(h.Name, dns.Fqdn(zone)) {
+			continue
+		}
+		switch {
+		case h.Rrtype == dns.TypeDNSKEY && h.Class == dns.ClassINET && h.Rdlength > 0:
+			key := rr.(*dns.DNSKEY)
+			if !containsKey(set, key) {
+				set = append(set, key)
+			}
+		case h.Rrtype == dns.TypeDNSKEY && h.Class == dns.ClassNONE:
+			key := rr.(*dns.DNSKEY)
+			kept := set[:0:0]
+			for _, k := range set {
+				if !sameKey(k, key) {
+					kept = append(kept, k)
+				}
+			}
+			set = kept
+		case h.Class == dns.ClassANY && h.Rdlength == 0 && (h.Rrtype == dns.TypeDNSKEY || h.Rrtype == dns.TypeANY):
+			set = nil
+		}
+	}
+	return set
+}
+
+// sameKey reports whether a and b are the same DNSKEY, ignoring TTL and
+// owner-name case.
+func sameKey(a, b *dns.DNSKEY) bool {
+	return a.Flags == b.Flags && a.Protocol == b.Protocol && a.Algorithm == b.Algorithm && a.PublicKey == b.PublicKey
+}
+
+func containsKey(set []*dns.DNSKEY, key *dns.DNSKEY) bool {
+	for _, k := range set {
+		if sameKey(k, key) {
+			return true
+		}
+	}
+	return false
+}
+
+// sameKeySet reports whether a and b hold the same keys, ignoring order
+// and duplicates.
+func sameKeySet(a, b []*dns.DNSKEY) bool {
+	for _, k := range a {
+		if !containsKey(b, k) {
+			return false
+		}
+	}
+	for _, k := range b {
+		if !containsKey(a, k) {
+			return false
+		}
+	}
+	return true
+}
+
 func writeMsg(w dns.ResponseWriter, m *dns.Msg) (int, error) {
 	if err := w.WriteMsg(m); err != nil {
 		return dns.RcodeServerFailure, err
@@ -935,107 +1270,162 @@ func writeMsg(w dns.ResponseWriter, m *dns.Msg) (int, error) {
 	return dns.RcodeSuccess, nil
 }
 
-// statusErrNoDSPublished is one of §12's SAZU status codes, carried as a
-// diagnostic TXT record per that section: "On the raw-DNS carrier this
-// rides as a short diagnostic TXT record in the response's Additional
-// section." Every status code in §12's list is implemented at this
-// point (see the other statusErr* constants below and in prereq.go/
-// sign.go); see plugin/sazu/docs/SAZU-PLAN.md for the full accounting.
+// The SAZU status codes (§10), reported in an RFC 8914 Extended DNS
+// Error (see replyWithStatus and edeCodes).
+
+// statusErrNoDSPublished: the parent publishes no DS for the zone, so a
+// first-contact or rollover key can't be anchored yet.
 const statusErrNoDSPublished = "ERR_NO_DS_PUBLISHED"
 
-// statusErrUnknownSigner is another of §12's status codes: a DS record is
-// published for the target zone, but none of them match the candidate
-// key. Unlike statusErrNoDSPublished, this does not mean "nothing is
-// there yet" -- something else already has DNSSEC set up for this zone,
-// which the operator needs to understand (it may simply be the zone's
-// current host, e.g. mid-migration) before doing anything that might
-// disturb it.
+// statusErrUnknownSigner: the parent publishes a DS for the zone, but
+// none matches the candidate key -- typically the zone's current host
+// already signs it (e.g. mid-migration).
 const statusErrUnknownSigner = "ERR_UNKNOWN_SIGNER"
 
-// statusErrSigInvalid is another of §12's status codes: emitted when a
-// pushed RRset's RRSIG doesn't actually verify against the
-// candidate/pinned key -- content-signature verification is mandatory
-// on every push.
+// statusErrSigInvalid: a pushed RRset has no RRSIG that verifies against
+// a key allowed to sign it.
 const statusErrSigInvalid = "ERR_SIG_INVALID"
 
-// statusErrWeakAlgorithm is another of §12's status codes: a first-contact
-// candidate key's algorithm doesn't meet §10.7's minimum floor (RFC 8624
-// §3.1) -- see algorithm.go.
+// statusErrWeakAlgorithm: the candidate key's algorithm is below the
+// §11.3 floor (RFC 8624 §3.1) -- see algorithm.go.
 const statusErrWeakAlgorithm = "ERR_WEAK_ALGORITHM"
 
-// statusErrQuotaExceeded is another of §12's status codes: this zone has
-// already used up its content-push or key-management-push quota for the
-// current rolling 24h window -- see RateLimiter and containsAPEXSOA.
-// §12 also names a distinct ERR_RATE_LIMITED code (see
-// statusErrRateLimited) -- that one is a separate, faster-timescale,
-// per-source-IP flood throttle, not just a synonym for this.
+// statusErrQuotaExceeded: the zone has used its content-push or
+// key-management quota for the rolling 24 hours (§11.2, RateLimiter).
 const statusErrQuotaExceeded = "ERR_QUOTA_EXCEEDED"
 
-// statusErrRateLimited is §12's remaining status code: remoteAddr has
-// exceeded IPRateLimiter's global, per-source-IP UPDATE rate over the
-// current rolling 1-minute window -- distinct from statusErrQuotaExceeded
-// (a per-*zone* daily churn quota, checked only after SIG(0) verifies)
-// specifically because this one bounds raw attempt volume from an
-// address regardless of which zone it targets or whether the attempt is
-// even well-formed.
+// statusErrRateLimited: the source address exceeded the per-address
+// UPDATE rate (§11.2, IPRateLimiter), whatever zone it targets.
 const statusErrRateLimited = "ERR_RATE_LIMITED"
 
-// statusErrTransportNotAllowed: this first-contact or key-rollover
-// attempt arrived over a connectionless transport (plain UDP) -- see
-// connectionOriented. Not one of §12's named codes (the design doc
-// predates the HTTPS/JSON carrier and this specific spoofing concern),
-// but the same diagnostic-TXT convention as the rest of them.
+// statusErrTransportNotAllowed: a first-contact or KSK-rollover attempt
+// arrived over UDP, where the source address isn't validated -- see
+// connectionOriented.
 const statusErrTransportNotAllowed = "ERR_TRANSPORT_NOT_ALLOWED"
 
-// statusErrStaleSerial is another of §12's status codes: a push built
-// with BuildFullZonePush's previousSOA staleness guard (RFC 2136 §2.4.2)
-// was rejected because the zone's current SOA no longer matches what the
-// push was built against -- see EvaluatePrerequisites.
+// statusErrStaleSerial: the push's SOA serial isn't newer than the served
+// one, or its SOA prerequisite (RFC 2136 §2.4.2) no longer matches -- see
+// EvaluatePrerequisites.
 const statusErrStaleSerial = "ERR_STALE_SERIAL"
 
-// statusErrFirstContactNeedsKSK is not one of §12's original status
-// codes (the design doc predates the optional KSK/ZSK split) but follows
-// its same diagnostic-TXT convention: a first-contact candidate DNSKEY
-// was presented without the SEP (KSK) flag set. See keys.go's KeyRole
-// doc comment for why a ZSK can never be what establishes a zone's
-// initial trust -- only a KSK can, so first contact refuses anything
-// else with this specific diagnostic rather than a bare, uninformative
-// REFUSED.
+// statusErrFirstContactNeedsKSK: a first-contact candidate DNSKEY lacks
+// the SEP (KSK) flag; only a KSK can establish a zone's trust (keys.go).
 const statusErrFirstContactNeedsKSK = "ERR_FIRST_CONTACT_REQUIRES_KSK"
 
-// statusErrExpiredSignature is another of §12's status codes: distinct
-// from the more general statusErrSigInvalid -- emitted when a pushed
-// RRset's RRSIG would otherwise verify against the candidate/pinned key
-// (right name, type,
-// key tag, and algorithm, and a cryptographically valid signature) but
-// falls outside its own inception/expiration window. Telling this apart
-// from "no valid signature at all" matters operationally: this one means
-// "re-sign and re-push," not "something is wrong with the key or the
-// content."
+// statusErrExpiredSignature: a pushed RRSIG verifies but is outside its
+// validity window -- re-sign and push again.
 const statusErrExpiredSignature = "ERR_EXPIRED_SIGNATURE"
 
-// statusErrDecommissionRequiresKSK is not one of §12's original status
-// codes (decommissioning a zone didn't exist when the design doc was
-// written) but follows its same diagnostic-TXT convention: a
-// decommission directive (decommission.go) was authenticated by
-// something other than the zone's own currently-pinned KSK -- an
-// already-registered ZSK, or a rollover-shaped candidate. Removing a
-// zone entirely is at least as consequential as establishing or rolling
-// over its KSK, so it requires exactly the same authenticator those do,
-// never the lighter-weight ZSK routine content pushes use.
+// statusErrDecommissionRequiresKSK: a decommission directive
+// (decommission.go) was authenticated by something other than the
+// pinned KSK.
 const statusErrDecommissionRequiresKSK = "ERR_DECOMMISSION_REQUIRES_KSK"
 
-// replyWithStatus replies to r with rcode and, if status is non-empty,
-// a diagnostic TXT record carrying it in the Additional section.
+// statusErrRequiresKSK: an update that changes the zone's DNSKEY RRset
+// or its registered contact was authenticated by a ZSK. Only the pinned
+// KSK may do either -- see the check in serveUpdate.
+const statusErrRequiresKSK = "ERR_KEY_MANAGEMENT_REQUIRES_KSK"
+
+// statusErrFullZoneRequired: an update changed served content without
+// carrying the zone's apex SOA, i.e. it wasn't a complete replacement of
+// the zone -- the only kind of content change SAZU accepts.
+const statusErrFullZoneRequired = "ERR_FULL_ZONE_REQUIRED"
+
+// statusErrDNSKEYSetMismatch: an update touching the DNSKEY RRset
+// didn't carry that RRset complete, or the RRset it would leave served
+// isn't exactly the pinned KSK plus the registered ZSKs.
+const statusErrDNSKEYSetMismatch = "ERR_DNSKEY_RRSET_MISMATCH"
+
+// statusErrVersionRequired: a control change (or a zone's first content
+// push) carried no version prerequisite -- see version.go.
+const statusErrVersionRequired = "ERR_VERSION_REQUIRED"
+
+// statusErrStaleVersion: the version prerequisite doesn't match the
+// zone's current version -- a replay, or something else changed the
+// zone's control state since the client read it. Re-read and re-sign.
+const statusErrStaleVersion = "ERR_STALE_VERSION"
+
+// statusErrSIG0LifetimeTooLong: the SIG(0) record's validity window is
+// longer than the server accepts -- see DefaultMaxSIG0Lifetime.
+const statusErrSIG0LifetimeTooLong = "ERR_SIG0_LIFETIME_TOO_LONG"
+
+// statusErrRolloverPending: a KSK rollover not co-signed by the current
+// KSK is waiting out its hold-down; the EXTRA-TEXT's detail says when it
+// can complete. See rollover.go.
+const statusErrRolloverPending = "ERR_ROLLOVER_PENDING"
+
+// statusErrWeakDSDigest: the candidate KSK matches a DS at the parent,
+// but only one with a SHA-1 digest (§7.2 accepts SHA-256/SHA-384 only).
+const statusErrWeakDSDigest = "ERR_WEAK_DS_DIGEST"
+
+// statusErrInvalidZoneContent: a content push breaks a rule every zone
+// has to follow (see checkZoneContent); the detail names it.
+const statusErrInvalidZoneContent = "ERR_INVALID_ZONE_CONTENT"
+
+// edeCodes maps each SAZU status code to the RFC 8914 Extended DNS Error
+// INFO-CODE it is reported under. Anything the server refuses as a
+// matter of policy is 18 (Prohibited); the few with a more specific
+// registered code use it; the rest are 0 (Other Error). The SAZU code
+// itself always travels as the EXTRA-TEXT.
+var edeCodes = map[string]uint16{
+	statusErrWeakAlgorithm:           dns.ExtendedErrorCodeUnsupportedDNSKEYAlgorithm,
+	statusErrWeakDSDigest:            dns.ExtendedErrorCodeUnsupportedDSDigestType,
+	statusErrSigInvalid:              dns.ExtendedErrorCodeDNSBogus,
+	statusErrExpiredSignature:        dns.ExtendedErrorCodeSignatureExpired,
+	statusErrNoDSPublished:           dns.ExtendedErrorCodeProhibited,
+	statusErrUnknownSigner:           dns.ExtendedErrorCodeProhibited,
+	statusErrFirstContactNeedsKSK:    dns.ExtendedErrorCodeProhibited,
+	statusErrDecommissionRequiresKSK: dns.ExtendedErrorCodeProhibited,
+	statusErrRequiresKSK:             dns.ExtendedErrorCodeProhibited,
+	statusErrTransportNotAllowed:     dns.ExtendedErrorCodeProhibited,
+	statusErrQuotaExceeded:           dns.ExtendedErrorCodeProhibited,
+	statusErrRateLimited:             dns.ExtendedErrorCodeProhibited,
+	statusErrFullZoneRequired:        dns.ExtendedErrorCodeProhibited,
+	statusErrDNSKEYSetMismatch:       dns.ExtendedErrorCodeProhibited,
+	statusErrVersionRequired:         dns.ExtendedErrorCodeProhibited,
+	statusErrRolloverPending:         dns.ExtendedErrorCodeProhibited,
+}
+
+// ResponseStatus returns the SAZU status code and detail a response
+// reports in its RFC 8914 Extended DNS Error, if it carries one.
+func ResponseStatus(m *dns.Msg) (status, detail string, ok bool) {
+	opt := m.IsEdns0()
+	if opt == nil {
+		return "", "", false
+	}
+	for _, o := range opt.Option {
+		if ede, isEDE := o.(*dns.EDNS0_EDE); isEDE && ede.ExtraText != "" {
+			status, detail, _ = strings.Cut(ede.ExtraText, ": ")
+			return status, detail, true
+		}
+	}
+	return "", "", false
+}
+
+// replyWithStatus replies to r with rcode. When the request carried
+// EDNS(0), the reply does too (RFC 6891 §7), and a non-empty status is
+// reported as an RFC 8914 Extended DNS Error: INFO-CODE from edeCodes,
+// the status code as EXTRA-TEXT.
 func replyWithStatus(w dns.ResponseWriter, r *dns.Msg, rcode int, status string) (int, error) {
+	return replyWithStatusDetail(w, r, rcode, status, "")
+}
+
+// replyWithStatusDetail is replyWithStatus with an optional human-readable
+// detail, appended to the EXTRA-TEXT as "STATUS: detail".
+func replyWithStatusDetail(w dns.ResponseWriter, r *dns.Msg, rcode int, status, detail string) (int, error) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Rcode = rcode
-	if status != "" {
-		m.Extra = append(m.Extra, &dns.TXT{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0},
-			Txt: []string{status},
-		})
+	if r.IsEdns0() != nil {
+		m.SetEdns0(dns.DefaultMsgSize, false)
+		if status != "" {
+			text := status
+			if detail != "" {
+				text += ": " + detail
+			}
+			opt := m.IsEdns0()
+			opt.Option = append(opt.Option, &dns.EDNS0_EDE{InfoCode: edeCodes[status], ExtraText: text})
+		}
 	}
 	return writeMsg(w, m)
 }

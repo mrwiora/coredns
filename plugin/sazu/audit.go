@@ -6,22 +6,19 @@ import (
 	"time"
 )
 
-// AuditEntry is one row of §12's audit trail: the record of what
+// AuditEntry is one row of §11.5's audit trail: the record of what
 // serveUpdate decided about one UPDATE transaction, kept regardless of
 // whether it was accepted or rejected -- an operator investigating "why
 // did my push fail" or "who touched this zone and when" needs the
 // rejected attempts at least as much as the accepted ones.
 type AuditEntry struct {
-	// ID is a fresh, server-generated identifier for this transaction --
-	// not something the client supplies or sees on the wire today (see
-	// plugin/sazu/docs/SAZU-PLAN.md for why this is deliberately server-side-only for
-	// now); it exists purely to let one accepted or rejected attempt be
-	// found again later in the audit log.
+	// ID is a server-generated identifier for this transaction, for
+	// finding it in the audit log. It is not sent to the client.
 	ID         string
 	Zone       string
 	RemoteAddr string
 	Rcode      string // dns.RcodeToString[...], e.g. "NOERROR", "REFUSED"
-	Status     string // a §12 status code (e.g. ERR_NO_DS_PUBLISHED), or "" if none applies
+	Status     string // a §10 status code (e.g. ERR_NO_DS_PUBLISHED), or "" if none applies
 	At         time.Time
 
 	// KeyTag and KeyRole identify which key's verified SIG(0) signature

@@ -161,25 +161,23 @@ func TestConcurrentUpdatesToDifferentZonesDoNotSerialize(t *testing.T) {
 	// ordinary partial update to the already-onboarded
 	// fast.example. -- this must complete quickly, not wait for
 	// slow.example.'s chain walk to finish.
-	now = time.Now()
-	signedWWW, err := SignZoneContent([]dns.RR{testA("www.fast.example.", net.IPv4(203, 0, 113, 10))}, fastKey, fastPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	fastSOA := synthesizeSOA("fast.example.")
+	fastSOA.Serial++
+	fastPush, err := BuildContentPush("fast.example.", fastSOA, []dns.RR{testA("www.fast.example.", net.IPv4(203, 0, 113, 10))}, fastKey, fastPriv, nil)
 	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
+		t.Fatalf("BuildContentPush: %v", err)
 	}
-	partial := new(dns.Msg)
-	partial.SetQuestion("fast.example.", dns.TypeSOA)
-	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert(signedWWW)
-	partialWire, err := SignUpdate(partial, fastKey, fastPriv, now.Add(-time.Minute), now.Add(time.Hour))
+	now = time.Now()
+	fastPushWire, err := SignUpdate(fastPush, fastKey, fastPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("signing fast zone partial push: %v", err)
+		t.Fatalf("signing fast zone content push: %v", err)
 	}
 
 	start := time.Now()
-	resp := sendRaw(t, addr, partialWire)
+	resp := sendRaw(t, addr, fastPushWire)
 	elapsed := time.Since(start)
 	if resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("fast zone partial push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
+		t.Fatalf("fast zone content push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 	if elapsed > slowDelay/2 {
 		t.Fatalf("expected fast.example.'s push to complete well within slowDelay (%s) despite slow.example.'s in-flight chain walk, took %s", slowDelay, elapsed)
@@ -201,10 +199,11 @@ func TestConcurrentUpdatesToDifferentZonesDoNotSerialize(t *testing.T) {
 // TestConcurrentUpdatesToSameZoneStillSerializeCorrectly proves the
 // other half of the property that matters: switching from one global
 // lock to per-zone stripes must not weaken correctness for updates
-// against the *same* zone. A burst of concurrent partial pushes,
-// each adding one distinct record, must all still apply -- no update
-// silently lost to a race the old single mutex would have prevented by
-// brute force.
+// against the *same* zone. A burst of concurrent full pushes, each with
+// its own serial and its own single record, races in arbitrary order:
+// each is either applied or refused as stale (a newer one already
+// landed), the newest serial always wins, and the zone ends up holding
+// exactly that push's content -- never a mixture of two pushes.
 func TestConcurrentUpdatesToSameZoneStillSerializeCorrectly(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
@@ -233,18 +232,14 @@ func TestConcurrentUpdatesToSameZoneStillSerializeCorrectly(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			now := time.Now()
-			signedRR, err := SignZoneContent([]dns.RR{testA(fmt.Sprintf("rec%d.example.org.", i), net.IPv4(203, 0, 113, byte(i)))},
-				key, priv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+			push, err := BuildContentPush("example.org.", testSOA(uint32(2+i)),
+				[]dns.RR{testA(fmt.Sprintf("rec%d.example.org.", i), net.IPv4(203, 0, 113, byte(i)))}, key, priv, nil)
 			if err != nil {
-				t.Errorf("signing content for push %d: %v", i, err)
+				t.Errorf("building push %d: %v", i, err)
 				return
 			}
-			partial := new(dns.Msg)
-			partial.SetQuestion("example.org.", dns.TypeSOA)
-			partial.Opcode = dns.OpcodeUpdate
-			partial.Insert(signedRR)
-			w, err := SignUpdate(partial, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
+			now := time.Now()
+			w, err := SignUpdate(push, key, priv, now.Add(-time.Minute), now.Add(time.Hour))
 			if err != nil {
 				t.Errorf("signing push %d: %v", i, err)
 				return
@@ -255,14 +250,25 @@ func TestConcurrentUpdatesToSameZoneStillSerializeCorrectly(t *testing.T) {
 	wg.Wait()
 
 	for i, rc := range rcodes {
-		if rc != dns.RcodeSuccess {
-			t.Fatalf("push %d rcode = %s, want NOERROR", i, dns.RcodeToString[rc])
+		if rc != dns.RcodeSuccess && rc != dns.RcodeRefused {
+			t.Fatalf("push %d rcode = %s, want NOERROR or REFUSED (stale serial)", i, dns.RcodeToString[rc])
 		}
+	}
+	if rcodes[n-1] != dns.RcodeSuccess {
+		t.Fatalf("the push with the highest serial must always be accepted, got %s", dns.RcodeToString[rcodes[n-1]])
+	}
+	z, _ := s.Store.Get("example.org.")
+	if soa := z.SOA(); soa == nil || soa.Serial != uint32(2+n-1) {
+		t.Fatalf("expected the zone to end on the highest serial %d, got %+v", 2+n-1, soa)
 	}
 	for i := 0; i < n; i++ {
 		name := fmt.Sprintf("rec%d.example.org.", i)
-		if answer := query(t, addr, name, dns.TypeA); len(answer.Answer) != 1 {
-			t.Fatalf("expected %s to be servable after %d concurrent pushes, got %d answers", name, n, len(answer.Answer))
+		want := 0
+		if i == n-1 {
+			want = 1
+		}
+		if answer := query(t, addr, name, dns.TypeA); len(answer.Answer) != want {
+			t.Fatalf("expected %s to have %d answer(s) once the newest push won, got %d", name, want, len(answer.Answer))
 		}
 	}
 }

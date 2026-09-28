@@ -37,13 +37,26 @@ func setup(c *caddy.Controller) error {
 	config.UDPDecorateReaderFunc = capture.DecorateReaderFunc
 	config.TCPDecorateReaderFunc = capture.DecorateReaderFunc
 
+	validator := NewValidator()
+	if cfg.trustAnchorPath != "" {
+		anchors, err := LoadTrustAnchors(cfg.trustAnchorPath)
+		if err != nil {
+			return plugin.Error("sazu", err)
+		}
+		validator.Anchors = anchors
+	}
+
 	s := &Sazu{
 		Zones:                       cfg.zones,
-		Validator:                   NewValidator(),
+		Validator:                   validator,
 		Capture:                     capture,
 		InsecureSkipChainValidation: cfg.insecureSkipChainValidation,
 		RateLimiter:                 NewRateLimiter(cfg.fullPushesPerDay, cfg.keyManagementPushesPerDay),
 		IPRateLimiter:               NewIPRateLimiter(cfg.ipUpdatesPerMinute),
+		Versions:                    NewVersionRegistry(),
+		Pending:                     NewPendingRollovers(),
+		RolloverHoldDown:            cfg.rolloverHoldDown,
+		MaxSIG0Lifetime:             cfg.maxSIG0Lifetime,
 	}
 
 	if cfg.dbPath != "" {
@@ -55,6 +68,22 @@ func setup(c *caddy.Controller) error {
 		if err != nil {
 			db.Close()
 			return plugin.Error("sazu", err)
+		}
+		versions, err := db.LoadVersions()
+		if err != nil {
+			db.Close()
+			return plugin.Error("sazu", err)
+		}
+		for zone, v := range versions {
+			s.Versions.Set(zone, v)
+		}
+		pending, err := db.LoadPendingRollovers()
+		if err != nil {
+			db.Close()
+			return plugin.Error("sazu", err)
+		}
+		for zone, pr := range pending {
+			s.Pending.Set(zone, pr)
 		}
 		s.DB = db
 		s.Store = store
@@ -82,6 +111,9 @@ type sazuConfig struct {
 	fullPushesPerDay            int
 	keyManagementPushesPerDay   int
 	ipUpdatesPerMinute          int
+	maxSIG0Lifetime             time.Duration
+	trustAnchorPath             string
+	rolloverHoldDown            time.Duration
 }
 
 func parseSazu(c *caddy.Controller) (sazuConfig, error) {
@@ -89,6 +121,8 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 		fullPushesPerDay:          DefaultFullPushesPerDay,
 		keyManagementPushesPerDay: DefaultKeyManagementPushesPerDay,
 		ipUpdatesPerMinute:        DefaultIPUpdatesPerMinute,
+		maxSIG0Lifetime:           DefaultMaxSIG0Lifetime,
+		rolloverHoldDown:          DefaultRolloverHoldDown,
 	}
 	for c.Next() {
 		args := c.RemainingArgs()
@@ -112,7 +146,7 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 				}
 				cfg.dbPath = args[0]
 			case "rate_limit":
-				// §12: <full-pushes-per-day> <key-management-pushes-per-day>,
+				// §11.2: <full-pushes-per-day> <key-management-pushes-per-day>,
 				// both over a rolling 24h window -- see ratelimit.go.
 				// Defaults (5/50) apply if this directive is omitted
 				// entirely.
@@ -131,7 +165,7 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 				cfg.fullPushesPerDay = full
 				cfg.keyManagementPushesPerDay = keyMgmt
 			case "ip_rate_limit":
-				// §12: <updates-per-minute>, the global, per-source-IP
+				// §11.2: <updates-per-minute>, the global, per-source-IP
 				// flood/scan throttle -- see ipratelimit.go. Default (30)
 				// applies if this directive is omitted entirely.
 				args := c.RemainingArgs()
@@ -143,6 +177,38 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 					return sazuConfig{}, c.Errf("ip_rate_limit: invalid updates-per-minute %q", args[0])
 				}
 				cfg.ipUpdatesPerMinute = perMinute
+			case "rollover_hold_down":
+				// How long a KSK rollover not co-signed by the old KSK
+				// waits -- see rollover.go. 0 disables the hold-down.
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return sazuConfig{}, c.ArgErr()
+				}
+				d, err := time.ParseDuration(args[0])
+				if err != nil || d < 0 {
+					return sazuConfig{}, c.Errf("rollover_hold_down: invalid duration %q", args[0])
+				}
+				cfg.rolloverHoldDown = d
+			case "trust_anchor":
+				// A file of root DS/DNSKEY trust anchors replacing the
+				// built-in ones -- see LoadTrustAnchors.
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return sazuConfig{}, c.ArgErr()
+				}
+				cfg.trustAnchorPath = args[0]
+			case "max_sig0_lifetime":
+				// Longest accepted SIG(0) validity window -- see
+				// DefaultMaxSIG0Lifetime. Default applies if omitted.
+				args := c.RemainingArgs()
+				if len(args) != 1 {
+					return sazuConfig{}, c.ArgErr()
+				}
+				d, err := time.ParseDuration(args[0])
+				if err != nil || d <= 0 {
+					return sazuConfig{}, c.Errf("max_sig0_lifetime: invalid duration %q", args[0])
+				}
+				cfg.maxSIG0Lifetime = d
 			default:
 				return sazuConfig{}, c.ArgErr()
 			}

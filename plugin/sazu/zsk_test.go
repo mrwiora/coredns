@@ -3,6 +3,7 @@ package sazu
 import (
 	"crypto/ed25519"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,32 +29,59 @@ func onboardWithKSK(t *testing.T, addr string, ksk *dns.DNSKEY, kskPriv ed25519.
 	}
 }
 
-// addZSK sends an ordinary, already-authenticated push (signed by
-// authKey, the KSK or an already-authorized ZSK) that adds zsk's DNSKEY
-// record at the zone apex -- the cheap registration path, with no chain-
-// of-trust network walk, findNewZSKCandidate/AddZSK exist for. The
-// DNSKEY insert itself is signed by authKey too (RFC 4034's convention:
-// whichever key is already trusted signs the DNSKEY RRset), since
-// content-signature verification is mandatory on every push, key
-// management included.
-func addZSK(t *testing.T, addr string, authKey *dns.DNSKEY, authPriv ed25519.PrivateKey, zsk *dns.DNSKEY) *dns.Msg {
+// testSerialCounter hands out strictly increasing SOA serials, so every
+// contentPush a test sends moves its zone's serial forward the way the
+// server requires (and stays above testSOA(1), which onboarding uses).
+var testSerialCounter uint32 = 1000
+
+// contentPush sends a complete content push for zone -- a fresh SOA with
+// a strictly increasing serial, rrs, and a freshly computed NSEC chain,
+// all signed by signKey -- authenticated (SIG(0)) by authKey. This is the
+// only shape of content change the server accepts.
+func contentPush(t *testing.T, addr, zone string, rrs []dns.RR, signKey *dns.DNSKEY, signPriv ed25519.PrivateKey, authKey *dns.DNSKEY, authPriv ed25519.PrivateKey) *dns.Msg {
 	t.Helper()
-	zskRR := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     zsk.Flags,
-		Protocol:  zsk.Protocol,
-		Algorithm: zsk.Algorithm,
-		PublicKey: zsk.PublicKey,
+	soa := synthesizeSOA(zone)
+	soa.Serial = atomic.AddUint32(&testSerialCounter, 1)
+	m, err := BuildContentPush(zone, soa, rrs, signKey, signPriv, nil)
+	if err != nil {
+		t.Fatalf("BuildContentPush: %v", err)
 	}
 	now := time.Now()
-	signed, err := SignZoneContent([]dns.RR{zskRR}, authKey, authPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
+	wire, err := SignUpdate(m, authKey, authPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
-		t.Fatalf("signing ZSK DNSKEY content: %v", err)
+		t.Fatalf("signing content push: %v", err)
 	}
-	m := new(dns.Msg)
-	m.SetQuestion("example.org.", dns.TypeSOA)
-	m.Opcode = dns.OpcodeUpdate
-	m.Insert(signed)
+	return sendRaw(t, addr, wire)
+}
+
+// currentDNSKEYs queries addr for example.org.'s live DNSKEY RRset --
+// the same thing sazuctl's fetchCurrentDNSKEYs does before any change
+// to it, since a change must re-sign the complete resulting RRset.
+func currentDNSKEYs(t *testing.T, addr string) []*dns.DNSKEY {
+	t.Helper()
+	var keys []*dns.DNSKEY
+	for _, rr := range query(t, addr, "example.org.", dns.TypeDNSKEY).Answer {
+		if k, ok := rr.(*dns.DNSKEY); ok {
+			keys = append(keys, k)
+		}
+	}
+	if len(keys) == 0 {
+		t.Fatalf("%s serves no DNSKEY RRset for example.org.", addr)
+	}
+	return keys
+}
+
+// addZSK sends a BuildAddZSKPush registering zsk, authenticated -- and
+// its DNSKEY RRset signed -- by authKey. The server only accepts this
+// from the zone's KSK; tests pass a ZSK as authKey to prove exactly
+// that.
+func addZSK(t *testing.T, addr string, authKey *dns.DNSKEY, authPriv ed25519.PrivateKey, zsk *dns.DNSKEY) *dns.Msg {
+	t.Helper()
+	m, err := BuildAddZSKPush("example.org.", currentDNSKEYs(t, addr), zsk, authKey, authPriv)
+	if err != nil {
+		t.Fatalf("BuildAddZSKPush: %v", err)
+	}
+	now := time.Now()
 	wire, err := SignUpdate(m, authKey, authPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing ZSK-add push: %v", err)
@@ -61,24 +89,34 @@ func addZSK(t *testing.T, addr string, authKey *dns.DNSKEY, authPriv ed25519.Pri
 	return sendRaw(t, addr, wire)
 }
 
-// retireZSK sends an RFC 2136 §2.5.4 "delete one RR" push removing
-// zsk's DNSKEY record, authenticated by authKey.
+// retireZSK sends a BuildRetireZSKPush removing zsk, authenticated by
+// authKey.
 func retireZSK(t *testing.T, addr string, authKey *dns.DNSKEY, authPriv ed25519.PrivateKey, zsk *dns.DNSKEY) *dns.Msg {
 	t.Helper()
-	m := new(dns.Msg)
-	m.SetQuestion("example.org.", dns.TypeSOA)
-	m.Opcode = dns.OpcodeUpdate
-	m.Remove([]dns.RR{&dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     zsk.Flags,
-		Protocol:  zsk.Protocol,
-		Algorithm: zsk.Algorithm,
-		PublicKey: zsk.PublicKey,
-	}})
+	m, err := BuildRetireZSKPush("example.org.", currentDNSKEYs(t, addr), zsk, authKey, authPriv)
+	if err != nil {
+		t.Fatalf("BuildRetireZSKPush: %v", err)
+	}
 	now := time.Now()
 	wire, err := SignUpdate(m, authKey, authPriv, now.Add(-time.Minute), now.Add(time.Hour))
 	if err != nil {
 		t.Fatalf("signing ZSK-retire push: %v", err)
+	}
+	return sendRaw(t, addr, wire)
+}
+
+// rolloverKSK sends a BuildKSKRolloverPush replacing oldKSK with newKSK,
+// authenticated by newKSK.
+func rolloverKSK(t *testing.T, addr string, oldKSK, newKSK *dns.DNSKEY, newPriv ed25519.PrivateKey) *dns.Msg {
+	t.Helper()
+	m, err := BuildKSKRolloverPush("example.org.", currentDNSKEYs(t, addr), oldKSK, newKSK, newPriv)
+	if err != nil {
+		t.Fatalf("BuildKSKRolloverPush: %v", err)
+	}
+	now := time.Now()
+	wire, err := SignUpdate(m, newKSK, newPriv, now.Add(-time.Minute), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("signing rollover push: %v", err)
 	}
 	return sendRaw(t, addr, wire)
 }
@@ -135,20 +173,8 @@ func TestRegisteringAZSKIsOptionalZoneBehaviorIsUnchangedWithoutOne(t *testing.T
 	}
 	onboardWithKSK(t, addr, ksk, kskPriv)
 
-	now := time.Now()
-	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, ksk, kskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	partial := new(dns.Msg)
-	partial.SetQuestion("example.org.", dns.TypeSOA)
-	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert(signedA)
-	wire, err := SignUpdate(partial, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing: %v", err)
-	}
-	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
+	rrs := []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}
+	if resp := contentPush(t, addr, "example.org.", rrs, ksk, kskPriv, ksk, kskPriv); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
@@ -180,20 +206,7 @@ func TestZSKAuthenticatesFurtherTransactionsOnceRegistered(t *testing.T) {
 	}
 
 	// A routine content push, authenticated by the ZSK alone.
-	now := time.Now()
-	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, zsk, zskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	partial := new(dns.Msg)
-	partial.SetQuestion("example.org.", dns.TypeSOA)
-	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert(signedA)
-	wire, err := SignUpdate(partial, zsk, zskPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing: %v", err)
-	}
-	resp := sendRaw(t, addr, wire)
+	resp := contentPush(t, addr, "example.org.", []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, zsk, zskPriv, zsk, zskPriv)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("ZSK-authenticated push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
@@ -240,20 +253,7 @@ func TestServeUpdateAuditTrailAttributesEachPushToItsOwnZSK(t *testing.T) {
 
 	pushContent := func(zsk *dns.DNSKEY, zskPriv ed25519.PrivateKey, rr dns.RR) {
 		t.Helper()
-		now := time.Now()
-		signed, err := SignZoneContent([]dns.RR{rr}, zsk, zskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-		if err != nil {
-			t.Fatalf("SignZoneContent: %v", err)
-		}
-		m := new(dns.Msg)
-		m.SetQuestion("example.org.", dns.TypeSOA)
-		m.Opcode = dns.OpcodeUpdate
-		m.Insert(signed)
-		wire, err := SignUpdate(m, zsk, zskPriv, now.Add(-time.Minute), now.Add(time.Hour))
-		if err != nil {
-			t.Fatalf("signing: %v", err)
-		}
-		if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeSuccess {
+		if resp := contentPush(t, addr, "example.org.", []dns.RR{rr}, zsk, zskPriv, zsk, zskPriv); resp.Rcode != dns.RcodeSuccess {
 			t.Fatalf("content push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 		}
 	}
@@ -317,20 +317,7 @@ func TestZSKCanSignContentVerifiedUnderRequireValidRRSIGs(t *testing.T) {
 	}
 
 	rrs := []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}
-	now := time.Now()
-	signed, err := SignZoneContent(rrs, zsk, zskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("signing content with the ZSK: %v", err)
-	}
-	partial := new(dns.Msg)
-	partial.SetQuestion("example.org.", dns.TypeSOA)
-	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert(signed)
-	wire, err := SignUpdate(partial, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing transaction: %v", err)
-	}
-	resp := sendRaw(t, addr, wire)
+	resp := contentPush(t, addr, "example.org.", rrs, zsk, zskPriv, ksk, kskPriv)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rcode = %s, want NOERROR (content signed by a registered ZSK should verify)", dns.RcodeToString[resp.Rcode])
 	}
@@ -411,24 +398,7 @@ func TestKSKRolloverPreservesExistingZSK(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generating new KSK: %v", err)
 	}
-	newKSKRR := &dns.DNSKEY{
-		Hdr:   dns.RR_Header{Name: "example.org.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags: newKSK.Flags, Protocol: newKSK.Protocol, Algorithm: newKSK.Algorithm, PublicKey: newKSK.PublicKey,
-	}
-	now := time.Now()
-	signedKSK, err := SignZoneContent([]dns.RR{newKSKRR}, newKSK, newKSKPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	rollover := new(dns.Msg)
-	rollover.SetQuestion("example.org.", dns.TypeSOA)
-	rollover.Opcode = dns.OpcodeUpdate
-	rollover.Insert(signedKSK)
-	rolloverWire, err := SignUpdate(rollover, newKSK, newKSKPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing rollover push: %v", err)
-	}
-	if resp := sendRaw(t, addr, rolloverWire); resp.Rcode != dns.RcodeSuccess {
+	if resp := rolloverKSK(t, addr, oldKSK, newKSK, newKSKPriv); resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rollover push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
 
@@ -442,20 +412,7 @@ func TestKSKRolloverPreservesExistingZSK(t *testing.T) {
 
 	// The ZSK, registered under the now-superseded KSK, still
 	// authenticates a push on its own.
-	now = time.Now()
-	signedA, err := SignZoneContent([]dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, zsk, zskPriv, now.Add(-DefaultSignatureInceptionSkew), now.Add(DefaultSignatureValidity))
-	if err != nil {
-		t.Fatalf("SignZoneContent: %v", err)
-	}
-	partial := new(dns.Msg)
-	partial.SetQuestion("example.org.", dns.TypeSOA)
-	partial.Opcode = dns.OpcodeUpdate
-	partial.Insert(signedA)
-	wire, err := SignUpdate(partial, zsk, zskPriv, now.Add(-time.Minute), now.Add(time.Hour))
-	if err != nil {
-		t.Fatalf("signing: %v", err)
-	}
-	resp := sendRaw(t, addr, wire)
+	resp := contentPush(t, addr, "example.org.", []dns.RR{testA("www.example.org.", net.IPv4(203, 0, 113, 10))}, zsk, zskPriv, zsk, zskPriv)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("post-rollover ZSK-authenticated push rcode = %s, want NOERROR", dns.RcodeToString[resp.Rcode])
 	}
@@ -494,7 +451,7 @@ func TestFirstContactRejectsNonKSKCandidate(t *testing.T) {
 	}
 }
 
-// TestAddZSKRejectsWeakAlgorithm proves §10.7's algorithm floor applies
+// TestAddZSKRejectsWeakAlgorithm proves §11.3's algorithm floor applies
 // to a ZSK registration exactly as it does at first contact and KSK
 // rollover -- checked before the key is registered.
 func TestAddZSKRejectsWeakAlgorithm(t *testing.T) {

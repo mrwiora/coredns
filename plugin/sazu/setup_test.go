@@ -3,6 +3,7 @@ package sazu
 import (
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/coredns/caddy"
 )
@@ -205,5 +206,69 @@ func TestSetupWithoutDBIsPurelyInMemory(t *testing.T) {
 	c := caddy.NewTestController("dns", `sazu example.org.`)
 	if err := setup(c); err != nil {
 		t.Fatalf("setup: %v", err)
+	}
+}
+
+func TestParseSazuMaxSIG0LifetimeAndTrustAnchor(t *testing.T) {
+	c := caddy.NewTestController("dns", `sazu example.org.`)
+	cfg, err := parseSazu(c)
+	if err != nil {
+		t.Fatalf("parseSazu: %v", err)
+	}
+	if cfg.maxSIG0Lifetime != DefaultMaxSIG0Lifetime || cfg.trustAnchorPath != "" {
+		t.Fatalf("expected defaults, got lifetime=%s anchor=%q", cfg.maxSIG0Lifetime, cfg.trustAnchorPath)
+	}
+
+	c = caddy.NewTestController("dns", `sazu example.org. {
+		max_sig0_lifetime 10m
+		trust_anchor /etc/unbound/root.key
+	}`)
+	cfg, err = parseSazu(c)
+	if err != nil {
+		t.Fatalf("parseSazu: %v", err)
+	}
+	if cfg.maxSIG0Lifetime != 10*time.Minute || cfg.trustAnchorPath != "/etc/unbound/root.key" {
+		t.Fatalf("expected overrides, got lifetime=%s anchor=%q", cfg.maxSIG0Lifetime, cfg.trustAnchorPath)
+	}
+
+	for _, bad := range []string{
+		"max_sig0_lifetime",
+		"max_sig0_lifetime soon",
+		"max_sig0_lifetime -5m",
+		"trust_anchor",
+		"trust_anchor a b",
+	} {
+		c = caddy.NewTestController("dns", "sazu example.org. {\n"+bad+"\n}")
+		if _, err := parseSazu(c); err == nil {
+			t.Errorf("%q: expected an error", bad)
+		}
+	}
+}
+
+// TestSetupRejectsUnreadableTrustAnchorFile: a configured trust anchor
+// file that can't be loaded fails setup rather than silently falling
+// back to the built-in anchors.
+func TestSetupRejectsUnreadableTrustAnchorFile(t *testing.T) {
+	c := caddy.NewTestController("dns", `sazu example.org. {
+		trust_anchor `+filepath.Join(t.TempDir(), "missing.key")+`
+	}`)
+	if err := setup(c); err == nil {
+		t.Fatalf("expected setup to fail for a missing trust anchor file")
+	}
+}
+
+func TestParseSazuRolloverHoldDown(t *testing.T) {
+	cfg, err := parseSazu(caddy.NewTestController("dns", `sazu example.org.`))
+	if err != nil || cfg.rolloverHoldDown != DefaultRolloverHoldDown {
+		t.Fatalf("expected the default hold-down, got %s (%v)", cfg.rolloverHoldDown, err)
+	}
+	cfg, err = parseSazu(caddy.NewTestController("dns", "sazu example.org. {\nrollover_hold_down 0s\n}"))
+	if err != nil || cfg.rolloverHoldDown != 0 {
+		t.Fatalf("expected 0 to disable the hold-down, got %s (%v)", cfg.rolloverHoldDown, err)
+	}
+	for _, bad := range []string{"rollover_hold_down", "rollover_hold_down -1h", "rollover_hold_down soon"} {
+		if _, err := parseSazu(caddy.NewTestController("dns", "sazu example.org. {\n"+bad+"\n}")); err == nil {
+			t.Errorf("%q: expected an error", bad)
+		}
 	}
 }

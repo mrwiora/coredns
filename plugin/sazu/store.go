@@ -2,7 +2,6 @@ package sazu
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 
@@ -243,62 +242,12 @@ func (z *ZoneData) deleteRRLocked(rr dns.RR) {
 	byType[rr.Header().Rrtype] = kept
 }
 
-// PurgeNSEC removes every stored NSEC or NSEC3(PARAM) record (and their
-// covering RRSIGs) across the whole zone -- whichever scheme, if either,
-// the zone was last pushed with. Called from handler.go's serveUpdate
-// for an update that changes chain-relevant content without being a
-// full content push (see changesChainRelevantContent) -- nothing
-// sazuctl itself builds reaches this today (publish-zone is the only
-// command that ever changes ordinary content, and it's always a full
-// push handled by PurgeContentAndApply instead), but the protocol
-// doesn't forbid a different, arbitrary SIG(0)-signed client from
-// sending one. SAZU's split-signing model means only a freshly,
-// completely recomputed chain -- from a full push, the only kind that
-// sees the zone's entire name set at once -- can be trusted as correct,
-// so any existing chain is invalidated up front rather than risked
-// going stale. Serving no negative-existence proof is safe; serving a
-// stale one that contradicts what the zone actually contains now is
-// not. A subsequent full push's own NSEC or NSEC3 records (see
-// BuildNSECChain / BuildNSEC3Chain) repopulate the chain; a push that
-// changed chain-relevant content without supplying a replacement chain
-// leaves the zone with none until then.
-func (z *ZoneData) PurgeNSEC() {
-	z.mu.Lock()
-	defer z.mu.Unlock()
-	for _, byType := range z.rrsets {
-		delete(byType, dns.TypeNSEC)
-		delete(byType, dns.TypeNSEC3)
-		delete(byType, dns.TypeNSEC3PARAM)
-		sigs, ok := byType[dns.TypeRRSIG]
-		if !ok {
-			continue
-		}
-		kept := sigs[:0]
-		for _, rr := range sigs {
-			if sig, ok := rr.(*dns.RRSIG); !ok ||
-				(sig.TypeCovered != dns.TypeNSEC && sig.TypeCovered != dns.TypeNSEC3 && sig.TypeCovered != dns.TypeNSEC3PARAM) {
-				kept = append(kept, rr)
-			}
-		}
-		byType[dns.TypeRRSIG] = kept
-	}
-}
-
-// PurgeContent removes every ordinary RRset at every name in the zone --
-// apex DNSKEY, and its own covering RRSIG, excepted, since key
-// management is independent of zone content and must never be touched
-// by a content-only operation (see keys.go's KeyRole doc comment).
-// Called before applying a full content push (containsAPEXSOA --
-// sazuctl publish-zone always sends one, as the zone's complete,
-// authoritative content): without this, a record dropped from the zone
-// file would simply linger on the server forever, since an ordinary RFC
-// 2136 add is never itself a deletion. This also clears any existing
-// NSEC/NSEC3(PARAM) chain and its covering RRSIGs, same as PurgeNSEC --
-// they're ordinary (non-DNSKEY) content -- so a full push never needs to
-// call both. The push's own content (SOA, every record, and a fresh
-// chain) repopulates the zone in the same update, immediately after --
-// see PurgeContentAndApply, which does both under one lock so a
-// concurrent query can never observe the zone in between.
+// PurgeContent removes every RRset in the zone except the apex DNSKEY
+// RRset and its RRSIGs (key management is separate from content). A full
+// content push replaces the zone, so this runs first; an RFC 2136 add
+// alone never removes a record the new zone file no longer has. See
+// PurgeContentAndApply, which does both under one lock so no query sees
+// the zone in between.
 func (z *ZoneData) PurgeContent() {
 	z.mu.Lock()
 	defer z.mu.Unlock()
@@ -360,6 +309,7 @@ func (z *ZoneData) applyOpLocked(rr dns.RR, zclass uint16) error {
 func (z *ZoneData) ApplyOps(ops []dns.RR, zclass uint16) error {
 	z.mu.Lock()
 	defer z.mu.Unlock()
+	z.dropSupersededDNSKEYSigsLocked(ops, zclass)
 	for _, rr := range ops {
 		if err := z.applyOpLocked(rr, zclass); err != nil {
 			return err
@@ -384,163 +334,13 @@ func (z *ZoneData) PurgeContentAndApply(ops []dns.RR, zclass uint16) error {
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	z.purgeContentLocked()
+	z.dropSupersededDNSKEYSigsLocked(ops, zclass)
 	for _, rr := range ops {
 		if err := z.applyOpLocked(rr, zclass); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// ownerNames returns every name z holds any RRset for, including the
-// apex, lowercased and deduplicated -- the node set NegativeProof's
-// canonical-order search runs over.
-func (z *ZoneData) ownerNames() []string {
-	z.mu.RLock()
-	defer z.mu.RUnlock()
-	seen := map[string]bool{z.Origin: true}
-	for name := range z.rrsets {
-		seen[name] = true
-	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
-	}
-	return names
-}
-
-// NegativeProof returns the NSEC or NSEC3 record(s) (each paired with
-// its RRSIG) needed to authenticate qname's negative result, per RFC
-// 4035 §3.1.3 (NSEC) or RFC 5155 §7.2 (NSEC3) -- whichever scheme the
-// zone's last full push used (detected via nsec3Param: an NSEC3PARAM
-// record at the apex means NSEC3, its absence means plain NSEC or no
-// chain at all). The two return different record shapes but the same
-// proof, for the same reason:
-//
-//   - NODATA (nameExists true): the record stored at (NSEC) or matching
-//     the hash of (NSEC3) qname itself -- its type bitmap simply won't
-//     list the queried type, which is the whole proof.
-//   - NXDOMAIN (nameExists false): NSEC needs two records -- the one
-//     covering qname itself, plus the one covering the wildcard slot
-//     ("*." + qname's closest encloser) -- proving not only that qname
-//     doesn't exist, but that no wildcard elsewhere in the zone could
-//     have matched it either. NSEC3 needs the closest encloser's own
-//     matching record too (hashing hides the tree structure NSEC's
-//     covering record alone reveals for free), so up to three: closest
-//     encloser match, next-closer-name cover, wildcard cover.
-//
-// SAZU never synthesizes wildcard-matched answers (see nsec.go's
-// top-of-file doc comment), so in both cases this is a completeness
-// proof about the zone's actual (non-wildcard) content, not a corner
-// this package cuts by ignoring wildcards it might otherwise need to
-// handle.
-//
-// Returns nil if the zone has no chain at all -- either nothing was ever
-// pushed with one (an older push, from before this feature), or a
-// non-full-push update changed chain-relevant content and invalidated
-// it (see PurgeNSEC) with no full push having repopulated it since. A
-// negative response simply carries no authenticated denial in that
-// case, the same as before this existed.
-func (z *ZoneData) NegativeProof(qname string, nameExists bool) []dns.RR {
-	qname = strings.ToLower(dns.Fqdn(qname))
-
-	if param := z.nsec3Param(); param != nil {
-		return z.nsec3NegativeProof(qname, nameExists, param)
-	}
-
-	if nameExists {
-		out := z.Lookup(qname, dns.TypeNSEC)
-		return append(out, z.LookupRRSIG(qname, dns.TypeNSEC)...)
-	}
-
-	owners := z.ownerNames()
-	if len(owners) == 0 {
-		return nil
-	}
-	ownerSet := make(map[string]bool, len(owners))
-	for _, o := range owners {
-		ownerSet[o] = true
-	}
-	SortNamesCanonically(owners)
-
-	var out []dns.RR
-	added := make(map[string]bool, 2)
-	add := func(owner string) {
-		if added[owner] {
-			return
-		}
-		added[owner] = true
-		out = append(out, z.Lookup(owner, dns.TypeNSEC)...)
-		out = append(out, z.LookupRRSIG(owner, dns.TypeNSEC)...)
-	}
-
-	if owner, ok := CoveringOwner(qname, owners); ok {
-		add(owner)
-	}
-	ce := ClosestEncloser(qname, ownerSet)
-	if owner, ok := CoveringOwner("*."+ce, owners); ok {
-		add(owner)
-	}
-	return out
-}
-
-// nsec3Param returns the zone's NSEC3PARAM record, or nil if the zone
-// isn't (currently) using NSEC3.
-func (z *ZoneData) nsec3Param() *dns.NSEC3PARAM {
-	rrs := z.Lookup(z.Origin, dns.TypeNSEC3PARAM)
-	if len(rrs) == 0 {
-		return nil
-	}
-	param, _ := rrs[0].(*dns.NSEC3PARAM)
-	return param
-}
-
-// nsec3NegativeProof is NegativeProof's RFC 5155 §7.2 path. Unlike a
-// resolver validating an NSEC3 chain it received blind, this server
-// already knows qname's closest encloser and next-closer name in
-// plaintext (see this file's own top-of-file doc comment) -- so it
-// hashes exactly the specific candidate names it needs a record for,
-// rather than needing to walk the hash ring to find them.
-func (z *ZoneData) nsec3NegativeProof(qname string, nameExists bool, param *dns.NSEC3PARAM) []dns.RR {
-	var out []dns.RR
-	added := make(map[string]bool, 3)
-	addByHash := func(hash string) {
-		if hash == "" || added[hash] {
-			return
-		}
-		added[hash] = true
-		owner := hash + "." + z.Origin
-		out = append(out, z.Lookup(owner, dns.TypeNSEC3)...)
-		out = append(out, z.LookupRRSIG(owner, dns.TypeNSEC3)...)
-	}
-
-	if nameExists {
-		addByHash(NSEC3Hash(qname, param))
-		return out
-	}
-
-	owners := z.ownerNames()
-	if len(owners) == 0 {
-		return nil
-	}
-	ownerSet := make(map[string]bool, len(owners))
-	sortedHashes := make([]string, len(owners))
-	for i, o := range owners {
-		ownerSet[o] = true
-		sortedHashes[i] = NSEC3Hash(o, param)
-	}
-	sort.Strings(sortedHashes)
-
-	ce := ClosestEncloser(qname, ownerSet)
-	addByHash(NSEC3Hash(ce, param)) // closest-encloser match: ce is a real owner, so this is exact
-
-	if h, ok := CoveringHash(NSEC3Hash(NextCloserName(qname, ce), param), sortedHashes); ok {
-		addByHash(h)
-	}
-	if h, ok := CoveringHash(NSEC3Hash("*."+ce, param), sortedHashes); ok {
-		addByHash(h)
-	}
-	return out
 }
 
 // rrEqualContent compares two RRs by name/type/rdata only, ignoring TTL
@@ -612,16 +412,20 @@ func (s *Store) DeleteZone(origin string) {
 // lets many customer domains be onboarded dynamically under one broad
 // plugin scope (e.g. a Corefile's "sazu ."), with no per-domain Corefile
 // edit needed: the set of zones this searches is whatever has actually
-// been onboarded, not a fixed list. A zone with no SOA yet (shouldn't
-// normally exist, given handler.go's first-contact invariant, but
-// defensively excluded here too) doesn't count as found.
+// been onboarded, not a fixed list. A zone counts as found once it has
+// either a SOA or an apex DNSKEY RRset: a zone onboarded by a keys-only
+// first contact (sazuctl publish-trust) has no content, and so no SOA,
+// until its first publish-zone push, but must still answer DNSKEY
+// queries in between -- add-zsk, retire-zsk and rotate-key read the live
+// DNSKEY RRset before signing a change to it. A zone with neither (an
+// empty placeholder left by a rejected update) doesn't count.
 func (s *Store) FindZoneForName(name string) (origin string, zone *ZoneData, ok bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var best string
 	var bestZone *ZoneData
 	for candidate, z := range s.zones {
-		if z.SOA() == nil {
+		if z.SOA() == nil && len(z.Lookup(candidate, dns.TypeDNSKEY)) == 0 {
 			continue
 		}
 		if dns.IsSubDomain(candidate, name) && len(candidate) > len(best) {
@@ -632,4 +436,41 @@ func (s *Store) FindZoneForName(name string) (origin string, zone *ZoneData, ok 
 		return "", nil, false
 	}
 	return best, bestZone, true
+}
+
+// addsApexDNSKEYSig reports whether ops adds an RRSIG over origin's
+// DNSKEY RRset.
+func addsApexDNSKEYSig(ops []dns.RR, origin string, zclass uint16) bool {
+	for _, rr := range ops {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.Hdr.Class == zclass && sig.TypeCovered == dns.TypeDNSKEY &&
+			strings.EqualFold(sig.Hdr.Name, origin) {
+			return true
+		}
+	}
+	return false
+}
+
+// dropSupersededDNSKEYSigsLocked removes every stored RRSIG over the apex
+// DNSKEY RRset when ops brings new ones. An update that changes the
+// DNSKEY RRset always carries it complete, freshly signed by the KSK
+// (serveUpdate enforces both), so every earlier signature over it --
+// including one by a KSK that just left the set in a rollover, which
+// replaceRRSIG's same-signer rule would never catch -- is stale.
+// Callers must hold z.mu.
+func (z *ZoneData) dropSupersededDNSKEYSigsLocked(ops []dns.RR, zclass uint16) {
+	if !addsApexDNSKEYSig(ops, z.Origin, zclass) {
+		return
+	}
+	byType, ok := z.rrsets[strings.ToLower(z.Origin)]
+	if !ok {
+		return
+	}
+	kept := byType[dns.TypeRRSIG][:0]
+	for _, rr := range byType[dns.TypeRRSIG] {
+		if sig, ok := rr.(*dns.RRSIG); ok && sig.TypeCovered == dns.TypeDNSKEY {
+			continue
+		}
+		kept = append(kept, rr)
+	}
+	byType[dns.TypeRRSIG] = kept
 }

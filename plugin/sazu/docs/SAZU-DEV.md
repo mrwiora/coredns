@@ -83,7 +83,7 @@ sandbox to publish a DS record against.
 
 6. **Confirm impersonation is rejected**: generate a second, different key
    and try to push with it against the same zone as if it were the
-   ZSK — it must be refused (`NOTAUTH`), and the record must not appear:
+   ZSK — it must be refused (`REFUSED`), and the record must not appear:
 
    ```
    ./sazuctl keygen -out attacker.private -zone example.org -role zsk

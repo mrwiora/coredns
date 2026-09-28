@@ -6,7 +6,7 @@ import (
 )
 
 // DefaultFullPushesPerDay and DefaultKeyManagementPushesPerDay are
-// §12's starting quota numbers: 5 content pushes (sazuctl publish-zone)
+// §11.2's starting quota numbers: 5 content pushes (sazuctl publish-zone)
 // and 50 key-management pushes (publish-trust, add-zsk, retire-zsk,
 // rotate-key) per zone, per rolling 24h window. Different limits for
 // the two kinds because they have very different costs -- a content
@@ -18,7 +18,7 @@ const (
 	DefaultKeyManagementPushesPerDay = 50
 )
 
-// RateLimiter enforces §12's per-zone push quotas over a rolling (not
+// RateLimiter enforces §11.2's per-zone push quotas over a rolling (not
 // calendar-day) 24h window: FullPerDay content pushes and
 // KeyManagementPerDay key-management ones, tracked and enforced
 // independently per zone.

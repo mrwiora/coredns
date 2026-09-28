@@ -66,9 +66,7 @@ type HTTPRequestKey struct{}
 // Config); HTTPS/HTTP3 never go through a dns.Server's DecorateReader at
 // all, so this context value is the equivalent for them. Set once per
 // request, from the same raw bytes doh.RequestToMsgWireWithAccept
-// already extracted -- decoded from a JSON wire envelope first, if the
-// request used one, so a plugin retrieving this always gets the
-// message's true wire bytes regardless of which carrier delivered them.
+// already extracted.
 type RawRequestKey struct{}
 
 // NewServerHTTPS returns a new CoreDNS HTTPS server and compiles all plugins in to it.

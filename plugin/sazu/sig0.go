@@ -7,15 +7,14 @@ import (
 	"github.com/miekg/dns"
 )
 
-// SignUpdate signs m (an already-built RFC 2136 UPDATE message, question
-// section set, no SIG(0) yet) with priv, acting as signerKey, and returns
-// the exact wire bytes to send: SIG.Sign packs the message, appends the
-// SIG(0) record to the additional section, and fixes up the header count
-// itself, per RFC 2931 §3.1 -- there is no separate re-encode step here,
-// which matters because RFC 2931 signs literal wire bytes, not a
-// re-serialization of parsed fields (the exact issue the earlier Rust/rDNS
-// port had to handle by hand; miekg/dns's SIG.Sign already does this
-// correctly).
+// SignUpdate signs m (an RFC 2136 UPDATE message, question section set,
+// no SIG(0) yet) with priv, acting as signerKey, and returns the exact
+// wire bytes to send: SIG.Sign packs the message, appends the SIG(0)
+// record last in the additional section and fixes up the header count
+// (RFC 2931 §3.1). RFC 2931 signs literal wire bytes, so the returned
+// bytes must be sent as they are. An OPT record is added first if m has
+// none, so the server can report its status as an RFC 8914 Extended DNS
+// Error (EDNS(0), RFC 6891).
 func SignUpdate(m *dns.Msg, signerKey *dns.DNSKEY, priv ed25519.PrivateKey, inception, expiration time.Time) ([]byte, error) {
 	sig := &dns.SIG{
 		RRSIG: dns.RRSIG{
@@ -26,6 +25,9 @@ func SignUpdate(m *dns.Msg, signerKey *dns.DNSKEY, priv ed25519.PrivateKey, ince
 			Inception:  uint32(inception.Unix()),
 			Expiration: uint32(expiration.Unix()),
 		},
+	}
+	if m.IsEdns0() == nil {
+		m.SetEdns0(dns.DefaultMsgSize, false)
 	}
 	return sig.Sign(priv, m)
 }

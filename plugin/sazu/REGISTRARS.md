@@ -133,9 +133,9 @@ was still the one actually signing what it served.
 
 ## Registrar-specific notes (TODO)
 
-The design document (`sazu-protocol.md` §10.3, in the separate
-[github.com/mrwiora/sazu](https://github.com/mrwiora/sazu) repo) flags a
-few registrars with open questions worth confirming empirically and
+The specification (§16 of `readme.md` in
+[github.com/mrwiora/sazu](https://github.com/mrwiora/sazu)) flags a few
+registrars with open questions worth confirming empirically and
 writing up here:
 
 - [ ] **GoDaddy** — has a DS-record submission flow; whether it does a

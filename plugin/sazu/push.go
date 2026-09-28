@@ -21,10 +21,8 @@ const (
 )
 
 // LoadZoneFile parses a BIND-format zone file and returns its SOA record
-// and every other RR it contains. A full-zone SAZU push (§12) sends the
-// customer's own zone content exactly as they maintain it -- not a
-// synthetic subset built record by record, the way the earlier sazuctl
-// push command demonstrated the protocol with a single A record.
+// and every other RR it contains: the zone content a full push (§5.3)
+// sends.
 func LoadZoneFile(path, origin string) (soa *dns.SOA, rrs []dns.RR, err error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -52,57 +50,28 @@ func LoadZoneFile(path, origin string) (soa *dns.SOA, rrs []dns.RR, err error) {
 	return soa, rrs, nil
 }
 
-// BuildFullZonePush builds an RFC 2136 UPDATE message for a full-zone
-// SAZU push (§12): the candidate DNSKEY plus every record in the zone
-// (soa included, so the pushed SOA actually becomes part of what the
-// server serves -- it is content, not just a version marker).
+// BuildFullZonePush builds a full-zone push (§5.3) signed with one key:
+// the key as the apex DNSKEY, the SOA, every record in rrs and an NSEC
+// chain over all of it, each RRset carrying an RRSIG by that key (SIG(0)
+// authenticates the transaction; the RRSIGs are what validating
+// resolvers check once it's served).
 //
 // previousSOA, if non-nil, adds an RFC 2136 §2.4.2 "RRset exists, value
-// dependent" prerequisite against it -- the SOA-serial staleness guard:
-// the update only applies if previousSOA is still the server's current
-// SOA, so a push built from a zone snapshot the server has already moved
-// past gets rejected rather than silently regressing it. Pass nil for a
-// first-contact push: there is no previously-published SOA yet to be
-// stale against, and §10.2 explicitly carries no prerequisites of its
-// own at first contact.
+// dependent" prerequisite on it, so the push applies only if that is
+// still the served SOA. Pass nil for a zone's first push.
 //
-// candidateKey is added as a DNSKEY at the zone apex -- the design's
-// central decision (§9.1: the same key signs and authenticates), so it
-// always travels with the push, first contact or not.
-//
-// signer is that same key's private half, used to actually sign the
-// pushed content (DNSKEY, SOA, every RRset in rrs, and a freshly
-// computed NSEC chain covering all of it -- see BuildNSECChain) with
-// real RFC 4034 RRSIGs via SignZoneContent -- this is what SAZU's whole
-// premise ("split-signing DNSSEC," the hoster never touches a private
-// key) actually requires: SIG(0) alone only authenticates the push
-// *transaction*, not the zone *content*. Without this, a validating
-// resolver would see a zone with a published DS but no RRSIGs at all —
-// exactly the "bogus" state that produces SERVFAIL for real DNSSEC
-// clients, regardless of whether the push mechanics themselves are sound.
-//
-// A full push is the only kind that ever computes or sends a
-// denial-of-existence chain -- it's the only one that sees the zone's
-// entire name set at once, which a correct chain needs. The server
-// invalidates any existing chain before applying a push that doesn't
-// include one (see ZoneData.PurgeNSEC); this one always does.
+// Only a full push carries a denial-of-existence chain, since only it
+// sees every name in the zone; the server refuses partial content pushes.
 func BuildFullZonePush(zone string, soa *dns.SOA, rrs []dns.RR, candidateKey *dns.DNSKEY, signer crypto.Signer, previousSOA *dns.SOA) (*dns.Msg, error) {
 	return BuildFullZonePushSplit(zone, soa, rrs, candidateKey, signer, nil, nil, previousSOA)
 }
 
-// BuildFullZonePushSplit is BuildFullZonePush's optional-ZSK
-// generalization: ksk is always added as a DNSKEY at the apex and always
-// signs the DNSKEY RRset (RFC 4034's own convention -- the key-signing
-// key signs the key set). If zsk is non-nil, it is *also* added as a
-// DNSKEY at the apex (so the DNSKEY RRset this push asserts reflects the
-// zone's whole current key state, not just its KSK) and signs every
-// *other* RRset -- the zone's actual content -- instead of ksk. Passing
-// zsk as nil reproduces BuildFullZonePush's original single-key behavior
-// exactly (byte-for-byte: it's the same code path with the same key
-// signing everything), which is what BuildFullZonePush itself now does.
+// BuildFullZonePushSplit is BuildFullZonePush with a separate ZSK: ksk
+// is added to the apex DNSKEY RRset and signs it; zsk, if non-nil, is
+// added too and signs every other RRset. With zsk nil, ksk signs
+// everything.
 //
-// Uses plain NSEC (BuildNSECChain). See BuildFullZonePushSplitNSEC3 for
-// the RFC 5155 NSEC3 alternative.
+// Uses NSEC (BuildNSECChain); see BuildFullZonePushSplitNSEC3 for NSEC3.
 func BuildFullZonePushSplit(zone string, soa *dns.SOA, rrs []dns.RR, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY, zskSigner crypto.Signer, previousSOA *dns.SOA) (*dns.Msg, error) {
 	return buildFullZonePushSplit(zone, soa, rrs, ksk, kskSigner, zsk, zskSigner, previousSOA, BuildNSECChain)
 }
@@ -145,12 +114,12 @@ func BuildTrustPush(zone string, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *
 	m.Opcode = dns.OpcodeUpdate
 
 	kskRR := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     ksk.Flags, Protocol: ksk.Protocol, Algorithm: ksk.Algorithm, PublicKey: ksk.PublicKey,
+		Hdr:   dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: ksk.Flags, Protocol: ksk.Protocol, Algorithm: ksk.Algorithm, PublicKey: ksk.PublicKey,
 	}
 	zskRR := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
+		Hdr:   dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
 	}
 
 	now := time.Now()
@@ -169,8 +138,8 @@ func BuildTrustPush(zone string, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *
 // name), which this deliberately discards in favor of zone.
 func dnskeyRRAt(zone string, k *dns.DNSKEY) *dns.DNSKEY {
 	return &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     k.Flags, Protocol: k.Protocol, Algorithm: k.Algorithm, PublicKey: k.PublicKey,
+		Hdr:   dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: k.Flags, Protocol: k.Protocol, Algorithm: k.Algorithm, PublicKey: k.PublicKey,
 	}
 }
 
@@ -183,27 +152,12 @@ func sameDNSKEY(a, b *dns.DNSKEY) bool {
 	return a.Algorithm == b.Algorithm && a.PublicKey == b.PublicKey
 }
 
-// buildDNSKEYRRsetPush builds an RFC 2136 UPDATE message that changes a
-// zone's served apex DNSKEY RRset from current to want: an RFC 2136
-// §2.5.4 delete for each record in current no longer in want, followed
-// by every record in want -- new or unchanged -- re-asserted as an
-// ordinary add, together with one fresh RRSIG (signed by signer/
-// signerPriv) covering exactly want.
-//
-// Re-asserting every unchanged record isn't redundant, and skipping it
-// is the mistake this function exists to prevent: an RRSIG covers its
-// whole RRset as one unit, never a single record added or removed
-// independently of the rest, and this package's server never holds a
-// private key to recompute one itself (SAZU's whole premise is that it
-// never needs to). So whichever client changes this RRset's membership
-// -- BuildAddZSKPush, BuildRetireZSKPush, BuildKSKRolloverPush, all
-// built on this -- must present, and sign, the complete new membership
-// every time, not just the delta, or the signature ends up covering
-// content that no longer matches what's actually served (see
-// plugin/sazu/docs/SAZU-PLAN.md for the concrete failure this was found from: a stale
-// RRSIG left covering a DNSKEY set that no longer existed, which a real
-// validating resolver would see as a bogus signature over the entire
-// zone).
+// buildDNSKEYRRsetPush builds an UPDATE that changes a zone's apex
+// DNSKEY RRset from current to want: an RFC 2136 §2.5.4 delete for each
+// record of current not in want, then every record of want -- new or
+// unchanged -- as an add, with one RRSIG by signer over exactly want. An
+// RRSIG covers the whole RRset and the server never signs, so the client
+// must always send and sign the complete new RRset, never just the delta.
 func buildDNSKEYRRsetPush(zone string, current, want []*dns.DNSKEY, signer *dns.DNSKEY, signerPriv crypto.Signer) (*dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(zone), dns.TypeSOA)
@@ -242,16 +196,15 @@ func buildDNSKEYRRsetPush(zone string, current, want []*dns.DNSKEY, signer *dns.
 // BuildAddZSKPush builds an RFC 2136 UPDATE message that registers
 // newZSK on top of a zone's existing DNSKEY RRset, re-signing the
 // complete resulting set (current plus newZSK) as one RRSIG -- see
-// buildDNSKEYRRsetPush's doc comment for why re-signing only newZSK
-// alone, the way an earlier version of this package did, is wrong.
+// buildDNSKEYRRsetPush.
 //
 // current is every DNSKEY record the zone currently serves -- a live
 // query (see cmd/sazuctl's fetchCurrentDNSKEYs), since this package
 // tracks no server-side state of its own and has no other way to know
-// it. signer/signerPriv is whichever key is authenticating and content-
-// signing this transaction: ordinarily the KSK, but this package's own
-// convention (see keys.go's KeyRole doc comment) also allows an
-// already-authorized ZSK to register another.
+// it. signer/signerPriv must be the zone's KSK: it signs the DNSKEY
+// RRset, which a validating resolver only accepts from a key the
+// parent's DS matches (RFC 4035 §5.2), and the server refuses a DNSKEY
+// RRset change authenticated or signed by anything else.
 //
 // The transaction itself (SIG(0), via SignUpdate) must also be signed
 // by signer.
@@ -357,8 +310,8 @@ func buildContentPush(zone string, soa *dns.SOA, rrs []dns.RR, zsk *dns.DNSKEY, 
 	}
 
 	zskRR := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: soa.Hdr.Ttl},
-		Flags:     zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
+		Hdr:   dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: soa.Hdr.Ttl},
+		Flags: zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
 	}
 
 	adds := make([]dns.RR, 0, len(rrs)+2)
