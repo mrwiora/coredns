@@ -45,7 +45,7 @@ open gaps are marked **Gap** and collected in §10.
   anchors (built in, or a maintained `trust_anchor` file).
 - **Server ↔ resolver**: ordinary DNS, authenticated by the owner's RRSIGs
   for resolvers that validate.
-- **Server ↔ host filesystem**: the SQLite `db` file. Its confidentiality
+- **Server ↔ host filesystem**: the bbolt `db` file. Its confidentiality
   and integrity rest on host access control, **outside SAZU's scope**.
 - **Instance ↔ instance** (future): the cluster's authenticated channel,
   see `SAZU-CLUSTER.md`.
@@ -153,10 +153,11 @@ content.**
   queries — are refused over UDP, so spoofed addresses can't evade the
   per-address limit.
 - Both limiters sweep their state, so memory tracks recently active
-  sources, not every source ever seen. The raw-capture table is bounded,
-  holds only UPDATEs, and every UPDATE claims its entry on arrival.
-- ANY over UDP is answered with one RRset (RFC 8482), limiting
-  amplification.
+  sources, not every source ever seen. The server's raw-request capture
+  (core/dnsserver) is bounded, holds only UPDATEs, and every UPDATE claims
+  its entry on arrival.
+- ANY queries: the *any* plugin answers them minimally (RFC 8482), at the
+  cost of an unsigned answer.
 - **Gap**: the limiters are per process and in memory; several instances
   (`SAZU-CLUSTER.md`) would multiply every quota by the instance count.
 - **Gap**: `audit_log` has no retention policy and grows without bound.

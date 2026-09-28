@@ -101,5 +101,5 @@ sandbox to publish a DS record against.
 This exercises everything except the chain-of-trust walk itself (stubbed out
 by `insecure_skip_chain_validation`). That part has its own dedicated,
 network-based tests in `chain_test.go`/the package's other tests, and needs
-a real domain to test live — see the README's "Setting up your zone"
+a real domain to test live — see "Setting up your zone" in [SAZU-GUIDE.md](SAZU-GUIDE.md)
 section.
