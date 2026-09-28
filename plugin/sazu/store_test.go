@@ -344,4 +344,3 @@ func TestZoneDataPurgeNSECRemovesRecordsAndTheirRRSIGs(t *testing.T) {
 		t.Fatalf("expected the A record to survive PurgeNSEC, got %+v", got)
 	}
 }
-

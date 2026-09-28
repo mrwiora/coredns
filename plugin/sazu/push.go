@@ -144,12 +144,12 @@ func BuildTrustPush(zone string, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *
 	m.Opcode = dns.OpcodeUpdate
 
 	kskRR := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     ksk.Flags, Protocol: ksk.Protocol, Algorithm: ksk.Algorithm, PublicKey: ksk.PublicKey,
+		Hdr:   dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: ksk.Flags, Protocol: ksk.Protocol, Algorithm: ksk.Algorithm, PublicKey: ksk.PublicKey,
 	}
 	zskRR := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
+		Hdr:   dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
 	}
 
 	now := time.Now()
@@ -168,8 +168,8 @@ func BuildTrustPush(zone string, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *
 // name), which this deliberately discards in favor of zone.
 func dnskeyRRAt(zone string, k *dns.DNSKEY) *dns.DNSKEY {
 	return &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     k.Flags, Protocol: k.Protocol, Algorithm: k.Algorithm, PublicKey: k.PublicKey,
+		Hdr:   dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags: k.Flags, Protocol: k.Protocol, Algorithm: k.Algorithm, PublicKey: k.PublicKey,
 	}
 }
 
@@ -356,8 +356,8 @@ func buildContentPush(zone string, soa *dns.SOA, rrs []dns.RR, zsk *dns.DNSKEY, 
 	}
 
 	zskRR := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: soa.Hdr.Ttl},
-		Flags:     zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
+		Hdr:   dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: soa.Hdr.Ttl},
+		Flags: zsk.Flags, Protocol: zsk.Protocol, Algorithm: zsk.Algorithm, PublicKey: zsk.PublicKey,
 	}
 
 	adds := make([]dns.RR, 0, len(rrs)+2)

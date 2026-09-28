@@ -1573,7 +1573,6 @@ const statusErrNoDSPublished = "ERR_NO_DS_PUBLISHED"
 // plugin/sazu/handler.go, for the same reason statusErrNoDSPublished does.
 const statusErrUnknownSigner = "ERR_UNKNOWN_SIGNER"
 
-
 // diagnosticDetail returns the detail of the status a server reported in
 // its Extended DNS Error, or "".
 func diagnosticDetail(m *dns.Msg) string {
