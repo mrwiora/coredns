@@ -205,10 +205,6 @@ func TestPendingRolloverSurvivesRestart(t *testing.T) {
 }
 
 func diagnosticDetailForTest(m *dns.Msg) string {
-	for _, rr := range m.Extra {
-		if txt, ok := rr.(*dns.TXT); ok && len(txt.Txt) > 1 {
-			return txt.Txt[1]
-		}
-	}
-	return ""
+	_, detail, _ := ResponseStatus(m)
+	return detail
 }

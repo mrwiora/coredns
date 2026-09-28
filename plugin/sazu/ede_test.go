@@ -10,8 +10,8 @@ import (
 
 // TestStatusIsReportedAsExtendedDNSError: with EDNS(0) on the request,
 // the SAZU status comes back as an RFC 8914 EDE (mapped INFO-CODE, the
-// status as EXTRA-TEXT) as well as the TXT record; without EDNS, only
-// the TXT -- RFC 6891 forbids an OPT record in that reply.
+// status as EXTRA-TEXT); without EDNS, only the RCODE -- RFC 6891 forbids
+// an OPT record in that reply.
 func TestStatusIsReportedAsExtendedDNSError(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)
@@ -28,9 +28,18 @@ func TestStatusIsReportedAsExtendedDNSError(t *testing.T) {
 		m.SetUpdate("example.org.")
 		m.Insert(signed)
 		if edns {
-			m.SetEdns0(dns.DefaultMsgSize, false)
+			wire, err := SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return sendRaw(t, addr, wire)
 		}
-		wire, err := SignUpdate(m, ksk, kskPriv, now.Add(-time.Minute), now.Add(time.Hour))
+		sig := &dns.SIG{RRSIG: dns.RRSIG{
+			Hdr:       dns.RR_Header{Name: ".", Rrtype: dns.TypeSIG, Class: dns.ClassANY},
+			Algorithm: ksk.Algorithm, KeyTag: ksk.KeyTag(), SignerName: ksk.Hdr.Name,
+			Inception: uint32(now.Add(-time.Minute).Unix()), Expiration: uint32(now.Add(time.Hour).Unix()),
+		}}
+		wire, err := sig.Sign(kskPriv, m)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,16 +60,10 @@ func TestStatusIsReportedAsExtendedDNSError(t *testing.T) {
 	if ede == nil || ede.InfoCode != dns.ExtendedErrorCodeProhibited || ede.ExtraText != statusErrFullZoneRequired {
 		t.Fatalf("expected EDE 18 with %q, got %+v", statusErrFullZoneRequired, ede)
 	}
-	if status, ok := diagnosticStatus(resp); !ok || status != statusErrFullZoneRequired {
-		t.Fatalf("expected the TXT diagnostic too, got %q %v", status, ok)
-	}
 
 	resp = partial(false)
-	if resp.IsEdns0() != nil {
-		t.Fatalf("expected no OPT record in the reply to a request without EDNS")
-	}
-	if status, ok := diagnosticStatus(resp); !ok || status != statusErrFullZoneRequired {
-		t.Fatalf("expected the TXT diagnostic, got %q %v", status, ok)
+	if resp.IsEdns0() != nil || len(resp.Extra) != 0 || resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected a bare REFUSED to a request without EDNS, got %v", resp)
 	}
 }
 
@@ -101,7 +104,7 @@ func TestSignatureFailureNamesTheRRset(t *testing.T) {
 	}
 	m.Ns = kept
 	resp := sendRaw(t, addr, signNow(t, m, zsk, zskPriv))
-	expectRefusedWith(t, "push with an unsigned RRset", resp, dns.RcodeNotAuth, statusErrSigInvalid)
+	expectRefusedWith(t, "push with an unsigned RRset", resp, dns.RcodeRefused, statusErrSigInvalid)
 	if d := diagnosticDetailForTest(resp); d != "no valid RRSIG covers www.example.org./A" {
 		t.Fatalf("detail = %q", d)
 	}

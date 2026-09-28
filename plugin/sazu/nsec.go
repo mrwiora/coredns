@@ -7,35 +7,12 @@ import (
 	"github.com/miekg/dns"
 )
 
-// This file implements RFC 4034 authenticated denial of existence via
-// NSEC -- not NSEC3. NSEC3 (RFC 5155) exists to additionally hide a
-// zone's actual name set from enumeration ("zone walking"); it's a real,
-// separate, opt-in enhancement, not something a correct NXDOMAIN/NODATA
-// proof requires. Plain NSEC is what's needed to resolve validating
-// resolvers no longer treating this server's negative answers as Bogus,
-// which is the actual problem this closes.
-//
-// SAZU's split-signing model changes where an NSEC chain has to come
-// from. A hosting provider that holds the zone's private key (e.g. AWS
-// Route 53) can synthesize a covering NSEC on the fly, at answer time,
-// for literally any query -- SAZU's server never holds one, so that's
-// not an option here. Instead, the customer's own signer computes and
-// signs a complete NSEC chain across the *whole* zone up front, as part
-// of a full-zone push (see BuildNSECChain, called from
-// BuildFullZonePush) -- the same way traditional offline zone-signing
-// tools (e.g. dnssec-signzone) work. The server's job is limited to
-// storing whatever chain it was given and, at query time, picking the
-// right already-signed record out of it (see ZoneData.NegativeProof in
-// store.go).
-//
-// A consequence of that split: only a full push can be trusted to
-// produce a *complete* chain, since only it sees the zone's entire name
-// set at once. Any update that isn't one (sazuctl publish-trust, a KSK
-// rollover, or a ZSK add/retire) never computes or includes NSEC
-// records -- and is therefore only accepted if it changes nothing the
-// chain describes (see handler.go's changesChainRelevantContent), so an
-// existing chain is never left describing content that changed under
-// it.
+// Authenticated denial of existence with NSEC (RFC 4034 §4, RFC 4035
+// §2.3). The server never signs, so it can't synthesize NSEC records at
+// answer time: the zone owner's signer computes and signs the complete
+// chain as part of every full-zone push (BuildNSECChain), the way an
+// offline signer such as dnssec-signzone does, and the server serves the
+// right stored record for each negative answer (lookup.go).
 
 // CanonicalCompare orders a and b per RFC 4034 §6.1 ("Canonical DNS Name
 // Order"): labels compare from most-significant (rightmost) to least,
@@ -74,23 +51,6 @@ func SortNamesCanonically(names []string) {
 	sort.Slice(names, func(i, j int) bool { return CanonicalCompare(names[i], names[j]) < 0 })
 }
 
-// ClosestEncloser returns the longest suffix of qname present in owners
-// (a set of lowercased FQDNs) -- RFC 4035 §3.1.3's "closest encloser,"
-// used to locate the wildcard slot ("*."+closest encloser) that also has
-// to be proven nonexistent for a complete NXDOMAIN answer. Terminates
-// unconditionally as long as some suffix of qname (at minimum, the
-// zone's own apex) is in owners, which NegativeProof's caller guarantees.
-func ClosestEncloser(qname string, owners map[string]bool) string {
-	labels := dns.SplitDomainName(dns.Fqdn(qname))
-	for i := 0; i <= len(labels); i++ {
-		candidate := dns.Fqdn(strings.ToLower(strings.Join(labels[i:], ".")))
-		if owners[candidate] {
-			return candidate
-		}
-	}
-	return "" // unreachable given the guarantee above
-}
-
 // CoveringOwner returns which member of sortedOwners (already in
 // RFC 4034 canonical order, deduplicated) holds the NSEC record covering
 // name: the largest owner canonically less than name, or -- since the
@@ -116,32 +76,24 @@ func CoveringOwner(name string, sortedOwners []string) (owner string, ok bool) {
 	return sortedOwners[best], true
 }
 
-// BuildNSECChain synthesizes one RFC 4034 §4 NSEC record per distinct
-// owner name in adds (a full push's complete content -- DNSKEY, SOA, and
-// every zone record, exactly what BuildFullZonePush is about to sign and
-// send), covering the whole zone. adds is read-only; the returned
-// records still need signing like everything else, which
-// BuildFullZonePush does by simply including them in the same
-// SignZoneContent call as the rest.
-//
-// Each record's Next Domain Name is the next owner in RFC 4034 §6.1
-// canonical order, wrapping back to the first owner after the last --
-// the chain is circular, per RFC 4034 §4's definition. Its type bitmap
-// lists every RRset type actually present at that name, plus NSEC and
-// RRSIG themselves (both of which will exist there once this is signed
-// and inserted). Its TTL is the zone's SOA minimum, per RFC 4034 §4's
-// explicit requirement -- not each name's own record TTL, the way every
-// other RRset in this package uses.
-func BuildNSECChain(soa *dns.SOA, adds []dns.RR) []dns.RR {
-	apex := dns.Fqdn(soa.Hdr.Name)
-	typesByName := map[string]map[uint16]bool{strings.ToLower(apex): {}}
-	for _, rr := range adds {
-		name := strings.ToLower(dns.Fqdn(rr.Header().Name))
-		if typesByName[name] == nil {
-			typesByName[name] = make(map[uint16]bool)
-		}
-		typesByName[name][rr.Header().Rrtype] = true
+// denialTTL is the TTL of a zone's NSEC, NSEC3 and NSEC3PARAM records:
+// the lesser of the SOA's own TTL and its MINIMUM field (RFC 9077 §3.1).
+func denialTTL(soa *dns.SOA) uint32 {
+	if soa.Minttl < soa.Hdr.Ttl {
+		return soa.Minttl
 	}
+	return soa.Hdr.Ttl
+}
+
+// BuildNSECChain builds the NSEC chain (RFC 4034 §4, RFC 4035 §2.3) for
+// a full push's content adds: one NSEC per authoritative name and
+// delegation point, in canonical order, circular. Names below a zone cut
+// (glue) are left out, and the bitmap at a cut lists only NS, DS (if
+// present), NSEC and RRSIG. The records still need signing along with
+// the rest of the push.
+func BuildNSECChain(soa *dns.SOA, adds []dns.RR) []dns.RR {
+	apex := strings.ToLower(dns.Fqdn(soa.Hdr.Name))
+	typesByName, _ := denialTypes(apex, adds)
 
 	names := make([]string, 0, len(typesByName))
 	for name := range typesByName {
@@ -149,22 +101,28 @@ func BuildNSECChain(soa *dns.SOA, adds []dns.RR) []dns.RR {
 	}
 	SortNamesCanonically(names)
 
+	ttl := denialTTL(soa)
 	out := make([]dns.RR, 0, len(names))
 	for i, name := range names {
 		types := typesByName[name]
 		types[dns.TypeNSEC] = true
 		types[dns.TypeRRSIG] = true
-		bitmap := make([]uint16, 0, len(types))
-		for t := range types {
-			bitmap = append(bitmap, t)
-		}
-		sort.Slice(bitmap, func(a, b int) bool { return bitmap[a] < bitmap[b] }) // packDataNsec requires ascending order
-
 		out = append(out, &dns.NSEC{
-			Hdr:        dns.RR_Header{Name: name, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: soa.Minttl},
+			Hdr:        dns.RR_Header{Name: name, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: ttl},
 			NextDomain: names[(i+1)%len(names)],
-			TypeBitMap: bitmap,
+			TypeBitMap: sortedTypes(types),
 		})
 	}
+	return out
+}
+
+// sortedTypes returns the set's types in ascending order, as a type bitmap
+// is packed.
+func sortedTypes(types map[uint16]bool) []uint16 {
+	out := make([]uint16, 0, len(types))
+	for t := range types {
+		out = append(out, t)
+	}
+	sort.Slice(out, func(a, b int) bool { return out[a] < out[b] })
 	return out
 }

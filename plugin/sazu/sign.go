@@ -45,9 +45,15 @@ func SignZoneContent(rrs []dns.RR, dnskeyRR *dns.DNSKEY, signer crypto.Signer, i
 // never used.
 func SignZoneContentSplit(rrs []dns.RR, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY, zskSigner crypto.Signer, inception, expiration time.Time) ([]dns.RR, error) {
 	groups := groupRRsets(rrs)
+	apex := zoneApex(rrs)
+	cuts := zoneCuts(apex, rrs)
 	out := make([]dns.RR, 0, len(rrs)+len(groups))
 	for _, group := range groups {
 		out = append(out, group...)
+		h := group[0].Header()
+		if !isAuthoritativeRRset(h.Name, h.Rrtype, apex, cuts) {
+			continue // delegation NS and glue stay unsigned (RFC 4035 §2.2)
+		}
 		dnskeyRR, signer := zsk, zskSigner
 		if group[0].Header().Rrtype == dns.TypeDNSKEY {
 			dnskeyRR, signer = ksk, kskSigner
@@ -137,9 +143,12 @@ func VerifySignedRRsets(candidates []*dns.DNSKEY, ops []dns.RR, zclass uint16, n
 // (content verification is mandatory; SIG(0) alone only proves who sent
 // an update, never that what it carries will validate once served):
 //
-//   - every non-RRSIG Add-shaped RRset among ops must have at least one
-//     covering RRSIG, also present in ops, that verifies and is within
-//     its validity window at now;
+//   - every non-RRSIG Add-shaped RRset among ops that is the zone's
+//     authoritative data must have at least one covering RRSIG, also
+//     present in ops, that verifies and is within its validity window at
+//     now. The NS RRset at a delegation point and glue below it are not
+//     the zone's authoritative data and must not be signed (RFC 4035
+//     §2.2); the zone cuts are those of the pushed content;
 //   - an apex DNSKEY RRset may only be covered by a key in
 //     dnskeySigners (the zone's KSK), every other RRset by any key in
 //     candidates. A validating resolver accepts a DNSKEY RRset only
@@ -196,8 +205,13 @@ func VerifySignedRRsetsSplit(candidates, dnskeySigners []*dns.DNSKEY, ops []dns.
 	}
 
 	groups := groupRRsets(adds)
+	apex := zoneApex(adds)
+	cuts := zoneCuts(apex, adds)
 	for _, group := range groups {
 		h := group[0].Header()
+		if !isAuthoritativeRRset(h.Name, h.Rrtype, apex, cuts) {
+			continue
+		}
 		ok, expired := anySignatureVerifies(group, h.Rrtype, sigs, signersFor(h.Rrtype), now)
 		if !ok {
 			if expired {
@@ -218,6 +232,10 @@ func VerifySignedRRsetsSplit(candidates, dnskeySigners []*dns.DNSKEY, ops []dns.
 		}
 		if group == nil {
 			return "", fmt.Errorf("sazu: RRSIG at %s covers %s, but this update adds no such RRset",
+				sig.Hdr.Name, dns.TypeToString[sig.TypeCovered])
+		}
+		if !isAuthoritativeRRset(sig.Hdr.Name, sig.TypeCovered, apex, cuts) {
+			return "", fmt.Errorf("sazu: RRSIG at %s covers %s, which is delegation or glue data and must not be signed (RFC 4035 §2.2)",
 				sig.Hdr.Name, dns.TypeToString[sig.TypeCovered])
 		}
 		verified := false

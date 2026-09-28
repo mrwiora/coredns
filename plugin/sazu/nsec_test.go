@@ -50,16 +50,6 @@ func TestSortNamesCanonically(t *testing.T) {
 	}
 }
 
-func TestClosestEncloserFindsLongestExistingSuffix(t *testing.T) {
-	owners := map[string]bool{"example.org.": true, "www.example.org.": true}
-	if got := ClosestEncloser("nope.www.example.org.", owners); got != "www.example.org." {
-		t.Fatalf("got %q, want www.example.org.", got)
-	}
-	if got := ClosestEncloser("nope.example.org.", owners); got != "example.org." {
-		t.Fatalf("got %q, want example.org.", got)
-	}
-}
-
 func TestCoveringOwnerFindsPredecessor(t *testing.T) {
 	sorted := []string{"example.org.", "a.example.org.", "z.example.org."}
 	owner, ok := CoveringOwner("m.example.org.", sorted)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/request"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 
 	"github.com/miekg/dns"
@@ -167,12 +168,18 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 		// section, naming the zone directly -- no suffix matching, and
 		// it may well be a zone never seen before (first contact).
 		if plugin.Zones(s.Zones).Matches(qname) == "" {
-			return s.nextOrRefuse(ctx, w, r, qname, "outside this instance's configured zone scope")
+			if s.Next == nil {
+				// RFC 2136 §3.1.1: not authoritative for the zone named.
+				return dns.RcodeNotAuth, nil
+			}
+			return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
 		}
 		return s.serveUpdate(ctx, w, r, qname, raw, haveRaw)
 	}
 
 	if m, ok := s.versionAnswer(r); ok {
+		state := request.Request{W: w, Req: r}
+		state.SizeAndDo(m)
 		return writeMsg(w, m)
 	}
 
@@ -212,59 +219,32 @@ func (s *Sazu) nextOrRefuse(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 }
 
 func (s *Sazu) serveQuery(w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, error) {
+	q := r.Question[0]
+	qname := strings.ToLower(dns.Fqdn(q.Name))
+	// The DS RRset at a zone cut belongs to the parent (RFC 4035 §3.1.4.1):
+	// when this server also hosts the parent, answer DS at the child's
+	// apex from there.
+	if q.Qtype == dns.TypeDS && qname == z.Origin && qname != "." {
+		i, _ := dns.NextLabel(qname, 0)
+		if _, parent, ok := s.Store.FindZoneForName(qname[i:]); ok {
+			z = parent
+		}
+	}
+
+	a := z.Answer(qname, q.Qtype, isDNSSECRequested(r))
 	m := new(dns.Msg)
 	m.SetReply(r)
-	m.Authoritative = true
+	m.Authoritative = a.Authoritative
+	m.Rcode = a.Rcode
+	m.Answer, m.Ns, m.Extra = a.Answer, a.Ns, a.Extra
+	log.Debugf("query %s/%s (zone %s): rcode=%s answer=%d authority=%d additional=%d",
+		q.Name, dns.TypeToString[q.Qtype], z.Origin, dns.RcodeToString[m.Rcode], len(m.Answer), len(m.Ns), len(m.Extra))
 
-	q := r.Question[0]
-	rrs := z.Lookup(q.Name, q.Qtype)
-	nameExists := z.NameExists(q.Name)
-	log.Debugf("query %s/%s (zone %s, DO=%v): %d matching RRset(s), nameExists=%v",
-		q.Name, dns.TypeToString[q.Qtype], z.Origin, isDNSSECRequested(r), len(rrs), nameExists)
-	if len(rrs) == 0 && !nameExists {
-		m.Rcode = dns.RcodeNameError
-	} else {
-		m.Answer = rrs // NOERROR/NODATA when the name exists but this type doesn't
-		if len(rrs) > 0 && isDNSSECRequested(r) {
-			// A validating resolver needs the covering RRSIG(s) in the
-			// *same* answer as the RRset they cover, not as a separate
-			// query -- without this, the zone would carry real
-			// signatures (once actually pushed signed) that never
-			// reached anyone asking for them, still producing exactly
-			// the "RRSIGs Missing" bogus state this whole feature exists
-			// to avoid.
-			m.Answer = append(m.Answer, z.LookupRRSIG(q.Name, q.Qtype)...)
-		}
-	}
-
-	if len(rrs) == 0 {
-		// RFC 2308 §3: every negative response (NXDOMAIN here, or NODATA
-		// in the "name exists but not this type" branch above) MUST
-		// carry the zone's SOA in the authority section, so a resolver
-		// knows how long it may cache the negative result for. Omitting
-		// it doesn't make the *answer* wrong, but it silently defeats
-		// negative caching -- every repeat query for the same
-		// nonexistent name or type would otherwise bypass cache and hit
-		// this server directly every time.
-		if soa := z.SOA(); soa != nil {
-			m.Ns = append(m.Ns, soa)
-			if isDNSSECRequested(r) {
-				m.Ns = append(m.Ns, z.LookupRRSIG(z.Origin, dns.TypeSOA)...)
-				// RFC 4035 §3.1.3: the authenticated denial-of-existence
-				// proof itself, without which a validating resolver has
-				// to treat this negative answer as Bogus rather than
-				// Insecure or Secure once a DS is published for this
-				// zone. See ZoneData.NegativeProof and nsec.go's
-				// top-of-file comment for why this can be empty (no NSEC
-				// chain currently exists) even on a zone that has one on
-				// other names, and why that's a safe degradation rather
-				// than a bug.
-				m.Ns = append(m.Ns, z.NegativeProof(q.Name, nameExists)...)
-			}
-		}
-	}
-	log.Debugf("query %s/%s: replying rcode=%s answer=%v authority=%v",
-		q.Name, dns.TypeToString[q.Qtype], dns.RcodeToString[m.Rcode], m.Answer, m.Ns)
+	// EDNS (RFC 6891) and the DO bit (RFC 3225) are echoed, and the reply
+	// is truncated to what the client can receive.
+	state := request.Request{W: w, Req: r}
+	state.SizeAndDo(m)
+	m = state.Scrub(m)
 	return writeMsg(w, m)
 }
 
@@ -478,7 +458,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 	if sigErr != nil {
 		log.Debugf("update for %s: SIG(0) verification failed: %v", zone, sigErr)
-		return reply(dns.RcodeNotAuth, "")
+		return reply(dns.RcodeRefused, "")
 	}
 	log.Debugf("update for %s: SIG(0) verified (rollover=%v)", zone, isRollover)
 	// Recorded only now that verification has actually succeeded -- see
@@ -502,11 +482,16 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		// signer name is the zone apex; anything else names some other
 		// principal this server knows nothing about.
 		log.Debugf("update for %s: SIG(0) signer name %s is not the zone apex, refusing", zone, sig0.SignerName)
-		return reply(dns.RcodeNotAuth, "")
+		return reply(dns.RcodeRefused, "")
 	}
 	if lifetime := time.Duration(sig0.Expiration-sig0.Inception) * time.Second; lifetime > s.maxSIG0Lifetime() {
 		log.Debugf("update for %s: SIG(0) validity window %s exceeds the %s maximum, refusing", zone, lifetime, s.maxSIG0Lifetime())
-		return reply(dns.RcodeNotAuth, statusErrSIG0LifetimeTooLong)
+		return reply(dns.RcodeRefused, statusErrSIG0LifetimeTooLong)
+	}
+
+	if rcode, err := Prescan(zone, r.Answer, r.Ns, dns.ClassINET); err != nil {
+		log.Debugf("update for %s: %v", zone, err)
+		return reply(rcode, "")
 	}
 
 	prereqs, claimedVersion, versionPresent, err := splitVersionPrereq(r.Answer, zone)
@@ -870,7 +855,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		// Name the failing RRset, so the client can say exactly what to
 		// fix (the protocol's §6.2).
 		statusDetail = strings.TrimPrefix(err.Error(), "sazu: ")
-		return reply(dns.RcodeNotAuth, status)
+		return reply(dns.RcodeRefused, status)
 	}
 
 	// Persist before mutating memory: if the disk write fails, memory
@@ -1426,8 +1411,8 @@ const statusErrStaleVersion = "ERR_STALE_VERSION"
 const statusErrSIG0LifetimeTooLong = "ERR_SIG0_LIFETIME_TOO_LONG"
 
 // statusErrRolloverPending: a KSK rollover not co-signed by the current
-// KSK is waiting out its hold-down; the diagnostic TXT's second string
-// says when it can complete. See rollover.go.
+// KSK is waiting out its hold-down; the EXTRA-TEXT's detail says when it
+// can complete. See rollover.go.
 const statusErrRolloverPending = "ERR_ROLLOVER_PENDING"
 
 // statusErrWeakDSDigest: the candidate KSK matches a DS at the parent,
@@ -1458,35 +1443,45 @@ var edeCodes = map[string]uint16{
 	statusErrRolloverPending:         dns.ExtendedErrorCodeProhibited,
 }
 
-// replyWithStatus replies to r with rcode and, if status is non-empty,
-// reports it two ways: as an RFC 8914 Extended DNS Error (INFO-CODE from
-// edeCodes, the status as EXTRA-TEXT) when the request carried EDNS(0) --
-// RFC 6891 forbids an OPT record in a reply to a request without one --
-// and, for clients without EDNS, as a diagnostic TXT record at the zone
-// apex in the Additional section.
+// ResponseStatus returns the SAZU status code and detail a response
+// reports in its RFC 8914 Extended DNS Error, if it carries one.
+func ResponseStatus(m *dns.Msg) (status, detail string, ok bool) {
+	opt := m.IsEdns0()
+	if opt == nil {
+		return "", "", false
+	}
+	for _, o := range opt.Option {
+		if ede, isEDE := o.(*dns.EDNS0_EDE); isEDE && ede.ExtraText != "" {
+			status, detail, _ = strings.Cut(ede.ExtraText, ": ")
+			return status, detail, true
+		}
+	}
+	return "", "", false
+}
+
+// replyWithStatus replies to r with rcode. When the request carried
+// EDNS(0), the reply does too (RFC 6891 §7), and a non-empty status is
+// reported as an RFC 8914 Extended DNS Error: INFO-CODE from edeCodes,
+// the status code as EXTRA-TEXT.
 func replyWithStatus(w dns.ResponseWriter, r *dns.Msg, rcode int, status string) (int, error) {
 	return replyWithStatusDetail(w, r, rcode, status, "")
 }
 
 // replyWithStatusDetail is replyWithStatus with an optional human-readable
-// detail, sent as the diagnostic TXT record's second string.
+// detail, appended to the EXTRA-TEXT as "STATUS: detail".
 func replyWithStatusDetail(w dns.ResponseWriter, r *dns.Msg, rcode int, status, detail string) (int, error) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Rcode = rcode
-	if status != "" {
-		txt := []string{status}
-		if detail != "" {
-			txt = append(txt, detail)
-		}
-		m.Extra = append(m.Extra, &dns.TXT{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 0},
-			Txt: txt,
-		})
-		if r.IsEdns0() != nil {
-			m.SetEdns0(dns.DefaultMsgSize, false)
+	if r.IsEdns0() != nil {
+		m.SetEdns0(dns.DefaultMsgSize, false)
+		if status != "" {
+			text := status
+			if detail != "" {
+				text += ": " + detail
+			}
 			opt := m.IsEdns0()
-			opt.Option = append(opt.Option, &dns.EDNS0_EDE{InfoCode: edeCodes[status], ExtraText: status})
+			opt.Option = append(opt.Option, &dns.EDNS0_EDE{InfoCode: edeCodes[status], ExtraText: text})
 		}
 	}
 	return writeMsg(w, m)

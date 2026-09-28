@@ -84,3 +84,53 @@ func EvaluatePrerequisites(zone *ZoneData, prereqs []dns.RR, zclass uint16) (int
 func ApplyUpdateOps(zone *ZoneData, ops []dns.RR, zclass uint16) error {
 	return zone.ApplyOps(ops, zclass)
 }
+
+// Prescan performs RFC 2136's syntax checks on an UPDATE's prerequisite
+// (§3.2.1) and update (§3.4.1.3) sections before any of it is evaluated:
+// every name must be in the zone (NOTZONE), and each RR's class, TTL and
+// RDATA length must be one of the forms §2.4 and §2.5 define (FORMERR).
+// Relies on wire-accurate Class/Rdlength, like EvaluatePrerequisites.
+func Prescan(zone string, prereqs, updates []dns.RR, zclass uint16) (int, error) {
+	for _, rr := range prereqs {
+		h := rr.Header()
+		if h.Ttl != 0 {
+			return dns.RcodeFormatError, fmt.Errorf("prerequisite for %s has a nonzero TTL", h.Name)
+		}
+		if !dns.IsSubDomain(zone, h.Name) {
+			return dns.RcodeNotZone, fmt.Errorf("prerequisite name %s is not in zone %s", h.Name, zone)
+		}
+		switch h.Class {
+		case dns.ClassANY, dns.ClassNONE:
+			if h.Rdlength != 0 {
+				return dns.RcodeFormatError, fmt.Errorf("prerequisite for %s carries RDATA", h.Name)
+			}
+		case zclass:
+		default:
+			return dns.RcodeFormatError, fmt.Errorf("prerequisite for %s has class %d", h.Name, h.Class)
+		}
+	}
+	for _, rr := range updates {
+		h := rr.Header()
+		if !dns.IsSubDomain(zone, h.Name) {
+			return dns.RcodeNotZone, fmt.Errorf("update name %s is not in zone %s", h.Name, zone)
+		}
+		meta := h.Rrtype == dns.TypeAXFR || h.Rrtype == dns.TypeMAILA || h.Rrtype == dns.TypeMAILB
+		switch h.Class {
+		case zclass:
+			if meta || h.Rrtype == dns.TypeANY {
+				return dns.RcodeFormatError, fmt.Errorf("update adds a %s meta-type record at %s", dns.TypeToString[h.Rrtype], h.Name)
+			}
+		case dns.ClassANY:
+			if h.Ttl != 0 || h.Rdlength != 0 || meta {
+				return dns.RcodeFormatError, fmt.Errorf("malformed RRset delete at %s", h.Name)
+			}
+		case dns.ClassNONE:
+			if h.Ttl != 0 || meta || h.Rrtype == dns.TypeANY {
+				return dns.RcodeFormatError, fmt.Errorf("malformed RR delete at %s", h.Name)
+			}
+		default:
+			return dns.RcodeFormatError, fmt.Errorf("update at %s has class %d", h.Name, h.Class)
+		}
+	}
+	return dns.RcodeSuccess, nil
+}

@@ -266,8 +266,8 @@ func TestRequireValidRRSIGsRejectsUnsignedContent(t *testing.T) {
 	wire := buildUnsignedFirstContactPush(t, "example.org.", key, priv)
 
 	resp := sendRaw(t, addr, wire)
-	if resp.Rcode != dns.RcodeNotAuth {
-		t.Fatalf("rcode = %s, want NotAuth", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
 	if status, ok := diagnosticStatus(resp); !ok || status != statusErrSigInvalid {
 		t.Fatalf("diagnostic status = %q, ok=%v, want %q", status, ok, statusErrSigInvalid)
@@ -316,8 +316,8 @@ func TestRequireValidRRSIGsRejectsExpiredContentWithSpecificDiagnostic(t *testin
 	}
 
 	resp := sendRaw(t, addr, wire)
-	if resp.Rcode != dns.RcodeNotAuth {
-		t.Fatalf("rcode = %s, want NotAuth", dns.RcodeToString[resp.Rcode])
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
 	if status, ok := diagnosticStatus(resp); !ok || status != statusErrExpiredSignature {
 		t.Fatalf("diagnostic status = %q, ok=%v, want %q", status, ok, statusErrExpiredSignature)
@@ -1378,15 +1378,11 @@ func TestKeyRolloverRejectedForWeakAlgorithm(t *testing.T) {
 	}
 }
 
-// diagnosticStatus extracts a §12 SAZU status code from a response's
-// Additional section, if present.
+// diagnosticStatus extracts the SAZU status code from a response's
+// Extended DNS Error, if present.
 func diagnosticStatus(m *dns.Msg) (string, bool) {
-	for _, rr := range m.Extra {
-		if txt, ok := rr.(*dns.TXT); ok && len(txt.Txt) > 0 {
-			return txt.Txt[0], true
-		}
-	}
-	return "", false
+	status, _, ok := ResponseStatus(m)
+	return status, ok
 }
 
 func onboard(t *testing.T, addr, zone string) *dns.DNSKEY {

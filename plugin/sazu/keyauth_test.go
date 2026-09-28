@@ -141,7 +141,7 @@ func TestDNSKEYRRsetSignedByZSKIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SignUpdate: %v", err)
 	}
-	expectRefusedWith(t, "ZSK-signed DNSKEY RRset", sendRaw(t, addr, wire), dns.RcodeNotAuth, statusErrSigInvalid)
+	expectRefusedWith(t, "ZSK-signed DNSKEY RRset", sendRaw(t, addr, wire), dns.RcodeRefused, statusErrSigInvalid)
 }
 
 // TestExtraUnverifiableRRSIGIsRejected: a valid KSK signature over the
@@ -180,8 +180,8 @@ func TestExtraUnverifiableRRSIGIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SignUpdate: %v", err)
 	}
-	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeNotAuth {
-		t.Fatalf("rcode = %s, want NOTAUTH", dns.RcodeToString[resp.Rcode])
+	if resp := sendRaw(t, addr, wire); resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("rcode = %s, want REFUSED", dns.RcodeToString[resp.Rcode])
 	}
 }
 
