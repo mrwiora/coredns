@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -147,28 +146,6 @@ func TestServerHTTPS3AllowOpcodeAcceptsUpdate(t *testing.T) {
 		}
 		if !bytes.Equal(rawFromContext(t, p), wire) {
 			t.Fatal("RawRequestKey did not carry the exact original wire bytes")
-		}
-	})
-
-	t.Run("POST JSON wire envelope", func(t *testing.T) {
-		config, p := newConfig()
-		server, err := NewServerHTTPS3("127.0.0.1:443", []*Config{config})
-		if err != nil {
-			t.Fatalf("NewServerHTTPS3() failed: %v", err)
-		}
-		envelope := `{"wire":"` + base64.StdEncoding.EncodeToString(wire) + `"}`
-		req := httptest.NewRequest(http.MethodPost, "/dns-query", strings.NewReader(envelope))
-		req.Header.Set("Content-Type", "application/dns-message+json")
-		req.RemoteAddr = "127.0.0.1:12345"
-		recorder := httptest.NewRecorder()
-
-		server.ServeHTTP(recorder, req)
-
-		if recorder.Code != http.StatusOK {
-			t.Fatalf("ServeHTTP() status = %d, want %d (body: %s)", recorder.Code, http.StatusOK, recorder.Body.String())
-		}
-		if !bytes.Equal(rawFromContext(t, p), wire) {
-			t.Fatal("RawRequestKey did not carry the decoded, exact original wire bytes from the JSON envelope")
 		}
 	})
 }

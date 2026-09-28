@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/coredns/coredns/plugin/pkg/doh"
@@ -12,13 +13,14 @@ import (
 )
 
 // TestSendOverHTTPRoundTrips is CARRIER-06's missing coverage: sendOverHTTP
-// is sazuctl's own client-side code for pushing over an http(s)://
+// is sazuctl's own client-side code for pushing over an https://
 // target, distinct from plugin/sazu/https_test.go's coverage of the
 // *server* side of this same wire protocol via a hand-built HTTP client.
 // Runs against a real httptest.Server, exactly like that server-side test
 // runs a real dnsserver.ServerHTTPS wrapped in one -- not a live network,
 // but a real POST/response round trip through net/http.
 func TestSendOverHTTPRoundTrips(t *testing.T) {
+	defer func(c *http.Client) { httpsClient = c }(httpsClient)
 	m := new(dns.Msg)
 	m.SetUpdate("example.org.")
 	wire, err := m.Pack()
@@ -37,7 +39,7 @@ func TestSendOverHTTPRoundTrips(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path != doh.Path {
 					t.Errorf("request path = %s, want %s", r.URL.Path, doh.Path)
 				}
@@ -67,8 +69,9 @@ func TestSendOverHTTPRoundTrips(t *testing.T) {
 			// key is nil: interpretResponse only dereferences it for the
 			// ERR_NO_DS_PUBLISHED/ERR_UNKNOWN_SIGNER diagnostic-guidance
 			// branches, neither of which a bare RcodeRefused with no
-			// status TXT reaches.
-			err := sendOverHTTP("example.org.", wire, nil, ts.URL, false)
+			// status reaches.
+			httpsClient = ts.Client()
+			err := sendOverHTTP("example.org.", wire, nil, ts.URL)
 			if c.wantErr && err == nil {
 				t.Fatalf("expected an error for rcode %s, got nil", dns.RcodeToString[c.rcode])
 			}
@@ -76,5 +79,19 @@ func TestSendOverHTTPRoundTrips(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+// TestPlainHTTPTargetIsRefused: DNS over HTTPS is HTTPS only (RFC 8484 §5).
+func TestPlainHTTPTargetIsRefused(t *testing.T) {
+	m := new(dns.Msg)
+	m.SetUpdate("example.org.")
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = signSelfVerifyAndSend("example.org.", wire, nil, "http://127.0.0.1:1", false)
+	if err == nil || !strings.Contains(err.Error(), "RFC 8484") {
+		t.Fatalf("expected an http:// target to be refused, got %v", err)
 	}
 }
