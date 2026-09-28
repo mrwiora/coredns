@@ -35,12 +35,20 @@ type Zone struct {
 	Upstream *upstream.Upstream // Upstream for looking up external names during the resolution process.
 }
 
-// Apex contains the apex records of a zone: SOA, NS and their potential signatures.
+// Apex contains the apex records of a zone: SOA, NS and their potential signatures,
+// and for a zone signed with NSEC3 its NSEC3PARAM and NSEC3 chain.
 type Apex struct {
 	SOA    *dns.SOA
 	NS     []dns.RR
 	SIGSOA []dns.RR
 	SIGNS  []dns.RR
+
+	// NSEC3PARAM is the zone's NSEC3 parameters, nil for a zone without an
+	// NSEC3 chain. The record is also stored in the tree, where it is served.
+	NSEC3PARAM *dns.NSEC3PARAM
+	// NSEC3 holds the zone's NSEC3 records and their RRSIGs, apart from the
+	// tree: their hashed owner names are not names of the zone.
+	NSEC3 *tree.Tree
 }
 
 // NewZone returns a new zone.
@@ -100,11 +108,20 @@ func (z *Zone) Insert(r dns.RR) error {
 
 		z.SOA = r.(*dns.SOA)
 		return nil
-	case dns.TypeNSEC3, dns.TypeNSEC3PARAM:
-		return fmt.Errorf("NSEC3 zone is not supported, dropping RR: %s for zone: %s", r.Header().Name, z.origin)
+	case dns.TypeNSEC3:
+		z.insertNSEC3(r)
+		return nil
+	case dns.TypeNSEC3PARAM:
+		if r.Header().Name != z.origin {
+			return fmt.Errorf("NSEC3PARAM not at the apex, dropping RR: %s for zone: %s", r.Header().Name, z.origin)
+		}
+		z.NSEC3PARAM = r.(*dns.NSEC3PARAM)
 	case dns.TypeRRSIG:
 		x := r.(*dns.RRSIG)
 		switch x.TypeCovered {
+		case dns.TypeNSEC3:
+			z.insertNSEC3(r)
+			return nil
 		case dns.TypeSOA:
 			z.SIGSOA = append(z.SIGSOA, x)
 			return nil
@@ -128,6 +145,13 @@ func (z *Zone) Insert(r dns.RR) error {
 
 	z.Tree.Insert(r)
 	return nil
+}
+
+func (z *Zone) insertNSEC3(r dns.RR) {
+	if z.NSEC3 == nil {
+		z.NSEC3 = &tree.Tree{}
+	}
+	z.NSEC3.Insert(r)
 }
 
 // File retrieves the file path in a safe way.

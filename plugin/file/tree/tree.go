@@ -396,6 +396,31 @@ func (n *Node) floor(qname string) *Node {
 	return n
 }
 
+// Before returns the greatest value strictly less than the qname according to Less().
+func (t *Tree) Before(qname string) (*Elem, bool) {
+	if t.Root == nil {
+		return nil, false
+	}
+	n := t.Root.lower(qname)
+	if n == nil {
+		return nil, false
+	}
+	return n.Elem, true
+}
+
+func (n *Node) lower(qname string) *Node {
+	if n == nil {
+		return nil
+	}
+	if Less(n.Elem, qname) <= 0 {
+		return n.Left.lower(qname)
+	}
+	if r := n.Right.lower(qname); r != nil {
+		return r
+	}
+	return n
+}
+
 // Next returns the smallest value equal to or greater than the qname according to Less().
 func (t *Tree) Next(qname string) (*Elem, bool) {
 	if t.Root == nil {

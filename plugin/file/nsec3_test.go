@@ -6,16 +6,25 @@ import (
 )
 
 func TestParseNSEC3PARAM(t *testing.T) {
-	_, err := Parse(strings.NewReader(nsec3paramTest), "miek.nl", "stdin", 0)
-	if err == nil {
-		t.Fatalf("Expected error when reading zone, got nothing")
+	z, err := Parse(strings.NewReader(nsec3paramTest), "miek.nl", "stdin", 0)
+	if err != nil {
+		t.Fatalf("Expected an NSEC3PARAM zone to load, got %v", err)
+	}
+	if z.NSEC3PARAM == nil {
+		t.Fatalf("Expected the NSEC3PARAM to be recorded")
 	}
 }
 
 func TestParseNSEC3(t *testing.T) {
-	_, err := Parse(strings.NewReader(nsec3Test), "miek.nl", "stdin", 0)
-	if err == nil {
-		t.Fatalf("Expected error when reading zone, got nothing")
+	z, err := Parse(strings.NewReader(nsec3Test), "example.org", "stdin", 0)
+	if err != nil {
+		t.Fatalf("Expected an NSEC3 zone to load, got %v", err)
+	}
+	if z.NSEC3 == nil || z.NSEC3.Len() != 1 {
+		t.Fatalf("Expected the NSEC3 record in its own tree")
+	}
+	if _, ok := z.Search("aub8v9ce95ie18spjubsr058h41n7pa5.example.org."); ok {
+		t.Fatalf("An NSEC3 owner must not become a name of the zone")
 	}
 }
 

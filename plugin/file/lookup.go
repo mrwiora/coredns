@@ -136,7 +136,7 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 					rcode = Success
 				} else {
 					ctx = context.WithValue(ctx, dnsserver.LoopKey{}, loop+1)
-					answer, ns, extra, rcode = z.externalLookup(ctx, state, tr, elem, []dns.RR{cname})
+					answer, ns, extra, rcode = z.externalLookup(ctx, state, ap, tr, elem, []dns.RR{cname})
 				}
 
 				if do {
@@ -157,7 +157,7 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 		}
 
 		// If we see NS records, it means the name has been delegated.
-		if nsrrs, glue, ok := delegationFromElem(tr, elem, qname, qtype, do); ok {
+		if nsrrs, glue, ok := z.delegationFromElem(ap, tr, elem, qname, qtype, do); ok {
 			return nil, nsrrs, glue, Delegation
 		}
 
@@ -168,17 +168,18 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 	if found && shot {
 		if rrs := elem.Type(dns.TypeCNAME); len(rrs) > 0 && qtype != dns.TypeCNAME {
 			ctx = context.WithValue(ctx, dnsserver.LoopKey{}, loop+1)
-			return z.externalLookup(ctx, state, tr, elem, rrs)
+			return z.externalLookup(ctx, state, ap, tr, elem, rrs)
 		}
 
 		rrs := elem.Type(qtype)
 
 		// NODATA
 		if len(rrs) == 0 {
-			ret := ap.soa(do)
+			ret := ap.negativeSOA(do)
 			if do {
-				nsec := typeFromElem(elem, dns.TypeNSEC, do)
-				ret = append(ret, nsec...)
+				d := z.denial(ap, tr, do)
+				d.noData(qname)
+				ret = append(ret, d.out...)
 			}
 			return nil, ret, nil, NoData
 		}
@@ -201,7 +202,13 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 	// Found a wildcard source of synthesis. It may be an empty non-terminal.
 	if wildName != "" && !closerENTExists(tr, qname, wildName) {
 		if wildElem == nil {
-			return nil, ap.soa(do), nil, NoData
+			ret := ap.negativeSOA(do)
+			if do {
+				d := z.denial(ap, tr, do)
+				d.wildcardNoData(qname, wildName[2:])
+				ret = append(ret, d.out...)
+			}
+			return nil, ret, nil, NoData
 		}
 
 		// set metadata value for the wildcard record that synthesized the result
@@ -211,17 +218,18 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 
 		if rrs := wildElem.TypeForWildcard(dns.TypeCNAME, qname); len(rrs) > 0 && qtype != dns.TypeCNAME {
 			ctx = context.WithValue(ctx, dnsserver.LoopKey{}, loop+1)
-			return z.externalLookup(ctx, state, tr, wildElem, rrs)
+			return z.externalLookup(ctx, state, ap, tr, wildElem, rrs)
 		}
 
 		rrs := wildElem.TypeForWildcard(qtype, qname)
 
 		// NODATA response.
 		if len(rrs) == 0 {
-			ret := ap.soa(do)
+			ret := ap.negativeSOA(do)
 			if do {
-				nsec := typeFromElem(wildElem, dns.TypeNSEC, do)
-				ret = append(ret, nsec...)
+				d := z.denial(ap, tr, do)
+				d.wildcardNoData(qname, wildName[2:])
+				ret = append(ret, d.out...)
 			}
 			return nil, ret, nil, NoData
 		}
@@ -233,11 +241,10 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 
 		auth := ap.ns(do)
 		if do {
-			// An NSEC is needed to say no longer name exists under this wildcard.
-			if deny, found := tr.Prev(qname); found {
-				nsec := typeFromElem(deny, dns.TypeNSEC, do)
-				auth = append(auth, nsec...)
-			}
+			// Prove that no closer match for qname exists.
+			d := z.denial(ap, tr, do)
+			d.wildcardAnswer(qname, wildName[2:])
+			auth = append(auth, d.out...)
 
 			sigs := wildElem.TypeForWildcard(dns.TypeRRSIG, qname)
 			sigs = rrutil.SubTypeSignature(sigs, qtype)
@@ -254,35 +261,16 @@ func (z *Zone) Lookup(ctx context.Context, state request.Request, qname string) 
 		rcode = Success
 	}
 
-	ret := ap.soa(do)
+	ret := ap.negativeSOA(do)
 	if do {
-		deny, found := tr.Prev(qname)
-		if !found {
-			goto Out
+		d := z.denial(ap, tr, do)
+		if rcode == NameError {
+			d.nameError(qname)
+		} else {
+			d.noData(qname)
 		}
-		nsec := typeFromElem(deny, dns.TypeNSEC, do)
-		ret = append(ret, nsec...)
-
-		if rcode != NameError {
-			goto Out
-		}
-
-		ce, found := z.ClosestEncloser(qname)
-
-		// wildcard denial only for NXDOMAIN
-		if found {
-			// wildcard denial
-			wildcard := "*." + ce.Name()
-			if ss, found := tr.Prev(wildcard); found {
-				// Only add this nsec if it is different than the one already added
-				if ss.Name() != deny.Name() {
-					nsec := typeFromElem(ss, dns.TypeNSEC, do)
-					ret = append(ret, nsec...)
-				}
-			}
-		}
+		ret = append(ret, d.out...)
 	}
-Out:
 	return nil, ret, nil, rcode
 }
 
@@ -337,6 +325,27 @@ func (a Apex) soa(do bool) []dns.RR {
 	return []dns.RR{a.SOA}
 }
 
+// negativeSOA returns the SOA for a negative answer, with the TTL a
+// resolver may cache the negative answer for: the lesser of the SOA's own
+// TTL and its MINIMUM field (RFC 2308 §3, §5).
+func (a Apex) negativeSOA(do bool) []dns.RR {
+	ttl := min(a.SOA.Hdr.Ttl, a.SOA.Minttl)
+	if ttl == a.SOA.Hdr.Ttl {
+		return a.soa(do)
+	}
+	soa := dns.Copy(a.SOA)
+	soa.Header().Ttl = ttl
+	ret := []dns.RR{soa}
+	if do {
+		for _, sig := range a.SIGSOA {
+			sig = dns.Copy(sig)
+			sig.Header().Ttl = ttl
+			ret = append(ret, sig)
+		}
+	}
+	return ret
+}
+
 func (a Apex) ns(do bool) []dns.RR {
 	if do {
 		ret := append(a.NS, a.SIGNS...)
@@ -350,7 +359,7 @@ func (a Apex) ns(do bool) []dns.RR {
 // required by RFC 2308, and the NS records otherwise.
 func (z *Zone) authority(do bool, result Result) []dns.RR {
 	if result == NameError || result == NoData {
-		return z.soa(do)
+		return z.negativeSOA(do)
 	}
 	return z.ns(do)
 }
@@ -359,7 +368,7 @@ func (z *Zone) authority(do bool, result Result) []dns.RR {
 // external names. It also runs additional-section processing on the resolved
 // answer so in-bailiwick SRV/MX/SVCB/HTTPS targets get their A/AAAA glue, like
 // the direct path.
-func (z *Zone) externalLookup(ctx context.Context, state request.Request, tr *tree.Tree, elem *tree.Elem, rrs []dns.RR) ([]dns.RR, []dns.RR, []dns.RR, Result) {
+func (z *Zone) externalLookup(ctx context.Context, state request.Request, ap Apex, tr *tree.Tree, elem *tree.Elem, rrs []dns.RR) ([]dns.RR, []dns.RR, []dns.RR, Result) {
 	qtype := state.QType()
 	do := state.Do()
 
@@ -371,7 +380,7 @@ func (z *Zone) externalLookup(ctx context.Context, state request.Request, tr *tr
 
 	targetName := rrs[0].(*dns.CNAME).Target
 	elem, _ = tr.Search(targetName)
-	if ns, extra, ok := z.findDelegation(tr, targetName, qtype, do, elem); ok {
+	if ns, extra, ok := z.findDelegation(ap, tr, targetName, qtype, do, elem); ok {
 		return rrs, ns, extra, Delegation
 	}
 	if elem == nil || (qtype == dns.TypeNS || qtype == dns.TypeSOA && targetName == z.origin) {
@@ -399,7 +408,7 @@ Redo:
 		}
 		targetName := cname[0].(*dns.CNAME).Target
 		elem, _ = tr.Search(targetName)
-		if ns, extra, ok := z.findDelegation(tr, targetName, qtype, do, elem); ok {
+		if ns, extra, ok := z.findDelegation(ap, tr, targetName, qtype, do, elem); ok {
 			return rrs, ns, extra, Delegation
 		}
 		if elem == nil || (qtype == dns.TypeNS || qtype == dns.TypeSOA && targetName == z.origin) {
@@ -431,7 +440,7 @@ Redo:
 }
 
 // findDelegation returns the first zone cut between the zone apex and qname.
-func (z *Zone) findDelegation(tr *tree.Tree, qname string, qtype uint16, do bool, exact *tree.Elem) (ns, extra []dns.RR, ok bool) {
+func (z *Zone) findDelegation(ap Apex, tr *tree.Tree, qname string, qtype uint16, do bool, exact *tree.Elem) (ns, extra []dns.RR, ok bool) {
 	for i := 1; ; i++ {
 		name, shot := z.nameFromRight(qname, i)
 		if shot {
@@ -441,13 +450,13 @@ func (z *Zone) findDelegation(tr *tree.Tree, qname string, qtype uint16, do bool
 			if exact == nil {
 				return nil, nil, false
 			}
-			return delegationFromElem(tr, exact, qname, qtype, do)
+			return z.delegationFromElem(ap, tr, exact, qname, qtype, do)
 		}
 		elem, found := tr.Search(name)
 		if !found {
 			continue
 		}
-		if ns, extra, ok := delegationFromElem(tr, elem, qname, qtype, do); ok {
+		if ns, extra, ok := z.delegationFromElem(ap, tr, elem, qname, qtype, do); ok {
 			return ns, extra, true
 		}
 	}
@@ -455,7 +464,9 @@ func (z *Zone) findDelegation(tr *tree.Tree, qname string, qtype uint16, do bool
 
 // delegationFromElem builds a referral from a zone-cut element. A DS query at
 // the cut itself is answered by the parent zone instead of returning a referral.
-func delegationFromElem(tr *tree.Tree, elem *tree.Elem, qname string, qtype uint16, do bool) (ns, extra []dns.RR, ok bool) {
+// With DNSSEC, the referral carries the DS RRset, or the proof that there is
+// none (RFC 4035 §3.1.4.1, RFC 5155 §7.2.7).
+func (z *Zone) delegationFromElem(ap Apex, tr *tree.Tree, elem *tree.Elem, qname string, qtype uint16, do bool) (ns, extra []dns.RR, ok bool) {
 	ns = elem.Type(dns.TypeNS)
 	if ns == nil || (qtype == dns.TypeDS && elem.Name() == qname) {
 		return nil, nil, false
@@ -463,7 +474,13 @@ func delegationFromElem(tr *tree.Tree, elem *tree.Elem, qname string, qtype uint
 
 	extra = tr.Glue(ns, do)
 	if do {
-		ns = append(ns, typeFromElem(elem, dns.TypeDS, do)...)
+		if ds := typeFromElem(elem, dns.TypeDS, do); len(ds) > 0 {
+			ns = append(ns, ds...)
+		} else {
+			d := z.denial(ap, tr, do)
+			d.noData(elem.Name())
+			ns = append(ns, d.out...)
+		}
 	}
 	return ns, extra, true
 }

@@ -36,6 +36,9 @@ func (z *Zone) Transfer(serial uint32) (<-chan []dns.RR, error) {
 
 		ch <- apex
 		t.Walk(func(e *tree.Elem, _ map[uint16][]dns.RR) error { ch <- e.All(); return nil })
+		if ap.NSEC3 != nil {
+			ap.NSEC3.Walk(func(e *tree.Elem, _ map[uint16][]dns.RR) error { ch <- e.All(); return nil })
+		}
 		ch <- []dns.RR{ap.SOA}
 
 		close(ch)
