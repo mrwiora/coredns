@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net"
 	"net/http"
 	"net/mail"
@@ -166,7 +169,7 @@ func (n *Notifier) sendEmail(to string, alert Alert) error {
 			body += fmt.Sprintf("Chain-of-trust validation failed: %v\n", alert.Err)
 		}
 	}
-	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", n.SMTPFrom, to, subject, body)
+	msg := composeEmail(n.SMTPFrom, to, subject, body, time.Now())
 
 	host, _, err := net.SplitHostPort(n.SMTPAddr)
 	if err != nil {
@@ -176,5 +179,34 @@ func (n *Notifier) sendEmail(to string, alert Alert) error {
 	if n.SMTPUsername != "" {
 		auth = smtp.PlainAuth("", n.SMTPUsername, n.SMTPPassword, host)
 	}
-	return smtp.SendMail(n.SMTPAddr, auth, n.SMTPFrom, []string{to}, []byte(msg))
+	return smtp.SendMail(n.SMTPAddr, auth, n.SMTPFrom, []string{to}, msg)
+}
+
+// composeEmail builds an RFC 5322 message: the required Date and From
+// fields, a Message-ID (§3.6.4), a MIME (RFC 2045) plain-text body with
+// CRLF line endings, and the subject encoded per RFC 2047 when it isn't
+// plain ASCII.
+func composeEmail(from, to, subject, body string, now time.Time) []byte {
+	domain := "localhost"
+	if addr, err := mail.ParseAddress(from); err == nil {
+		if i := strings.LastIndexByte(addr.Address, '@'); i >= 0 {
+			domain = addr.Address[i+1:]
+		}
+	}
+	var id [16]byte
+	_, _ = rand.Read(id[:])
+
+	var b strings.Builder
+	header := func(name, value string) { b.WriteString(name + ": " + value + "\r\n") }
+	header("Date", now.Format(time.RFC1123Z))
+	header("From", from)
+	header("To", to)
+	header("Subject", mime.QEncoding.Encode("utf-8", subject))
+	header("Message-ID", "<"+hex.EncodeToString(id[:])+"@"+domain+">")
+	header("MIME-Version", "1.0")
+	header("Content-Type", "text/plain; charset=utf-8")
+	header("Content-Transfer-Encoding", "8bit")
+	b.WriteString("\r\n")
+	b.WriteString(strings.ReplaceAll(strings.ReplaceAll(body, "\r\n", "\n"), "\n", "\r\n"))
+	return []byte(b.String())
 }

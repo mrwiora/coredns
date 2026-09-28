@@ -401,3 +401,62 @@ func TestLookupTruncatesOverUDP(t *testing.T) {
 		t.Fatalf("expected TC over plain UDP, got %d records", len(resp.Answer))
 	}
 }
+
+// TestContentPushBreakingZoneRulesIsRefused: a push can be perfectly
+// signed and still not be a valid zone.
+func TestContentPushBreakingZoneRulesIsRefused(t *testing.T) {
+	rr := func(s string) dns.RR {
+		r, err := dns.NewRR(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	cases := map[string][]dns.RR{
+		"CNAME and other data": {rr("a.example.org. 300 IN CNAME b.example.org."), rr("a.example.org. 300 IN TXT x")},
+		"RRset TTL mismatch":   {rr("a.example.org. 300 IN A 192.0.2.1"), rr("a.example.org. 600 IN A 192.0.2.2")},
+		"name below a DNAME":   {rr("d.example.org. 300 IN DNAME example.net."), rr("x.d.example.org. 300 IN A 192.0.2.1")},
+	}
+	for name, rrs := range cases {
+		t.Run(name, func(t *testing.T) {
+			s := newTestSazu("example.org.")
+			addr := serveThroughRealServer(t, s)
+			key, priv, err := GenerateEd25519Key("example.org.", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			m, err := BuildFullZonePush("example.org.", testSOA(1), rrs, key, priv, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expectRefusedWith(t, name, sendRaw(t, addr, signNow(t, m, key, priv)), dns.RcodeRefused, statusErrInvalidZoneContent)
+		})
+	}
+}
+
+// TestLookupMinimalANYOverUDP: over UDP an ANY query gets one RRset (RFC
+// 8482 §4.1); over TCP, all of them.
+func TestLookupMinimalANYOverUDP(t *testing.T) {
+	f := newLookupFixture(t, false)
+	udp := queryDO(t, f.addr, "example.org.", dns.TypeANY)
+	types := map[uint16]bool{}
+	for _, rr := range udp.Answer {
+		if rr.Header().Rrtype != dns.TypeRRSIG {
+			types[rr.Header().Rrtype] = true
+		}
+	}
+	if len(types) != 1 {
+		t.Fatalf("expected one RRset over UDP, got types %v", types)
+	}
+	f.verifyAllSigs(t, udp.Answer)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.org.", dns.TypeANY)
+	tcp, _, err := (&dns.Client{Net: "tcp"}).Exchange(m, f.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tcp.Answer) < 4 {
+		t.Fatalf("expected every RRset over TCP, got %v", tcp.Answer)
+	}
+}

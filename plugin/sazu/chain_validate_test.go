@@ -4,6 +4,7 @@ import (
 	"crypto"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +139,51 @@ func TestLoadTrustAnchors(t *testing.T) {
 		}
 		if _, err := LoadTrustAnchors(path); err == nil {
 			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+// TestLoadTrustAnchorsRFC7958: IANA's root-anchors.xml format, keeping
+// only KeyDigests valid now with a SHA-256/SHA-384 digest.
+func TestLoadTrustAnchorsRFC7958(t *testing.T) {
+	const doc = `<?xml version="1.0" encoding="UTF-8"?>
+<TrustAnchor id="E9724F53-1851-4F86-85E5-F1392102940B" source="http://data.iana.org/root-anchors/root-anchors.xml">
+<Zone>.</Zone>
+<KeyDigest id="Kjqmt7v" validFrom="2010-07-15T00:00:00+00:00" validUntil="2019-01-11T00:00:00+00:00">
+<KeyTag>19036</KeyTag>
+<Algorithm>8</Algorithm>
+<DigestType>2</DigestType>
+<Digest>49AAC11D7B6F6446702E54A1607371607A1A41855200FD2CE1CDDE32F24E8FB5</Digest>
+</KeyDigest>
+<KeyDigest id="Klajeyz" validFrom="2017-02-02T00:00:00+00:00">
+<KeyTag>20326</KeyTag>
+<Algorithm>8</Algorithm>
+<DigestType>2</DigestType>
+<Digest>E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D</Digest>
+</KeyDigest>
+<KeyDigest id="Kmyv6jo" validFrom="2024-07-18T00:00:00+00:00">
+<KeyTag>38696</KeyTag>
+<Algorithm>8</Algorithm>
+<DigestType>2</DigestType>
+<Digest>683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16</Digest>
+<Flags>257</Flags>
+</KeyDigest>
+</TrustAnchor>`
+	path := filepath.Join(t.TempDir(), "root-anchors.xml")
+	if err := os.WriteFile(path, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	anchors, err := LoadTrustAnchors(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	builtin := RootTrustAnchors()
+	if len(anchors) != 2 {
+		t.Fatalf("expected the two currently valid anchors, got %+v", anchors)
+	}
+	for i, a := range anchors {
+		if a.KeyTag != builtin[i].KeyTag || !strings.EqualFold(a.DigestHex, builtin[i].DigestHex) {
+			t.Fatalf("anchor %d = %+v, want %+v", i, a, builtin[i])
 		}
 	}
 }

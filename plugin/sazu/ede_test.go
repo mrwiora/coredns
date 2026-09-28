@@ -70,13 +70,13 @@ func TestStatusIsReportedAsExtendedDNSError(t *testing.T) {
 // TestEveryStatusHasAnEDECode keeps edeCodes in step with the status
 // codes: anything unmapped would silently be reported as 0 (Other).
 func TestEveryStatusHasAnEDECode(t *testing.T) {
-	other := map[string]bool{statusErrStaleSerial: true, statusErrStaleVersion: true, statusErrSIG0LifetimeTooLong: true}
+	other := map[string]bool{statusErrStaleSerial: true, statusErrStaleVersion: true, statusErrSIG0LifetimeTooLong: true, statusErrInvalidZoneContent: true}
 	for _, st := range []string{
 		statusErrNoDSPublished, statusErrUnknownSigner, statusErrSigInvalid, statusErrWeakAlgorithm, statusErrWeakDSDigest,
 		statusErrQuotaExceeded, statusErrRateLimited, statusErrTransportNotAllowed, statusErrStaleSerial,
 		statusErrFirstContactNeedsKSK, statusErrExpiredSignature, statusErrDecommissionRequiresKSK, statusErrRequiresKSK,
 		statusErrFullZoneRequired, statusErrDNSKEYSetMismatch, statusErrVersionRequired, statusErrStaleVersion,
-		statusErrSIG0LifetimeTooLong,
+		statusErrSIG0LifetimeTooLong, statusErrRolloverPending, statusErrInvalidZoneContent,
 	} {
 		if _, mapped := edeCodes[st]; !mapped && !other[st] {
 			t.Errorf("status %s has no EDE mapping", st)

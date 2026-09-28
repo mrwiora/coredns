@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net/http"
 	"net/http/httptest"
+	"net/mail"
+	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestNotifierSendWebhookPostsExpectedPayload(t *testing.T) {
@@ -153,5 +158,33 @@ func TestNotifierSendsWebhooksOnlyOverHTTPS(t *testing.T) {
 	}
 	if hit.Load() {
 		t.Fatalf("an http:// webhook was contacted")
+	}
+}
+
+// TestComposeEmailIsRFC5322: the alert email carries the fields RFC 5322
+// requires (Date, From) and recommends (Message-ID), a MIME plain-text
+// body, CRLF line endings, and an RFC 2047-encoded non-ASCII subject.
+func TestComposeEmailIsRFC5322(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	raw := composeEmail("alerts@example.org", "owner@example.org", "SAZU: zone bücher.example", "line one\nline two\n", now)
+	msg, err := mail.ReadMessage(bytes.NewReader(raw))
+	if err != nil {
+		t.Fatalf("not a parseable RFC 5322 message: %v", err)
+	}
+	if d, err := msg.Header.Date(); err != nil || !d.Equal(now) {
+		t.Fatalf("Date = %v (%v), want %v", d, err, now)
+	}
+	if id := msg.Header.Get("Message-Id"); !strings.HasPrefix(id, "<") || !strings.HasSuffix(id, "@example.org>") {
+		t.Fatalf("Message-ID = %q", id)
+	}
+	dec := new(mime.WordDecoder)
+	if subj, err := dec.DecodeHeader(msg.Header.Get("Subject")); err != nil || subj != "SAZU: zone bücher.example" {
+		t.Fatalf("Subject = %q (%v)", subj, err)
+	}
+	if msg.Header.Get("Content-Type") != "text/plain; charset=utf-8" || msg.Header.Get("Mime-Version") != "1.0" {
+		t.Fatalf("missing MIME headers: %v", msg.Header)
+	}
+	if strings.Contains(strings.ReplaceAll(string(raw), "\r\n", ""), "\n") {
+		t.Fatalf("bare LF in message")
 	}
 }

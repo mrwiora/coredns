@@ -1,18 +1,12 @@
-// Package sazu implements SAZU (Self-Authenticated Zone Update): a
-// split-signing DNSSEC scheme where a customer's own signer holds the
-// private key, and this server only ever accepts already-signed zone
-// updates, authenticated via SIG(0) (RFC 2931) carried on RFC 2136 dynamic
-// UPDATE messages. See the protocol specification (readme.md in
-// github.com/mrwiora/sazu) for the full protocol, and this repo's own
-// plugin/sazu/docs/SAZU-PLAN.md for exactly what of it this port
-// implements. Registered as a real CoreDNS plugin (plugin.cfg,
-// setup.go) -- `sazu ZONES...` in a Corefile.
 package sazu
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -53,10 +47,7 @@ func RootTrustAnchors() []TrustAnchor {
 			DigestHex: "E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D",
 		},
 		{
-			// KSK-2024. TODO(verify): this digest was added without network
-			// access to IANA; check it against root-anchors.xml before
-			// relying on it. A wrong value can't match any key -- it would
-			// only fail to help once KSK-2024 signs the root.
+			// KSK-2024.
 			KeyTag:    38696,
 			Algorithm: dns.RSASHA256,
 			DigestHex: "683D2D0ACB8C9B712A1948B27F741219298D0A450D612C483AF444A4C0FB2B16",
@@ -86,22 +77,30 @@ func (a TrustAnchor) Matches(key *dns.DNSKEY) bool {
 	return strings.EqualFold(ds.Digest, a.DigestHex)
 }
 
-// LoadTrustAnchors reads root trust anchors from a zone-file-format file
-// of DS and/or DNSKEY records for the root (".") -- the format
-// unbound-anchor maintains its root.key file in, and the format IANA's
-// root-anchors.xml translates to directly. DS records must use SHA-256
-// or SHA-384; a DNSKEY is anchored by its SHA-256 digest. Records for
-// any other owner, and any other type, are an error rather than silently
-// ignored: a typo in a security-critical file should be loud.
+// LoadTrustAnchors reads root trust anchors from path, in either of two
+// formats:
+//
+//   - IANA's root-anchors.xml (RFC 7958, as updated by RFC 9718): every
+//     KeyDigest valid now (validFrom reached, validUntil not yet) with a
+//     SHA-256 or SHA-384 digest;
+//   - zone file format holding DS and/or DNSKEY records for the root
+//     ("."), the format unbound-anchor (RFC 5011) maintains its root.key
+//     in. DS records must use SHA-256 or SHA-384; a DNSKEY is anchored by
+//     its SHA-256 digest.
+//
+// Anything unexpected is an error rather than silently ignored: a typo
+// in a security-critical file should be loud.
 func LoadTrustAnchors(path string) ([]TrustAnchor, error) {
-	f, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	if trimmed := bytes.TrimSpace(data); bytes.HasPrefix(trimmed, []byte("<")) {
+		return parseRootAnchorsXML(path, data, time.Now())
+	}
 
 	var anchors []TrustAnchor
-	zp := dns.NewZoneParser(f, ".", path)
+	zp := dns.NewZoneParser(bytes.NewReader(data), ".", path)
 	for rr, ok := zp.Next(); ok; rr, ok = zp.Next() {
 		if rr.Header().Name != "." {
 			return nil, fmt.Errorf("%s: trust anchor for %q, only the root (\".\") is supported", path, rr.Header().Name)
@@ -127,6 +126,60 @@ func LoadTrustAnchors(path string) ([]TrustAnchor, error) {
 	}
 	if len(anchors) == 0 {
 		return nil, fmt.Errorf("%s: no trust anchors found", path)
+	}
+	return anchors, nil
+}
+
+// rootAnchorsXML is the RFC 7958 §2.1 document.
+type rootAnchorsXML struct {
+	XMLName    xml.Name `xml:"TrustAnchor"`
+	Zone       string   `xml:"Zone"`
+	KeyDigests []struct {
+		ID         string `xml:"id,attr"`
+		ValidFrom  string `xml:"validFrom,attr"`
+		ValidUntil string `xml:"validUntil,attr"`
+		KeyTag     uint16 `xml:"KeyTag"`
+		Algorithm  uint8  `xml:"Algorithm"`
+		DigestType uint8  `xml:"DigestType"`
+		Digest     string `xml:"Digest"`
+	} `xml:"KeyDigest"`
+}
+
+// parseRootAnchorsXML returns the KeyDigests of an RFC 7958 document
+// that are valid at now (RFC 7958 §2.3).
+func parseRootAnchorsXML(path string, data []byte, now time.Time) ([]TrustAnchor, error) {
+	var doc rootAnchorsXML
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if strings.TrimSpace(doc.Zone) != "." {
+		return nil, fmt.Errorf("%s: trust anchors for %q, only the root (\".\") is supported", path, doc.Zone)
+	}
+	var anchors []TrustAnchor
+	for _, kd := range doc.KeyDigests {
+		from, err := time.Parse(time.RFC3339, kd.ValidFrom)
+		if err != nil {
+			return nil, fmt.Errorf("%s: KeyDigest %s: validFrom: %w", path, kd.ID, err)
+		}
+		if now.Before(from) {
+			continue
+		}
+		if kd.ValidUntil != "" {
+			until, err := time.Parse(time.RFC3339, kd.ValidUntil)
+			if err != nil {
+				return nil, fmt.Errorf("%s: KeyDigest %s: validUntil: %w", path, kd.ID, err)
+			}
+			if !now.Before(until) {
+				continue
+			}
+		}
+		if kd.DigestType != dns.SHA256 && kd.DigestType != dns.SHA384 {
+			continue
+		}
+		anchors = append(anchors, TrustAnchor{KeyTag: kd.KeyTag, Algorithm: kd.Algorithm, DigestType: kd.DigestType, DigestHex: strings.TrimSpace(kd.Digest)})
+	}
+	if len(anchors) == 0 {
+		return nil, fmt.Errorf("%s: no currently valid SHA-256 or SHA-384 KeyDigest", path)
 	}
 	return anchors, nil
 }

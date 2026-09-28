@@ -231,7 +231,8 @@ func (s *Sazu) serveQuery(w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, e
 		}
 	}
 
-	a := z.Answer(qname, q.Qtype, isDNSSECRequested(r))
+	state := request.Request{W: w, Req: r}
+	a := z.Answer(qname, q.Qtype, QueryOptions{DO: isDNSSECRequested(r), MinimalANY: state.Proto() == "udp"})
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Authoritative = a.Authoritative
@@ -242,7 +243,6 @@ func (s *Sazu) serveQuery(w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, e
 
 	// EDNS (RFC 6891) and the DO bit (RFC 3225) are echoed, and the reply
 	// is truncated to what the client can receive.
-	state := request.Request{W: w, Req: r}
 	state.SizeAndDo(m)
 	m = state.Scrub(m)
 	return writeMsg(w, m)
@@ -602,6 +602,13 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	if isFullPush && hasNonDNSKEYDeletes(zoneOps) {
 		log.Debugf("update for %s: content push carries delete operations, refusing", zone)
 		return reply(dns.RcodeFormatError, "")
+	}
+	if isFullPush {
+		if err := checkZoneContent(zoneOps, dns.ClassINET); err != nil {
+			log.Debugf("update for %s: %v", zone, err)
+			statusDetail = err.Error()
+			return reply(dns.RcodeRefused, statusErrInvalidZoneContent)
+		}
 	}
 
 	// Only the KSK may change the zone's key set or its contact: a ZSK
@@ -1418,6 +1425,10 @@ const statusErrRolloverPending = "ERR_ROLLOVER_PENDING"
 // statusErrWeakDSDigest: the candidate KSK matches a DS at the parent,
 // but only one with a SHA-1 digest (§7.2 accepts SHA-256/SHA-384 only).
 const statusErrWeakDSDigest = "ERR_WEAK_DS_DIGEST"
+
+// statusErrInvalidZoneContent: a content push breaks a rule every zone
+// has to follow (see checkZoneContent); the detail names it.
+const statusErrInvalidZoneContent = "ERR_INVALID_ZONE_CONTENT"
 
 // edeCodes maps each SAZU status code to the RFC 8914 Extended DNS Error
 // INFO-CODE it is reported under. Anything the server refuses as a

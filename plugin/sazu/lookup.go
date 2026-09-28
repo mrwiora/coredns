@@ -28,20 +28,30 @@ type Answer struct {
 	Extra         []dns.RR
 }
 
-// Answer looks qname/qtype up in z. do asks for DNSSEC records (the
-// query's DO bit, RFC 3225).
-func (z *ZoneData) Answer(qname string, qtype uint16, do bool) Answer {
+// QueryOptions are the properties of a query that shape its answer.
+type QueryOptions struct {
+	// DO asks for DNSSEC records (the query's DO bit, RFC 3225).
+	DO bool
+	// MinimalANY answers an ANY query with a single RRset (RFC 8482
+	// §4.1), as a server should over a transport without source address
+	// validation such as UDP.
+	MinimalANY bool
+}
+
+// Answer looks qname/qtype up in z.
+func (z *ZoneData) Answer(qname string, qtype uint16, opts QueryOptions) Answer {
 	z.mu.RLock()
 	defer z.mu.RUnlock()
-	v := &zoneView{z: z, do: do}
+	v := &zoneView{z: z, do: opts.DO, minimalANY: opts.MinimalANY}
 	return v.answer(strings.ToLower(dns.Fqdn(qname)), qtype)
 }
 
 // zoneView is one query's read-only view of a zone; the caller holds
 // z.mu for reading.
 type zoneView struct {
-	z  *ZoneData
-	do bool
+	z          *ZoneData
+	do         bool
+	minimalANY bool
 
 	names map[string]bool // every existing name, empty non-terminals included (lazy)
 }
@@ -75,6 +85,9 @@ func (v *zoneView) answer(qname string, qtype uint16) Answer {
 
 		if v.exists(qname) {
 			if rrs := v.rrset(qname, qtype); len(rrs) > 0 {
+				if qtype == dns.TypeANY && v.minimalANY {
+					rrs = lowestTypeRRset(rrs)
+				}
 				res.Answer = append(res.Answer, v.withSigs(qname, qtype, rrs)...)
 				return res
 			}
@@ -245,6 +258,24 @@ func (v *zoneView) rrset(name string, qtype uint16) []dns.RR {
 	out := make([]dns.RR, len(src))
 	for i, rr := range src {
 		out[i] = dns.Copy(rr)
+	}
+	return out
+}
+
+// lowestTypeRRset returns the RRset of rrs with the lowest type code --
+// a deterministic choice of the one RRset a minimal ANY answer carries.
+func lowestTypeRRset(rrs []dns.RR) []dns.RR {
+	lowest := rrs[0].Header().Rrtype
+	for _, rr := range rrs {
+		if t := rr.Header().Rrtype; t < lowest {
+			lowest = t
+		}
+	}
+	var out []dns.RR
+	for _, rr := range rrs {
+		if rr.Header().Rrtype == lowest {
+			out = append(out, rr)
+		}
 	}
 	return out
 }
