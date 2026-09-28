@@ -8,6 +8,7 @@ import (
 	"github.com/coredns/caddy"
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/plugin/transfer"
 
 	"github.com/miekg/dns"
 )
@@ -92,6 +93,12 @@ func setup(c *caddy.Controller) error {
 	config.AddPlugin(func(next plugin.Handler) plugin.Handler {
 		s.Next = next
 		return s
+	})
+	c.OnStartup(func() error {
+		if t, ok := dnsserver.GetConfig(c).Handler("transfer").(*transfer.Transfer); ok {
+			s.Xfer = t
+		}
+		return nil
 	})
 
 	return nil

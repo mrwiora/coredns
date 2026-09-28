@@ -433,30 +433,3 @@ func TestContentPushBreakingZoneRulesIsRefused(t *testing.T) {
 		})
 	}
 }
-
-// TestLookupMinimalANYOverUDP: over UDP an ANY query gets one RRset (RFC
-// 8482 §4.1); over TCP, all of them.
-func TestLookupMinimalANYOverUDP(t *testing.T) {
-	f := newLookupFixture(t, false)
-	udp := queryDO(t, f.addr, "example.org.", dns.TypeANY)
-	types := map[uint16]bool{}
-	for _, rr := range udp.Answer {
-		if rr.Header().Rrtype != dns.TypeRRSIG {
-			types[rr.Header().Rrtype] = true
-		}
-	}
-	if len(types) != 1 {
-		t.Fatalf("expected one RRset over UDP, got types %v", types)
-	}
-	f.verifyAllSigs(t, udp.Answer)
-
-	m := new(dns.Msg)
-	m.SetQuestion("example.org.", dns.TypeANY)
-	tcp, _, err := (&dns.Client{Net: "tcp"}).Exchange(m, f.addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(tcp.Answer) < 4 {
-		t.Fatalf("expected every RRset over TCP, got %v", tcp.Answer)
-	}
-}

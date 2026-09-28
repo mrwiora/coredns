@@ -51,31 +51,6 @@ func SortNamesCanonically(names []string) {
 	sort.Slice(names, func(i, j int) bool { return CanonicalCompare(names[i], names[j]) < 0 })
 }
 
-// CoveringOwner returns which member of sortedOwners (already in
-// RFC 4034 canonical order, deduplicated) holds the NSEC record covering
-// name: the largest owner canonically less than name, or -- since the
-// NSEC chain is circular -- the last owner in the chain if name
-// canonically precedes every one of them. ok is false only when
-// sortedOwners is empty (no NSEC chain exists for this zone at all).
-func CoveringOwner(name string, sortedOwners []string) (owner string, ok bool) {
-	if len(sortedOwners) == 0 {
-		return "", false
-	}
-	name = strings.ToLower(dns.Fqdn(name))
-	best := -1
-	for i, o := range sortedOwners {
-		if CanonicalCompare(o, name) < 0 {
-			best = i
-			continue
-		}
-		break // sortedOwners is ascending -- nothing further can improve "best"
-	}
-	if best == -1 {
-		return sortedOwners[len(sortedOwners)-1], true // wraps around the end of the chain
-	}
-	return sortedOwners[best], true
-}
-
 // denialTTL is the TTL of a zone's NSEC, NSEC3 and NSEC3PARAM records:
 // the lesser of the SOA's own TTL and its MINIMUM field (RFC 9077 §3.1).
 func denialTTL(soa *dns.SOA) uint32 {

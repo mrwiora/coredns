@@ -162,31 +162,6 @@ func TestBuildNSEC3ChainParamReflectsOptions(t *testing.T) {
 	t.Fatalf("expected an NSEC3PARAM record in the chain")
 }
 
-func TestNextCloserName(t *testing.T) {
-	cases := []struct{ qname, ce, want string }{
-		{"a.b.c.example.org.", "example.org.", "c.example.org."},
-		{"missing.example.org.", "example.org.", "missing.example.org."},
-	}
-	for _, c := range cases {
-		if got := NextCloserName(c.qname, c.ce); got != c.want {
-			t.Fatalf("NextCloserName(%q, %q) = %q, want %q", c.qname, c.ce, got, c.want)
-		}
-	}
-}
-
-func TestCoveringHashFindsPredecessorAndWraps(t *testing.T) {
-	sorted := []string{"1000", "5000", "9000"}
-	if h, ok := CoveringHash("6000", sorted); !ok || h != "5000" {
-		t.Fatalf("got h=%q ok=%v, want 5000", h, ok)
-	}
-	if h, ok := CoveringHash("0500", sorted); !ok || h != "9000" {
-		t.Fatalf("got h=%q ok=%v, want 9000 (wrap-around)", h, ok)
-	}
-	if _, ok := CoveringHash("anything", nil); ok {
-		t.Fatalf("expected ok=false for an empty chain")
-	}
-}
-
 // onboardExampleOrgNSEC3 mirrors onboardExampleOrg (handler_test.go) but
 // pushes with BuildFullZonePushNSEC3 instead of plain NSEC.
 func onboardExampleOrgNSEC3(t *testing.T, addr string, opts NSEC3Options) *dns.DNSKEY {

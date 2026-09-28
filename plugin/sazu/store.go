@@ -5,23 +5,69 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/coredns/coredns/plugin/file"
+	"github.com/coredns/coredns/plugin/pkg/upstream"
+
 	"github.com/miekg/dns"
 )
 
-// ZoneData is one zone's live RRset store: name (lowercased FQDN) -> type
-// -> RRs, plus its SOA tracked separately since queries for it are
-// answered directly rather than via the generic map. Deliberately minimal
-// -- SAZU needs "apply an accepted update and serve it back for testing
-// the onboarding/full-push/partial-push flow end to end," not full
-// authoritative fidelity (wildcards, delegation, NSEC). A production
-// deployment would wire SAZU's acceptance logic into a real zone-storage
-// backend instead of this self-contained one.
+// ZoneData is one zone's accepted data: name (lowercased FQDN) -> type ->
+// RRs, plus its SOA. Updates are evaluated and applied against it; queries
+// and zone transfers are served from a file.Zone built from it (View).
 type ZoneData struct {
 	Origin string
 
 	mu     sync.RWMutex
 	soa    *dns.SOA
 	rrsets map[string]map[uint16][]dns.RR
+
+	// view is the file.Zone the zone is served from; dirty marks it stale
+	// after a change, and it is rebuilt on next use.
+	view  *file.Zone
+	dirty bool
+}
+
+// View returns the file.Zone serving the zone's current data, or nil while
+// the zone has no SOA (onboarded, but no content pushed yet).
+func (z *ZoneData) View() *file.Zone {
+	z.mu.RLock()
+	if !z.dirty {
+		v := z.view
+		z.mu.RUnlock()
+		return v
+	}
+	z.mu.RUnlock()
+
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if z.dirty {
+		z.view = z.buildViewLocked()
+		z.dirty = false
+	}
+	return z.view
+}
+
+func (z *ZoneData) buildViewLocked() *file.Zone {
+	if z.soa == nil {
+		return nil
+	}
+	v := file.NewZone(z.Origin, "")
+	v.Upstream = upstream.New()
+	if err := v.Insert(dns.Copy(z.soa)); err != nil {
+		log.Errorf("zone %s: building the served view: %v", z.Origin, err)
+		return nil
+	}
+	for _, byType := range z.rrsets {
+		for _, rrs := range byType {
+			for _, rr := range rrs {
+				if err := v.Insert(dns.Copy(rr)); err != nil {
+					log.Errorf("zone %s: building the served view: %v", z.Origin, err)
+					return nil
+				}
+			}
+		}
+	}
+	return v
 }
 
 // NewZoneData returns an empty zone for origin with no SOA yet -- callers
@@ -118,6 +164,7 @@ func (z *ZoneData) Insert(rr dns.RR) {
 }
 
 func (z *ZoneData) insertLocked(rr dns.RR) {
+	z.dirty = true
 	if soa, ok := rr.(*dns.SOA); ok && strings.EqualFold(rr.Header().Name, z.Origin) {
 		z.soa = dns.Copy(soa).(*dns.SOA)
 		return
@@ -192,6 +239,7 @@ func (z *ZoneData) DeleteRRset(name string, rtype uint16) {
 }
 
 func (z *ZoneData) deleteRRsetLocked(name string, rtype uint16) {
+	z.dirty = true
 	name = strings.ToLower(name)
 	if rtype == dns.TypeSOA && name == z.Origin {
 		return // a zone's SOA is never removable this way, only replaced
@@ -211,6 +259,7 @@ func (z *ZoneData) DeleteName(name string) {
 }
 
 func (z *ZoneData) deleteNameLocked(name string) {
+	z.dirty = true
 	name = strings.ToLower(name)
 	if name == z.Origin {
 		return
@@ -227,6 +276,7 @@ func (z *ZoneData) DeleteRR(rr dns.RR) {
 }
 
 func (z *ZoneData) deleteRRLocked(rr dns.RR) {
+	z.dirty = true
 	name := strings.ToLower(rr.Header().Name)
 	byType, ok := z.rrsets[name]
 	if !ok {
@@ -255,6 +305,7 @@ func (z *ZoneData) PurgeContent() {
 }
 
 func (z *ZoneData) purgeContentLocked() {
+	z.dirty = true
 	for name, byType := range z.rrsets {
 		isApex := name == z.Origin
 		for rtype := range byType {
@@ -458,6 +509,7 @@ func addsApexDNSKEYSig(ops []dns.RR, origin string, zclass uint16) bool {
 // replaceRRSIG's same-signer rule would never catch -- is stale.
 // Callers must hold z.mu.
 func (z *ZoneData) dropSupersededDNSKEYSigsLocked(ops []dns.RR, zclass uint16) {
+	z.dirty = true
 	if !addsApexDNSKEYSig(ops, z.Origin, zclass) {
 		return
 	}

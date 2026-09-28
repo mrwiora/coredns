@@ -50,35 +50,6 @@ func TestSortNamesCanonically(t *testing.T) {
 	}
 }
 
-func TestCoveringOwnerFindsPredecessor(t *testing.T) {
-	sorted := []string{"example.org.", "a.example.org.", "z.example.org."}
-	owner, ok := CoveringOwner("m.example.org.", sorted)
-	if !ok || owner != "a.example.org." {
-		t.Fatalf("got owner=%q ok=%v, want a.example.org.", owner, ok)
-	}
-}
-
-// TestCoveringOwnerWrapsAroundTheChain uses an owner set with no single
-// common ancestor (unlike a real single-zone name set, where the apex is
-// always every other owner's ancestor and therefore always the
-// canonical minimum) specifically so a query name can genuinely sort
-// before every owner without merely being one's own descendant --
-// exercising the actual wrap-around branch, not the ordinary predecessor
-// one.
-func TestCoveringOwnerWrapsAroundTheChain(t *testing.T) {
-	sorted := []string{"b.example.", "m.example.", "z.example."}
-	owner, ok := CoveringOwner("a.example.", sorted)
-	if !ok || owner != "z.example." {
-		t.Fatalf("got owner=%q ok=%v, want z.example. (wrap-around)", owner, ok)
-	}
-}
-
-func TestCoveringOwnerEmptyChain(t *testing.T) {
-	if _, ok := CoveringOwner("example.org.", nil); ok {
-		t.Fatalf("expected ok=false for an empty chain")
-	}
-}
-
 // TestBuildNSECChainCoversEveryOwnerAndCycles proves the synthesized
 // chain visits every distinct owner name among adds exactly once and
 // wraps back to its start, per RFC 4034 §4.

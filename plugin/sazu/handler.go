@@ -11,10 +11,11 @@ import (
 
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/plugin/file"
 	"github.com/coredns/coredns/plugin/metrics"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/plugin/pkg/transport"
-	"github.com/coredns/coredns/request"
+	"github.com/coredns/coredns/plugin/transfer"
 
 	"github.com/miekg/dns"
 )
@@ -96,6 +97,12 @@ type Sazu struct {
 	// UPDATEs to the same zone, so a slow chain-of-trust walk for one
 	// zone doesn't hold up pushes to others. See zoneLockStripes.
 	updateLocks [zoneLockStripes]sync.Mutex
+
+	// Xfer is the transfer plugin of the same server block, if any; after
+	// a zone changes, its secondaries are sent NOTIFY.
+	Xfer      *transfer.Transfer
+	notifyMu  sync.Mutex
+	notifying map[string]bool // zone -> false when another NOTIFY is due
 }
 
 // zoneLockStripes is how many lock stripes updateLockFor spreads zone
@@ -152,8 +159,6 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 	}
 
 	if m, ok := s.versionAnswer(r); ok {
-		state := request.Request{W: w, Req: r}
-		state.SizeAndDo(m)
 		return writeMsg(w, m)
 	}
 
@@ -167,7 +172,7 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 	if !ok {
 		return s.nextOrRefuse(ctx, w, r, qname, "not an onboarded zone")
 	}
-	return s.serveQuery(w, r, z)
+	return s.serveQuery(ctx, w, r, z)
 }
 
 // nextOrRefuse falls through to Next exactly like plugin.NextOrFailure,
@@ -192,7 +197,9 @@ func (s *Sazu) nextOrRefuse(ctx context.Context, w dns.ResponseWriter, r *dns.Ms
 	return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
 }
 
-func (s *Sazu) serveQuery(w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, error) {
+// serveQuery answers a query for onboarded zone z with the file plugin's
+// authoritative lookup over the zone's current data (ZoneData.View).
+func (s *Sazu) serveQuery(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, error) {
 	q := r.Question[0]
 	qname := strings.ToLower(dns.Fqdn(q.Name))
 	// The DS RRset at a zone cut belongs to the parent (RFC 4035 §3.1.4.1):
@@ -200,25 +207,39 @@ func (s *Sazu) serveQuery(w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, e
 	// apex from there.
 	if q.Qtype == dns.TypeDS && qname == z.Origin && qname != "." {
 		i, _ := dns.NextLabel(qname, 0)
-		if _, parent, ok := s.Store.FindZoneForName(qname[i:]); ok {
+		if _, parent, ok := s.Store.FindZoneForName(qname[i:]); ok && parent.View() != nil {
 			z = parent
 		}
 	}
 
-	state := request.Request{W: w, Req: r}
-	a := z.Answer(qname, q.Qtype, QueryOptions{DO: isDNSSECRequested(r), MinimalANY: state.Proto() == "udp"})
+	view := z.View()
+	if view == nil {
+		return s.serveTrustedButEmpty(w, r, z)
+	}
+	f := file.File{
+		Next: s.Next,
+		ZoneLookupFunc: func(string) (string, *file.Zone, bool) {
+			return z.Origin, view, true
+		},
+	}
+	return f.ServeDNS(ctx, w, r)
+}
+
+// serveTrustedButEmpty answers for a zone that is onboarded but has no
+// content yet (§7.1): only its DNSKEY RRset, which clients read before a
+// key update.
+func (s *Sazu) serveTrustedButEmpty(w dns.ResponseWriter, r *dns.Msg, z *ZoneData) (int, error) {
+	q := r.Question[0]
+	if !strings.EqualFold(q.Name, z.Origin) || q.Qtype != dns.TypeDNSKEY {
+		return dns.RcodeRefused, nil
+	}
 	m := new(dns.Msg)
 	m.SetReply(r)
-	m.Authoritative = a.Authoritative
-	m.Rcode = a.Rcode
-	m.Answer, m.Ns, m.Extra = a.Answer, a.Ns, a.Extra
-	log.Debugf("query %s/%s (zone %s): rcode=%s answer=%d authority=%d additional=%d",
-		q.Name, dns.TypeToString[q.Qtype], z.Origin, dns.RcodeToString[m.Rcode], len(m.Answer), len(m.Ns), len(m.Extra))
-
-	// EDNS (RFC 6891) and the DO bit (RFC 3225) are echoed, and the reply
-	// is truncated to what the client can receive.
-	state.SizeAndDo(m)
-	m = state.Scrub(m)
+	m.Authoritative = true
+	m.Answer = z.Lookup(z.Origin, dns.TypeDNSKEY)
+	if isDNSSECRequested(r) {
+		m.Answer = append(m.Answer, z.LookupRRSIG(z.Origin, dns.TypeDNSKEY)...)
+	}
 	return writeMsg(w, m)
 }
 
@@ -919,6 +940,9 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	if contactUpdate != nil && s.Contacts != nil {
 		s.Contacts.Set(zone, contactUpdate.Addresses)
 		log.Debugf("update for %s: contact registration updated (%d address(es))", zone, len(contactUpdate.Addresses))
+	}
+	if len(zoneOps) > 0 {
+		s.notify(dns.Fqdn(zone)) // the served zone changed
 	}
 	log.Debugf("update for %s: accepted", zone)
 	return reply(dns.RcodeSuccess, "")
