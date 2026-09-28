@@ -87,23 +87,32 @@ If monitoring is enabled (via the *prometheus* plugin) then the following metric
 
 ## Examples
 
-Accept any zone, persist state, and let one secondary transfer the zones:
+Accept pushes for any zone and let one secondary transfer the zones. Without `db`, the zones are
+kept in memory only:
 
 ~~~ corefile
 . {
-    sazu . {
-        db /var/lib/sazu/sazu.db
-        trust_anchor /var/lib/unbound/root.key
-    }
+    sazu .
     transfer {
         to 192.0.2.53
     }
 }
 ~~~
 
+A deployment persists its state and keeps the root trust anchor current with another tool:
+
+~~~ txt
+. {
+    sazu . {
+        db /var/lib/sazu/sazu.db
+        trust_anchor /var/lib/unbound/root.key
+    }
+}
+~~~
+
 Accept pushes over DNS over HTTPS as well:
 
-~~~ corefile
+~~~ txt
 https://.:443 {
     tls cert.pem key.pem
     sazu . {
