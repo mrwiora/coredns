@@ -14,6 +14,7 @@ import (
 	"github.com/coredns/coredns/plugin/file"
 	"github.com/coredns/coredns/plugin/metrics"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/coredns/coredns/plugin/pkg/rfc2136"
 	"github.com/coredns/coredns/plugin/pkg/transport"
 	"github.com/coredns/coredns/plugin/transfer"
 
@@ -815,7 +816,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// be re-installed over a newer one.
 	if isFullPush {
 		if current := z.SOA(); current != nil {
-			if pushed := apexSOA(zoneOps, zone); pushed != nil && !serialGreater(pushed.Serial, current.Serial) {
+			if pushed := apexSOA(zoneOps, zone); pushed != nil && !rfc2136.SerialGreater(pushed.Serial, current.Serial) {
 				log.Debugf("update for %s: SOA serial %d is not greater than the current %d, refusing", zone, pushed.Serial, current.Serial)
 				return reply(dns.RcodeRefused, statusErrStaleSerial)
 			}

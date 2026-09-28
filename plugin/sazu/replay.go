@@ -16,13 +16,6 @@ import (
 // and version rules (see version.go).
 const DefaultMaxSIG0Lifetime = time.Hour + 5*time.Minute
 
-// serialGreater reports whether a is greater than b under RFC 1982
-// serial number arithmetic (SERIAL_BITS = 32), the comparison RFC 1035
-// SOA serials are defined to use.
-func serialGreater(a, b uint32) bool {
-	return a != b && a-b < 1<<31
-}
-
 // apexSOA returns the Add-shaped SOA at zone's apex among ops, if any.
 func apexSOA(ops []dns.RR, zone string) *dns.SOA {
 	for _, rr := range ops {

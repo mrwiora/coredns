@@ -281,28 +281,10 @@ func TestContentPushWithNonIncreasingSerialIsRejected(t *testing.T) {
 	}
 }
 
-func TestSerialGreater(t *testing.T) {
-	cases := []struct {
-		a, b uint32
-		want bool
-	}{
-		{2, 1, true},
-		{1, 1, false},
-		{1, 2, false},
-		{0, 0xFFFFFFFF, true}, // wraps around (RFC 1982)
-		{0xFFFFFFFF, 0, false},
-	}
-	for _, c := range cases {
-		if got := serialGreater(c.a, c.b); got != c.want {
-			t.Errorf("serialGreater(%d, %d) = %v, want %v", c.a, c.b, got, c.want)
-		}
-	}
-}
-
 // TestKSKRolloverWithSeveralZSKs: a rollover re-asserts every registered
-// ZSK next to the new KSK; with more than one of them that must still be
-// recognized as a rollover (it once wasn't -- any second non-SEP key
-// counted as "more than one candidate").
+// ZSK next to the new KSK; with more than one of them it is still
+// recognized as a rollover (only a second SEP key counts as a second
+// candidate).
 func TestKSKRolloverWithSeveralZSKs(t *testing.T) {
 	s := newTestSazu("example.org.")
 	s.InsecureSkipChainValidation = false

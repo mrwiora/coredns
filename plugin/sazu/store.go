@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/coredns/coredns/plugin/file"
+	"github.com/coredns/coredns/plugin/pkg/rfc2136"
 	"github.com/coredns/coredns/plugin/pkg/upstream"
 
 	"github.com/miekg/dns"
@@ -168,6 +169,12 @@ func (z *ZoneData) NameExists(name string) bool {
 	return false
 }
 
+// NameInUse implements rfc2136.Zone: name owns at least one RR.
+func (z *ZoneData) NameInUse(name string) bool { return z.NameExists(name) }
+
+// RRset implements rfc2136.Zone.
+func (z *ZoneData) RRset(name string, rrtype uint16) []dns.RR { return z.Lookup(name, rrtype) }
+
 // Insert adds rr to its RRset, per RFC 2136 §3.4.2.2 ("Add To An
 // RRset"): "In case of duplicate RDATAs ... the Zone RR is replaced by
 // [the] Update RR" -- an RR identical in content (ignoring TTL) to one
@@ -214,7 +221,7 @@ func (z *ZoneData) insertLocked(rr dns.RR) {
 	}
 
 	for i, e := range existing {
-		if rrEqualContent(e, rr) {
+		if rfc2136.SameRR(e, rr) {
 			existing[i] = dns.Copy(rr) // replace -- refreshes TTL, per RFC 2136 §3.4.2.2
 			return
 		}
@@ -303,7 +310,7 @@ func (z *ZoneData) deleteRRLocked(rr dns.RR) {
 	rrs := byType[rr.Header().Rrtype]
 	kept := rrs[:0]
 	for _, existing := range rrs {
-		if !rrEqualContent(existing, rr) {
+		if !rfc2136.SameRR(existing, rr) {
 			kept = append(kept, existing)
 		}
 	}
@@ -410,21 +417,6 @@ func (z *ZoneData) PurgeContentAndApply(ops []dns.RR, zclass uint16) error {
 		}
 	}
 	return nil
-}
-
-// rrEqualContent compares two RRs by name/type/rdata only, ignoring TTL
-// and Class. TTL is never part of RFC 2136 delete matching. Class also
-// has to be ignored here specifically because RFC 2136 §2.5.4 "delete an
-// RR" (and this store's own DeleteRR caller) carries the real rdata
-// alongside Class NONE as a wire-protocol marker for "this is a delete,"
-// not as part of the record's identity -- the stored record being
-// deleted has the zone's real class (usually IN), so comparing Class
-// along with the rest would make every such delete a no-op.
-func rrEqualContent(a, b dns.RR) bool {
-	a2, b2 := dns.Copy(a), dns.Copy(b)
-	a2.Header().Ttl, b2.Header().Ttl = 0, 0
-	a2.Header().Class, b2.Header().Class = 0, 0
-	return a2.String() == b2.String()
 }
 
 // Store holds every zone this plugin instance is currently serving,

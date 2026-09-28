@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/coredns/coredns/plugin/pkg/rfc2136"
+
 	"github.com/miekg/dns"
 )
 
@@ -45,7 +47,7 @@ func checkZoneContent(ops []dns.RR, zclass uint16) error {
 				return fmt.Errorf("%s: more than one CNAME (RFC 2181 §10.1)", name)
 			}
 			for t := range byType {
-				if t != dns.TypeCNAME && t != dns.TypeNSEC {
+				if !rfc2136.CNAMECompatible(t) {
 					return fmt.Errorf("%s: CNAME and %s at the same name (RFC 2181 §10.1)", name, dns.TypeToString[t])
 				}
 			}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/coredns/coredns/plugin/pkg/rfc2136"
 	"github.com/coredns/coredns/plugin/tsig"
 
 	"github.com/miekg/dns"
@@ -132,80 +133,23 @@ func (d *DynUpdate) updateLocked(key string, prerequisites, updates []dns.RR) (b
 }
 
 func (d *DynUpdate) checkPrerequisites(prerequisites []dns.RR) int {
-	valueDependent := make(map[rrsetKey][]dns.RR)
-	for _, rr := range prerequisites {
-		if rr == nil {
-			return dns.RcodeFormatError
-		}
-		h := rr.Header()
-		if h.Ttl != 0 {
-			return dns.RcodeFormatError
-		}
-		if !inZone(d.Zone, h.Name) {
-			return dns.RcodeNotZone
-		}
-		if unsupportedRRType(h.Rrtype) {
-			return dns.RcodeNotImplemented
-		}
+	rcode, _ := rfc2136.CheckPrerequisites(d.Zone, prerequisites, dns.ClassINET, zoneView{d}, rejectUnsupported)
+	return rcode
+}
 
-		switch h.Class {
-		case dns.ClassANY:
-			if h.Rdlength != 0 || !validPrerequisiteType(h.Rrtype, true) {
-				return dns.RcodeFormatError
-			}
-			if h.Rrtype == dns.TypeANY {
-				if !d.nameInUse(h.Name) {
-					return dns.RcodeNameError
-				}
-			} else if !d.rrsetExists(h.Name, h.Rrtype) {
-				return dns.RcodeNXRrset
-			}
+// zoneView gives rfc2136 read access to the current records.
+type zoneView struct{ d *DynUpdate }
 
-		case dns.ClassNONE:
-			if h.Rdlength != 0 || !validPrerequisiteType(h.Rrtype, true) {
-				return dns.RcodeFormatError
-			}
-			if h.Rrtype == dns.TypeANY {
-				if d.nameInUse(h.Name) {
-					return dns.RcodeYXDomain
-				}
-			} else if d.rrsetExists(h.Name, h.Rrtype) {
-				return dns.RcodeYXRrset
-			}
+func (v zoneView) NameInUse(name string) bool { return v.d.nameInUse(name) }
 
-		case dns.ClassINET:
-			if !validPrerequisiteType(h.Rrtype, false) {
-				return dns.RcodeFormatError
-			}
-			key := rrsetKey{name: canonicalName(h.Name), rrType: h.Rrtype}
-			valueDependent[key] = append(valueDependent[key], rr)
+func (v zoneView) RRset(name string, rrType uint16) []dns.RR { return v.d.rrset(name, rrType) }
 
-		default:
-			return dns.RcodeFormatError
-		}
-	}
-
-	for key, want := range valueDependent {
-		if !sameRRset(d.rrset(key.name, key.rrType), want) {
-			return dns.RcodeNXRrset
-		}
+// rejectUnsupported refuses record types this plugin cannot keep valid.
+func rejectUnsupported(rr dns.RR) int {
+	if unsupportedRRType(rr.Header().Rrtype) {
+		return dns.RcodeNotImplemented
 	}
 	return dns.RcodeSuccess
-}
-
-func validPrerequisiteType(rrType uint16, allowAny bool) bool {
-	if !knownRRType(rrType) || rrType == dns.TypeNone {
-		return false
-	}
-	if rrType == dns.TypeANY {
-		return allowAny
-	}
-	return !isQueryMetaType(rrType)
-}
-
-type rrsetKey struct {
-	name   string
-	rrType uint16
 }
 
 func (d *DynUpdate) authorize(key string, updates []dns.RR) int {
@@ -221,52 +165,19 @@ func (d *DynUpdate) authorize(key string, updates []dns.RR) int {
 }
 
 func (d *DynUpdate) validateUpdates(updates []dns.RR) int {
-	for _, rr := range updates {
-		if rr == nil {
-			return dns.RcodeFormatError
-		}
-		h := rr.Header()
-		if !inZone(d.Zone, h.Name) {
-			return dns.RcodeNotZone
-		}
-		if !knownRRType(h.Rrtype) || h.Rrtype == dns.TypeNone {
-			return dns.RcodeFormatError
-		}
-
-		switch h.Class {
-		case dns.ClassINET:
-			if isQueryMetaType(h.Rrtype) {
+	rcode, _ := rfc2136.PrescanUpdates(d.Zone, updates, dns.ClassINET, func(rr dns.RR) int {
+		if h := rr.Header(); h.Rrtype == dns.TypeSOA && h.Class == dns.ClassINET {
+			// The SOA exists only at the apex, and RFC 2136 sections 4.2
+			// and 7.11 prohibit serial zero for interoperability with
+			// older DNS implementations.
+			soa, ok := rr.(*dns.SOA)
+			if !ok || canonicalName(h.Name) != d.Zone || soa.Serial == 0 {
 				return dns.RcodeFormatError
 			}
-			if h.Rrtype == dns.TypeSOA {
-				if canonicalName(h.Name) != d.Zone {
-					return dns.RcodeFormatError
-				}
-				soa, ok := rr.(*dns.SOA)
-				// RFC 2136 sections 4.2 and 7.11 prohibit zero for
-				// interoperability with older DNS implementations.
-				if !ok || soa.Serial == 0 {
-					return dns.RcodeFormatError
-				}
-			}
-		case dns.ClassANY:
-			if h.Ttl != 0 || h.Rdlength != 0 || isQueryMetaType(h.Rrtype) && h.Rrtype != dns.TypeANY {
-				return dns.RcodeFormatError
-			}
-		case dns.ClassNONE:
-			if h.Ttl != 0 || h.Rrtype == dns.TypeANY || isQueryMetaType(h.Rrtype) {
-				return dns.RcodeFormatError
-			}
-		default:
-			return dns.RcodeFormatError
 		}
-
-		if unsupportedRRType(h.Rrtype) {
-			return dns.RcodeNotImplemented
-		}
-	}
-
-	return dns.RcodeSuccess
+		return rejectUnsupported(rr)
+	})
+	return rcode
 }
 
 // unsupportedRRType identifies records whose contents become invalid when a

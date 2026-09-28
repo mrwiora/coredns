@@ -3,7 +3,8 @@ package dynupdate
 import (
 	"errors"
 	"fmt"
-	"strings"
+
+	"github.com/coredns/coredns/plugin/pkg/rfc2136"
 
 	"github.com/miekg/dns"
 )
@@ -81,12 +82,11 @@ type permission struct {
 }
 
 func canonicalName(name string) string {
-	return strings.ToLower(dns.CanonicalName(name))
+	return rfc2136.CanonicalName(name)
 }
 
 func inZone(origin, name string) bool {
-	name = canonicalName(name)
-	return name == origin || dns.IsSubDomain(origin, name)
+	return rfc2136.InZone(origin, name)
 }
 
 func (d *DynUpdate) configuredKey(key string) bool {
@@ -175,64 +175,7 @@ func cloneRecords(records []dns.RR) []dns.RR {
 }
 
 func sameRR(a, b dns.RR) bool {
-	if a == nil || b == nil {
-		return false
-	}
-
-	// dns.IsDuplicate implements miekg/dns's generated, type-aware RDATA
-	// comparison and deliberately ignores TTL. UPDATE delete records use
-	// CLASS NONE on the wire, while the corresponding zone RR has the zone
-	// class, so normalize both classes before comparing.
-	left, right := dns.Copy(a), dns.Copy(b)
-	if left == nil || right == nil {
-		return false
-	}
-	left.Header().Class = dns.ClassINET
-	right.Header().Class = dns.ClassINET
-	return dns.IsDuplicate(left, right)
-}
-
-func sameRRset(have, want []dns.RR) bool {
-	// Treat each section as a set. Zone files and UPDATE messages should not
-	// contain duplicate RRs, but ignoring duplicates here follows the RFC's
-	// RRset semantics and avoids making comparison depend on wire ordering.
-	have = uniqueRecords(have)
-	want = uniqueRecords(want)
-	if len(have) != len(want) {
-		return false
-	}
-	used := make([]bool, len(have))
-	for _, wanted := range want {
-		found := false
-		for i, actual := range have {
-			if !used[i] && sameRR(actual, wanted) {
-				used[i] = true
-				found = true
-				break
-			}
-		}
-		if !found {
-			return false
-		}
-	}
-	return true
-}
-
-func uniqueRecords(records []dns.RR) []dns.RR {
-	unique := make([]dns.RR, 0, len(records))
-	for _, rr := range records {
-		duplicate := false
-		for _, existing := range unique {
-			if sameRR(existing, rr) {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			unique = append(unique, rr)
-		}
-	}
-	return unique
+	return rfc2136.SameRR(a, b)
 }
 
 func findRR(records []dns.RR, want dns.RR) int {
@@ -286,14 +229,11 @@ func hasOtherData(records []dns.RR, name string) bool {
 }
 
 func cnameCompatibleType(rrType uint16) bool {
-	return rrType == dns.TypeCNAME
+	return rfc2136.CNAMECompatible(rrType)
 }
 
-// serialGreater implements RFC 1982 serial arithmetic. The half-space value
-// is deliberately not considered greater because RFC 1982 leaves it
-// undefined.
 func serialGreater(a, b uint32) bool {
-	return a != b && a-b < 1<<31
+	return rfc2136.SerialGreater(a, b)
 }
 
 func bumpSerial(records []dns.RR) {
@@ -308,16 +248,9 @@ func bumpSerial(records []dns.RR) {
 }
 
 func knownRRType(rrType uint16) bool {
-	_, ok := dns.TypeToRR[rrType]
-	return ok
+	return rfc2136.KnownType(rrType)
 }
 
 func isQueryMetaType(rrType uint16) bool {
-	switch rrType {
-	case dns.TypeANY, dns.TypeAXFR, dns.TypeIXFR, dns.TypeMAILA, dns.TypeMAILB,
-		dns.TypeOPT, dns.TypeTKEY, dns.TypeTSIG:
-		return true
-	default:
-		return false
-	}
+	return rfc2136.IsQueryMetaType(rrType)
 }
