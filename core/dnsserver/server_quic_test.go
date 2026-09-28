@@ -691,6 +691,61 @@ func TestServerQUIC_ServeQUICRejectsUpdate(t *testing.T) {
 	}
 }
 
+// TestServerQUIC_AllowOpcodeAndRawRequest: with AllowOpcode and
+// CaptureRawRequests, an UPDATE over DoQ reaches the plugins with its exact
+// wire bytes under RawRequestKey.
+func TestServerQUIC_AllowOpcodeAndRawRequest(t *testing.T) {
+	rec := newRawRecorder()
+	config := testConfig("quic", rec)
+	config.TLSConfig = mustMakeQUICServerTLSConfig(t)
+	config.AllowOpcode(dns.OpcodeUpdate)
+	config.CaptureRawRequests(dns.OpcodeUpdate)
+
+	server, err := NewServerQUIC(transport.QUIC+"://127.0.0.1:0", []*Config{config})
+	if err != nil {
+		t.Fatalf("NewServerQUIC() failed: %v", err)
+	}
+	pc, err := server.ListenPacket()
+	if err != nil {
+		t.Fatalf("ListenPacket() failed: %v", err)
+	}
+	defer pc.Close()
+	go server.ServeQUIC()
+	defer server.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := quic.DialAddr(ctx, pc.LocalAddr().String(), mustMakeQUICClientTLSConfig(), &quic.Config{})
+	if err != nil {
+		t.Fatalf("quic.DialAddr() failed: %v", err)
+	}
+	defer conn.CloseWithError(DoQCodeNoError, "")
+	stream, err := conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatalf("OpenStreamSync() failed: %v", err)
+	}
+	_ = stream.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	u := new(dns.Msg)
+	u.SetUpdate("example.com.")
+	u.Id = 0 // RFC 9250 §4.2.1
+	wire, err := u.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Write(AddPrefix(wire)); err != nil {
+		t.Fatalf("stream.Write() failed: %v", err)
+	}
+	_ = stream.Close()
+	if _, err := readDOQMessage(stream); err != nil {
+		t.Fatalf("readDOQMessage() failed: %v", err)
+	}
+	raw, ok := rec.seen(dns.OpcodeUpdate)
+	if !ok || string(raw) != string(wire) {
+		t.Fatalf("expected the UPDATE's exact bytes under RawRequestKey, got ok=%v", ok)
+	}
+}
+
 // echoPlugin answers every query with a minimal reply. It is used as a
 // negative control to prove a normal DoQ query is still served after the
 // per-stream read deadline was introduced.

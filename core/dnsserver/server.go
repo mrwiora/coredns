@@ -102,13 +102,11 @@ type Server struct {
 	// several server blocks share a listener. See Config.UDPDecorateWriterFunc.
 	udpDecorateWriterFunc func(*Server) dns.DecorateWriter
 
-	// udpDecorateReaderFunc mirrors udpDecorateWriterFunc; see
-	// Config.UDPDecorateReaderFunc.
-	udpDecorateReaderFunc func(*Server) dns.DecorateReader
-
-	// tcpDecorateReaderFunc mirrors udpDecorateReaderFunc for the TCP
-	// listener; see Config.TCPDecorateReaderFunc.
-	tcpDecorateReaderFunc func(*Server) dns.DecorateReader
+	// rawCaptureOpcodes is the union of the configs' CaptureRawRequests
+	// opcodes; rawCapture holds the bytes read on UDP, TCP and TLS
+	// listeners for them. See RawRequestKey.
+	rawCaptureOpcodes map[int]struct{}
+	rawCapture        *rawCapture
 
 	// Ensure Stop is idempotent when invoked concurrently (e.g., during reload and SIGTERM).
 	stopOnce sync.Once
@@ -133,6 +131,8 @@ func NewServer(addr string, group []*Config) (*Server, error) {
 		MaxTCPQueries:  tcpMaxQueries,
 		TsigSecret:     make(map[string]string),
 		allowedOpcodes: make(map[int]struct{}),
+
+		rawCaptureOpcodes: make(map[int]struct{}),
 	}
 
 	for _, site := range group {
@@ -162,6 +162,7 @@ func NewServer(addr string, group []*Config) (*Server, error) {
 		// copy tsig secrets
 		maps.Copy(s.TsigSecret, site.TsigSecret)
 		maps.Copy(s.allowedOpcodes, site.allowedOpcodes)
+		maps.Copy(s.rawCaptureOpcodes, site.rawCaptureOpcodes)
 
 		// compile custom plugin for everything
 		var stack plugin.Handler
@@ -202,13 +203,8 @@ func NewServer(addr string, group []*Config) (*Server, error) {
 		if site.UDPDecorateWriterFunc != nil {
 			s.udpDecorateWriterFunc = site.UDPDecorateWriterFunc
 		}
-		if site.UDPDecorateReaderFunc != nil {
-			s.udpDecorateReaderFunc = site.UDPDecorateReaderFunc
-		}
-		if site.TCPDecorateReaderFunc != nil {
-			s.tcpDecorateReaderFunc = site.TCPDecorateReaderFunc
-		}
 	}
+	s.rawCapture = newRawCapture(s.rawCaptureOpcodes)
 
 	if !s.debug {
 		// When reloading we need to explicitly disable debug logging if it is now disabled.
@@ -224,12 +220,6 @@ var _ caddy.GracefulServer = &Server{}
 // Serve starts the server with an existing listener. It blocks until the server stops.
 // This implements caddy.TCPServer interface.
 func (s *Server) Serve(l net.Listener) error {
-	// Use a custom reader decorator if one was configured.
-	var dr dns.DecorateReader
-	if s.tcpDecorateReaderFunc != nil {
-		dr = s.tcpDecorateReaderFunc(s)
-	}
-
 	s.m.Lock()
 
 	s.server[tcp] = &dns.Server{Listener: l,
@@ -239,13 +229,14 @@ func (s *Server) Serve(l net.Listener) error {
 		MaxTCPQueries:  s.MaxTCPQueries,
 		ReadTimeout:    s.ReadTimeout,
 		WriteTimeout:   s.WriteTimeout,
-		DecorateReader: dr,
+		DecorateReader: s.decorateReader(),
 		IdleTimeout: func() time.Duration {
 			return s.IdleTimeout
 		},
 		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 			ctx := context.WithValue(context.Background(), Key{}, s)
 			ctx = context.WithValue(ctx, LoopKey{}, 0)
+			ctx = s.withRawRequest(ctx, w, r)
 			s.ServeDNS(ctx, w, r)
 		})}
 
@@ -257,21 +248,18 @@ func (s *Server) Serve(l net.Listener) error {
 // ServePacket starts the server with an existing packetconn. It blocks until the server stops.
 // This implements caddy.UDPServer interface.
 func (s *Server) ServePacket(p net.PacketConn) error {
-	// Use a custom writer/reader decorator if one was configured.
+	// Use a custom writer decorator if one was configured.
 	var dw dns.DecorateWriter
 	if s.udpDecorateWriterFunc != nil {
 		dw = s.udpDecorateWriterFunc(s)
-	}
-	var dr dns.DecorateReader
-	if s.udpDecorateReaderFunc != nil {
-		dr = s.udpDecorateReaderFunc(s)
 	}
 	s.m.Lock()
 	s.server[udp] = &dns.Server{PacketConn: p, Net: "udp", Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 		ctx := context.WithValue(context.Background(), Key{}, s)
 		ctx = context.WithValue(ctx, LoopKey{}, 0)
+		ctx = s.withRawRequest(ctx, w, r)
 		s.ServeDNS(ctx, w, r)
-	}), TsigSecret: s.TsigSecret, MsgAcceptFunc: s.msgAcceptFunc(), DecorateWriter: dw, DecorateReader: dr}
+	}), TsigSecret: s.TsigSecret, MsgAcceptFunc: s.msgAcceptFunc(), DecorateWriter: dw, DecorateReader: s.decorateReader()}
 	s.m.Unlock()
 
 	return s.server[udp].ActivateAndServe()

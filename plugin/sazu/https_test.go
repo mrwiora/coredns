@@ -44,6 +44,7 @@ func serveThroughRealHTTPSServer(t *testing.T, s *Sazu) string {
 		return s
 	})
 	cfg.AllowOpcode(dns.OpcodeUpdate)
+	cfg.CaptureRawRequests(dns.OpcodeUpdate)
 
 	sh, err := dnsserver.NewServerHTTPS("127.0.0.1:0", []*dnsserver.Config{cfg})
 	if err != nil {
@@ -88,7 +89,7 @@ func sendOverHTTPS(t *testing.T, baseURL string, wire []byte) *dns.Msg {
 // -- the RFC 8484 DoH convention, reused as-is -- reaches this plugin's
 // exact same authenticate-evaluate-apply pipeline every other transport
 // shares (SIG(0) verified against RawRequestKey's context-propagated
-// wire bytes, since HTTPS never goes through RawCapture at all), and
+// wire bytes), and
 // results in a genuinely onboarded, servable zone.
 func TestOnboardOverHTTPSRawWireBytes(t *testing.T) {
 	s := newTestSazu("example.org.")

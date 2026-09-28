@@ -262,7 +262,7 @@ func (s *ServerHTTPS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), Key{}, s.Server)
 	ctx = context.WithValue(ctx, LoopKey{}, 0)
 	ctx = context.WithValue(ctx, HTTPRequestKey{}, r)
-	ctx = context.WithValue(ctx, RawRequestKey{}, raw)
+	ctx = s.withRawBody(ctx, msg, raw)
 
 	s.ServeDNS(ctx, dw, msg)
 

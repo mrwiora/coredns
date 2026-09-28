@@ -56,19 +56,6 @@ func (l *loggerAdapter) Write(p []byte) (n int, err error) {
 // Plugins can access the original HTTP request to retrieve headers, client IP, and metadata.
 type HTTPRequestKey struct{}
 
-// RawRequestKey is the context key for the exact DNS wire bytes CoreDNS
-// received over this HTTPS (or HTTP/3) request, before any parsing --
-// alongside HTTPRequestKey, for a plugin whose own authentication scheme
-// (e.g. SIG(0), RFC 2931, which signs literal wire bytes rather than any
-// re-encoding of a parsed message) needs the exact bytes the client
-// sent. The plain UDP/TCP/TLS transports give a plugin this via their
-// own DecorateReader hook (UDPDecorateReaderFunc/TCPDecorateReaderFunc on
-// Config); HTTPS/HTTP3 never go through a dns.Server's DecorateReader at
-// all, so this context value is the equivalent for them. Set once per
-// request, from the same raw bytes doh.RequestToMsgWireWithAccept
-// already extracted.
-type RawRequestKey struct{}
-
 // NewServerHTTPS returns a new CoreDNS HTTPS server and compiles all plugins in to it.
 func NewServerHTTPS(addr string, group []*Config) (*ServerHTTPS, error) {
 	tlsConfig, err := sharedTLSConfig(addr, group)
@@ -264,7 +251,7 @@ func (s *ServerHTTPS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithValue(r.Context(), Key{}, s.Server)
 	ctx = context.WithValue(ctx, LoopKey{}, 0)
 	ctx = context.WithValue(ctx, HTTPRequestKey{}, r)
-	ctx = context.WithValue(ctx, RawRequestKey{}, raw)
+	ctx = s.withRawBody(ctx, msg, raw)
 	s.ServeDNS(ctx, dw, msg)
 
 	// See section 4.2.1 of RFC 8484.

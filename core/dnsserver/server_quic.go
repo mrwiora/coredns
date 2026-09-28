@@ -247,7 +247,7 @@ func (s *ServerQUIC) serveQUICStream(stream *quic.Stream, conn *quic.Conn) {
 		return
 	}
 
-	req, err := dnsutil.UnpackRequest(buf)
+	req, err := dnsutil.UnpackRequestWithAcceptFunc(buf, s.msgAcceptFunc())
 	if err != nil {
 		clog.Debugf("unpacking quic packet: %s", err)
 		s.closeQUICConn(conn, DoQCodeProtocolError)
@@ -286,6 +286,7 @@ func (s *ServerQUIC) serveQUICStream(stream *quic.Stream, conn *quic.Conn) {
 
 	dnsCtx := context.WithValue(stream.Context(), Key{}, s.Server)
 	dnsCtx = context.WithValue(dnsCtx, LoopKey{}, 0)
+	dnsCtx = s.withRawBody(dnsCtx, req, buf)
 	s.ServeDNS(dnsCtx, w, req)
 	s.countResponse(DoQCodeNoError)
 }

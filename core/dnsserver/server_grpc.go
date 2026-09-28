@@ -173,7 +173,7 @@ func (s *ServergRPC) Query(ctx context.Context, in *pb.DnsPacket) (*pb.DnsPacket
 	if len(in.GetMsg()) > dns.MaxMsgSize {
 		return nil, fmt.Errorf("dns message exceeds size limit: %d", len(in.GetMsg()))
 	}
-	msg, err := dnsutil.UnpackRequest(in.GetMsg())
+	msg, err := dnsutil.UnpackRequestWithAcceptFunc(in.GetMsg(), s.msgAcceptFunc())
 	if err != nil {
 		return nil, err
 	}
@@ -202,6 +202,7 @@ func (s *ServergRPC) Query(ctx context.Context, in *pb.DnsPacket) (*pb.DnsPacket
 
 	dnsCtx := context.WithValue(ctx, Key{}, s.Server)
 	dnsCtx = context.WithValue(dnsCtx, LoopKey{}, 0)
+	dnsCtx = s.withRawBody(dnsCtx, msg, in.GetMsg())
 	s.ServeDNS(dnsCtx, w, msg)
 
 	packed, err := w.Msg.Pack()

@@ -202,8 +202,19 @@ func (c *Config) AddPlugin(m plugin.Plugin) {
 	c.Plugin = append(c.Plugin, m)
 }
 
+// CaptureRawRequests makes the exact wire bytes of requests with the given
+// opcode available to this config's plugins, under RawRequestKey in the
+// request context, on every transport. Plugins should call it during setup.
+func (c *Config) CaptureRawRequests(opcode int) {
+	if c.rawCaptureOpcodes == nil {
+		c.rawCaptureOpcodes = make(map[int]struct{})
+	}
+	c.rawCaptureOpcodes[opcode] = struct{}{}
+}
+
 // AllowOpcode permits a non-default DNS opcode to reach this config's plugin chain
-// on UDP, TCP, DNS-over-TLS, DNS-over-HTTPS, and DNS-over-HTTP/3 listeners.
+// on UDP, TCP, DNS-over-TLS, DNS-over-HTTPS, DNS-over-HTTP/3, DNS-over-QUIC
+// and gRPC listeners.
 // Plugins should call it during setup. The listener still requires exactly
 // one question, and configs that do not opt in continue to reject the opcode.
 func (c *Config) AllowOpcode(opcode int) {
@@ -308,6 +319,7 @@ func propagateConfigParams(configs []*Config) {
 		c.MaxTCPQueries = c.firstConfigInBlock.MaxTCPQueries
 		c.TsigSecret = c.firstConfigInBlock.TsigSecret
 		c.allowedOpcodes = c.firstConfigInBlock.allowedOpcodes
+		c.rawCaptureOpcodes = c.firstConfigInBlock.rawCaptureOpcodes
 
 		// Propagate HTTPRequestValidateFunc so that custom path validators work in
 		// multi-transport blocks. Otherwise HTTPS 404s on non-"/dns-query" paths.
@@ -316,10 +328,6 @@ func propagateConfigParams(configs []*Config) {
 		// Propagate UDPDecorateWriterFunc so a decorator configured once in a
 		// server block applies to the block's UDP listener(s).
 		c.UDPDecorateWriterFunc = c.firstConfigInBlock.UDPDecorateWriterFunc
-
-		// Propagate UDPDecorateReaderFunc/TCPDecorateReaderFunc the same way.
-		c.UDPDecorateReaderFunc = c.firstConfigInBlock.UDPDecorateReaderFunc
-		c.TCPDecorateReaderFunc = c.firstConfigInBlock.TCPDecorateReaderFunc
 
 		// Propagate MaxHTTPSStreams so a `https { max_streams N }` set once in a
 		// server block applies to the block's HTTPS key regardless of key order.

@@ -47,18 +47,20 @@ func (s *ServerTLS) Serve(l net.Listener) error {
 
 	// Only fill out the TCP server for this one.
 	s.server[tcp] = &dns.Server{Listener: l,
-		Net:           "tcp-tls",
-		TsigSecret:    s.TsigSecret,
-		MsgAcceptFunc: s.msgAcceptFunc(),
-		MaxTCPQueries: s.MaxTCPQueries,
-		ReadTimeout:   s.ReadTimeout,
-		WriteTimeout:  s.WriteTimeout,
+		Net:            "tcp-tls",
+		TsigSecret:     s.TsigSecret,
+		MsgAcceptFunc:  s.msgAcceptFunc(),
+		MaxTCPQueries:  s.MaxTCPQueries,
+		ReadTimeout:    s.ReadTimeout,
+		WriteTimeout:   s.WriteTimeout,
+		DecorateReader: s.decorateReader(),
 		IdleTimeout: func() time.Duration {
 			return s.IdleTimeout
 		},
 		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 			ctx := context.WithValue(context.Background(), Key{}, s.Server)
 			ctx = context.WithValue(ctx, LoopKey{}, 0)
+			ctx = s.withRawRequest(ctx, w, r)
 			s.ServeDNS(ctx, w, r)
 		})}
 

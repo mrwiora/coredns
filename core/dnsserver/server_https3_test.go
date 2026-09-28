@@ -114,6 +114,7 @@ func TestServerHTTPS3AllowOpcodeAcceptsUpdate(t *testing.T) {
 		c := testConfig("https3", p)
 		c.TLSConfig = &tls.Config{}
 		c.AllowOpcode(dns.OpcodeUpdate)
+		c.CaptureRawRequests(dns.OpcodeUpdate)
 		return c, p
 	}
 

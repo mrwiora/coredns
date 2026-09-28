@@ -560,163 +560,152 @@ func TestUDPDecorateWriterFunc(t *testing.T) {
 	}
 }
 
-// recordingReader captures the raw bytes of every packet/stream message
-// it reads before handing them to the real reader, standing in for a
-// plugin (e.g. SAZU's SIG(0) verification) that needs the exact wire
-// bytes of a request rather than a re-encoding of the parsed *dns.Msg.
-// It overrides both ReadUDP and ReadPacketConn since which one the
-// server actually calls depends on whether the underlying
-// net.PacketConn's concrete type is *net.UDPConn or something more
-// generic (e.g. under a reuseport or proxyproto wrapper) -- exactly the
-// ambiguity a real decorator has to handle, not just a test artifact.
-type recordingReader struct {
-	inner    dns.Reader
-	innerPC  dns.PacketConnReader
-	captured *atomic.Pointer[[]byte]
+// rawRecorder records, per request opcode, the RawRequestKey value its
+// ServeDNS saw.
+type rawRecorder struct {
+	mu  sync.Mutex
+	raw map[int][]byte
+	got map[int]bool
 }
 
-func (rr *recordingReader) ReadTCP(conn net.Conn, timeout time.Duration) ([]byte, error) {
-	m, err := rr.inner.ReadTCP(conn, timeout)
-	if err == nil {
-		cp := append([]byte(nil), m...)
-		rr.captured.Store(&cp)
-	}
-	return m, err
+func newRawRecorder() *rawRecorder {
+	return &rawRecorder{raw: map[int][]byte{}, got: map[int]bool{}}
 }
 
-func (rr *recordingReader) ReadUDP(conn *net.UDPConn, timeout time.Duration) ([]byte, *dns.SessionUDP, error) {
-	m, s, err := rr.inner.ReadUDP(conn, timeout)
-	if err == nil {
-		cp := append([]byte(nil), m...)
-		rr.captured.Store(&cp)
-	}
-	return m, s, err
-}
-
-func (rr *recordingReader) ReadPacketConn(conn net.PacketConn, timeout time.Duration) ([]byte, net.Addr, error) {
-	m, addr, err := rr.innerPC.ReadPacketConn(conn, timeout)
-	if err == nil {
-		cp := append([]byte(nil), m...)
-		rr.captured.Store(&cp)
-	}
-	return m, addr, err
-}
-
-func TestUDPDecorateReaderFunc(t *testing.T) {
-	cfg := testConfig("dns", test.ErrorHandler())
-
-	captured := new(atomic.Pointer[[]byte])
-	var gotServer atomic.Pointer[Server]
-	var calls atomic.Int64
-	cfg.UDPDecorateReaderFunc = func(srv *Server) dns.DecorateReader {
-		calls.Add(1)
-		gotServer.Store(srv)
-		return func(r dns.Reader) dns.Reader {
-			pcr, _ := r.(dns.PacketConnReader)
-			return &recordingReader{inner: r, innerPC: pcr, captured: captured}
-		}
-	}
-
-	s, err := NewServer("127.0.0.1:0", []*Config{cfg})
-	if err != nil {
-		t.Fatalf("NewServer failed: %v", err)
-	}
-
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket failed: %v", err)
-	}
-	defer pc.Close()
-
-	go s.ServePacket(pc)
-	defer s.Stop()
-
+func (p *rawRecorder) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	raw, ok := ctx.Value(RawRequestKey{}).([]byte)
+	p.mu.Lock()
+	p.raw[r.Opcode], p.got[r.Opcode] = raw, ok
+	p.mu.Unlock()
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
-	if _, err := dns.Exchange(m, pc.LocalAddr().String()); err != nil {
-		t.Fatalf("dns.Exchange failed: %v", err)
-	}
+	m.SetReply(r)
+	w.WriteMsg(m)
+	return dns.RcodeSuccess, nil
+}
 
-	if n := calls.Load(); n != 1 {
-		t.Errorf("expected UDPDecorateReaderFunc to be called once per socket, got %d", n)
-	}
-	if gotServer.Load() != s {
-		t.Errorf("expected UDPDecorateReaderFunc to receive the serving *Server")
-	}
-	raw := captured.Load()
-	if raw == nil {
-		t.Fatalf("expected the decorated reader to capture the request's raw bytes")
-	}
-	var decoded dns.Msg
-	if err := decoded.Unpack(*raw); err != nil {
-		t.Fatalf("captured bytes do not unpack as a DNS message: %v", err)
-	}
-	if len(decoded.Question) != 1 || decoded.Question[0].Name != "example.com." {
-		t.Errorf("captured bytes do not match the request sent: %+v", decoded.Question)
+func (p *rawRecorder) Name() string { return "rawrecorder" }
+
+func (p *rawRecorder) seen(opcode int) ([]byte, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.raw[opcode], p.got[opcode]
+}
+
+func rawCaptureConfig(zone string, p plugin.Handler) *Config {
+	c := &Config{Zone: zone, Transport: "dns", ListenHosts: []string{"127.0.0.1"}, Port: "53"}
+	c.AddPlugin(func(plugin.Handler) plugin.Handler { return p })
+	c.AllowOpcode(dns.OpcodeUpdate)
+	c.CaptureRawRequests(dns.OpcodeUpdate)
+	return c
+}
+
+// TestCaptureRawRequests: over UDP and TCP, a request with a captured
+// opcode reaches plugins with its exact wire bytes under RawRequestKey; an
+// ordinary query doesn't. With two configs on one listener, each gets its
+// own requests' bytes.
+func TestCaptureRawRequests(t *testing.T) {
+	for _, network := range []string{"udp", "tcp"} {
+		t.Run(network, func(t *testing.T) {
+			orgRec, netRec := newRawRecorder(), newRawRecorder()
+			s, err := NewServer("127.0.0.1:0", []*Config{
+				rawCaptureConfig("example.org.", orgRec),
+				rawCaptureConfig("example.net.", netRec),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var addr string
+			if network == "udp" {
+				pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer pc.Close()
+				go s.ServePacket(pc)
+				addr = pc.LocalAddr().String()
+			} else {
+				l, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer l.Close()
+				go s.Serve(l)
+				addr = l.Addr().String()
+			}
+			defer s.Stop()
+			c := &dns.Client{Net: network, Timeout: 2 * time.Second}
+
+			for zone, rec := range map[string]*rawRecorder{"example.org.": orgRec, "example.net.": netRec} {
+				u := new(dns.Msg)
+				u.SetUpdate(zone)
+				u.Insert([]dns.RR{test.A("www." + zone + " 300 IN A 192.0.2.1")})
+				wire, err := u.Pack()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, _, err := c.Exchange(u, addr); err != nil {
+					t.Fatal(err)
+				}
+				raw, ok := rec.seen(dns.OpcodeUpdate)
+				if !ok || string(raw) != string(wire) {
+					t.Fatalf("%s: expected the UPDATE's exact bytes, got ok=%v", zone, ok)
+				}
+
+				q := new(dns.Msg)
+				q.SetQuestion("www."+zone, dns.TypeA)
+				if _, _, err := c.Exchange(q, addr); err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := rec.seen(dns.OpcodeQuery); ok {
+					t.Fatalf("%s: a query's bytes must not be captured", zone)
+				}
+			}
+		})
 	}
 }
 
-// TestTCPDecorateReaderFunc mirrors TestUDPDecorateReaderFunc for the TCP
-// listener -- proving Config.TCPDecorateReaderFunc actually reaches
-// dns.Server's DecorateReader for Serve (TCP), which nothing wired up at
-// all before this existed, unlike ServePacket (UDP).
-func TestTCPDecorateReaderFunc(t *testing.T) {
-	cfg := testConfig("dns", test.ErrorHandler())
+// TestRawCaptureBounded: unclaimed entries never exceed the capacity, and
+// only requests with a captured opcode are stored.
+func TestRawCaptureBounded(t *testing.T) {
+	c := newRawCapture(map[int]struct{}{dns.OpcodeUpdate: {}})
+	addr := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
+	for i := 0; i < rawCaptureCapacity+10; i++ {
+		u := new(dns.Msg)
+		u.SetUpdate("example.org.")
+		u.Id = uint16(i)
+		wire, _ := u.Pack()
+		c.put(addr, wire)
+	}
+	q := new(dns.Msg)
+	q.SetQuestion("example.org.", dns.TypeA)
+	wire, _ := q.Pack()
+	c.put(&net.UDPAddr{IP: net.IPv4(192, 0, 2, 2), Port: 1}, wire)
+	if n := len(c.entries); n != rawCaptureCapacity {
+		t.Fatalf("entries = %d, want %d", n, rawCaptureCapacity)
+	}
+	if _, ok := c.take(addr, 0); ok {
+		t.Fatalf("the oldest entry should have been evicted")
+	}
+	if _, ok := c.take(addr, uint16(rawCaptureCapacity+9)); !ok {
+		t.Fatalf("the newest entry should be there")
+	}
+}
 
-	captured := new(atomic.Pointer[[]byte])
-	var gotServer atomic.Pointer[Server]
-	var calls atomic.Int64
-	cfg.TCPDecorateReaderFunc = func(srv *Server) dns.DecorateReader {
-		calls.Add(1)
-		gotServer.Store(srv)
-		return func(r dns.Reader) dns.Reader {
-			return &recordingReader{inner: r, captured: captured}
-		}
+// TestRawCaptureKeysIncludeTransport: a UDP packet claiming a TCP client's
+// ip:port must not collide with that client's captured bytes.
+func TestRawCaptureKeysIncludeTransport(t *testing.T) {
+	c := newRawCapture(map[int]struct{}{dns.OpcodeUpdate: {}})
+	u := new(dns.Msg)
+	u.SetUpdate("example.org.")
+	u.Id = 0x1234
+	msg, _ := u.Pack()
+	tcp := &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
+	udp := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
+	c.put(tcp, msg)
+	if _, ok := c.take(udp, 0x1234); ok {
+		t.Fatalf("a UDP lookup must not return bytes captured over TCP for the same ip:port")
 	}
-
-	s, err := NewServer("127.0.0.1:0", []*Config{cfg})
-	if err != nil {
-		t.Fatalf("NewServer failed: %v", err)
-	}
-
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen failed: %v", err)
-	}
-	defer l.Close()
-
-	go s.Serve(l)
-	defer s.Stop()
-
-	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
-	co, err := dns.DialTimeout("tcp", l.Addr().String(), 2*time.Second)
-	if err != nil {
-		t.Fatalf("DialTimeout failed: %v", err)
-	}
-	defer co.Close()
-	if err := co.WriteMsg(m); err != nil {
-		t.Fatalf("WriteMsg failed: %v", err)
-	}
-	if _, err := co.ReadMsg(); err != nil {
-		t.Fatalf("ReadMsg failed: %v", err)
-	}
-
-	if n := calls.Load(); n != 1 {
-		t.Errorf("expected TCPDecorateReaderFunc to be called once, got %d", n)
-	}
-	if gotServer.Load() != s {
-		t.Errorf("expected TCPDecorateReaderFunc to receive the serving *Server")
-	}
-	raw := captured.Load()
-	if raw == nil {
-		t.Fatalf("expected the decorated reader to capture the request's raw bytes")
-	}
-	var decoded dns.Msg
-	if err := decoded.Unpack(*raw); err != nil {
-		t.Fatalf("captured bytes do not unpack as a DNS message: %v", err)
-	}
-	if len(decoded.Question) != 1 || decoded.Question[0].Name != "example.com." {
-		t.Errorf("captured bytes do not match the request sent: %+v", decoded.Question)
+	if got, ok := c.take(tcp, 0x1234); !ok || string(got) != string(msg) {
+		t.Fatalf("expected the TCP entry back")
 	}
 }

@@ -24,18 +24,8 @@ func setup(c *caddy.Controller) error {
 	// in -- this is what lets our own UPDATE handling below actually run.
 	config.AllowOpcode(dns.OpcodeUpdate)
 
-	capture := NewRawCapture(5*time.Second, 4096)
-	// A signed push carrying real RRSIGs routinely exceeds 512 bytes (RFC
-	// 1035's plain-DNS-over-UDP ceiling) -- and, worse, often exceeds the
-	// ~1472-byte path MTU before IP fragmentation kicks in, which gets
-	// silently dropped by many networks/firewalls entirely (found the
-	// hard way against a real server). Raising the UDP receive buffer
-	// only helped with the first problem, not the second, so sazuctl
-	// sends anything of meaningful size over TCP instead -- both
-	// listeners share the same capture, since RawCapture keys entries by
-	// address + message ID regardless of transport.
-	config.UDPDecorateReaderFunc = capture.DecorateReaderFunc
-	config.TCPDecorateReaderFunc = capture.DecorateReaderFunc
+	// SIG(0) is verified over the exact bytes the client sent.
+	config.CaptureRawRequests(dns.OpcodeUpdate)
 
 	validator := NewValidator()
 	if cfg.trustAnchorPath != "" {
@@ -49,7 +39,6 @@ func setup(c *caddy.Controller) error {
 	s := &Sazu{
 		Zones:                       cfg.zones,
 		Validator:                   validator,
-		Capture:                     capture,
 		InsecureSkipChainValidation: cfg.insecureSkipChainValidation,
 		RateLimiter:                 NewRateLimiter(cfg.fullPushesPerDay, cfg.keyManagementPushesPerDay),
 		IPRateLimiter:               NewIPRateLimiter(cfg.ipUpdatesPerMinute),

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
+	"github.com/coredns/coredns/plugin/pkg/transport"
 	"github.com/coredns/coredns/request"
 
 	"github.com/miekg/dns"
@@ -33,7 +35,6 @@ type Sazu struct {
 	Keys        *KeyRegistry
 	Contacts    *ContactRegistry
 	Validator   ChainValidator
-	Capture     *RawCapture
 	RateLimiter *RateLimiter
 
 	// IPRateLimiter enforces a global, per-source-IP flood/scan throttle
@@ -124,16 +125,6 @@ func (s *Sazu) Name() string { return "sazu" }
 // what lets a new customer domain be onboarded by sending it a signed
 // push, with no Corefile edit or server restart needed per domain.
 func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	// Claim this UPDATE's captured bytes first, whatever happens to the
-	// request next: an entry left behind by a request refused early (out
-	// of scope, malformed, rate-limited) would otherwise sit in the
-	// bounded capture table until evicted, crowding out legitimate ones.
-	var raw []byte
-	var haveRaw bool
-	if r.Opcode == dns.OpcodeUpdate {
-		raw, haveRaw = s.Capture.Take(w.RemoteAddr(), r.Id)
-	}
-
 	if len(r.Question) != 1 {
 		return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
 	}
@@ -150,6 +141,7 @@ func (s *Sazu) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (
 			}
 			return plugin.NextOrFailure(s.Name(), s.Next, ctx, w, r)
 		}
+		raw, haveRaw := ctx.Value(dnsserver.RawRequestKey{}).([]byte)
 		return s.serveUpdate(ctx, w, r, qname, raw, haveRaw)
 	}
 
@@ -296,19 +288,10 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 
 	if !ok {
-		// DNS over HTTPS (§9.2): UDP and TCP requests are captured by
-		// s.Capture's DecorateReaderFunc, but HTTPS and HTTP/3 never pass
-		// a dns.Server's reader. core/dnsserver puts the exact request
-		// bytes on the context instead, since SIG(0) verifies literal wire
-		// bytes, never a re-encoding.
-		if httpRaw, isHTTP := ctx.Value(dnsserver.RawRequestKey{}).([]byte); isHTTP {
-			raw, ok = httpRaw, true
-		}
-	}
-	if !ok {
-		// No exact wire bytes captured for this request -- there is
-		// nothing to verify a SIG(0) signature against. Fail closed
-		// rather than trust a re-encoding of the parsed message.
+		// core/dnsserver supplies the request's exact bytes
+		// (CaptureRawRequests, set up in setup.go). Without them there is
+		// nothing to verify SIG(0) against; fail closed rather than trust
+		// a re-encoding of the parsed message.
 		log.Warningf("update for %s from %s: no raw bytes captured for id %d, refusing", zone, w.RemoteAddr(), r.Id)
 		return reply(dns.RcodeServerFailure, "")
 	}
@@ -944,27 +927,23 @@ func candidateKindLabel(isRollover bool) string {
 }
 
 // connectionOriented reports whether this UPDATE arrived over a
-// transport that requires a completed handshake -- proof of actually
-// controlling the claimed source address -- before either side can
-// exchange any real data: TCP, or HTTPS/HTTP3 (both TLS-over-TCP and
-// QUIC perform their own handshake-based address validation), as opposed
-// to plain UDP, where a single forged packet can claim any source
-// address at all with nothing to disprove it.
-//
-// HTTPS/HTTP3 is detected via dnsserver.RawRequestKey's presence on ctx
-// -- set unconditionally by both ServeHTTP methods -- rather than by
-// inspecting w.RemoteAddr()'s concrete net.Addr type: ServerHTTPS3
-// happens to construct its DoHWriter's RemoteAddr as a *net.UDPAddr
-// (QUIC itself runs over UDP), which would otherwise look
-// indistinguishable from plain, spoofable UDP by address type alone,
-// even though QUIC's own handshake makes it just as address-validated
-// as TCP.
+// transport whose handshake proves the client controls its source address:
+// every transport but plain UDP. DNS over HTTP/3 and QUIC run over UDP too
+// but are validated by QUIC's handshake, so the transport is taken from
+// the serving server's address scheme, not from the remote address type.
 func connectionOriented(ctx context.Context, w dns.ResponseWriter) bool {
-	if _, isHTTP := ctx.Value(dnsserver.RawRequestKey{}).([]byte); isHTTP {
+	if addr := w.RemoteAddr(); addr != nil && addr.Network() == "tcp" {
 		return true
 	}
-	addr := w.RemoteAddr()
-	return addr != nil && addr.Network() == "tcp"
+	if _, isHTTP := ctx.Value(dnsserver.HTTPRequestKey{}).(*http.Request); isHTTP {
+		return true
+	}
+	if srv, ok := ctx.Value(dnsserver.Key{}).(*dnsserver.Server); ok {
+		if scheme, _, found := strings.Cut(srv.Address(), "://"); found {
+			return scheme != transport.DNS
+		}
+	}
+	return false
 }
 
 // findCandidateKey looks for the Add-shaped, SEP-flagged (KSK-shaped)

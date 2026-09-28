@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
@@ -35,7 +34,6 @@ func startTestServer(t *testing.T) string {
 		Keys:                        sazu.NewKeyRegistry(),
 		Contacts:                    sazu.NewContactRegistry(),
 		Validator:                   sazu.NewValidator(),
-		Capture:                     sazu.NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
 		// Version checks enforced, as setup.go always does: these tests
 		// then also prove every sazuctl command that needs a version
@@ -57,8 +55,7 @@ func startTestServer(t *testing.T) string {
 		return s
 	})
 	cfg.AllowOpcode(dns.OpcodeUpdate)
-	cfg.UDPDecorateReaderFunc = s.Capture.DecorateReaderFunc
-	cfg.TCPDecorateReaderFunc = s.Capture.DecorateReaderFunc
+	cfg.CaptureRawRequests(dns.OpcodeUpdate)
 
 	srv, err := dnsserver.NewServer("127.0.0.1:0", []*dnsserver.Config{cfg})
 	if err != nil {

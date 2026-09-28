@@ -316,4 +316,3 @@ func TestZoneDataInsertNSECReplacesRatherThanAccumulates(t *testing.T) {
 		t.Fatalf("expected the newer NSEC to have replaced the older, got %+v", got[0])
 	}
 }
-

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coredns/coredns/core/dnsserver"
+
 	"github.com/miekg/dns"
 )
 
@@ -51,10 +53,13 @@ func TestForgedMessagePairedWithCapturedSignedBytesIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The core hands the plugin the bytes it correlated with this request
+	// (source address and message ID); a spoofed packet can make those
+	// the victim's while the parsed message is the attacker's.
 	src := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
-	s.Capture.Put(src, legitWire)
+	ctx := context.WithValue(context.Background(), dnsserver.RawRequestKey{}, legitWire)
 	w := &recordingResponseWriter{addr: src}
-	s.ServeDNS(context.Background(), w, forgedParsed)
+	s.ServeDNS(ctx, w, forgedParsed)
 
 	// Only the signed bytes count: the genuine contact update is what
 	// gets applied, and the forged decommission riding next to it is
@@ -64,21 +69,5 @@ func TestForgedMessagePairedWithCapturedSignedBytesIsRefused(t *testing.T) {
 	}
 	if addrs, _ := s.Contacts.Get("example.org."); len(addrs) != 1 || addrs[0] != "mailto:owner@example.org" {
 		t.Fatalf("expected the genuinely signed contact update to be what was applied, contact is %v", addrs)
-	}
-}
-
-// TestRawCaptureKeysIncludeTransport: a UDP packet claiming a TCP
-// client's ip:port must not collide with that client's captured bytes.
-func TestRawCaptureKeysIncludeTransport(t *testing.T) {
-	c := NewRawCapture(5*time.Second, 16)
-	msg := []byte{0x12, 0x34, 0xde, 0xad}
-	tcp := &net.TCPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
-	udp := &net.UDPAddr{IP: net.IPv4(192, 0, 2, 1), Port: 5353}
-	c.Put(tcp, msg)
-	if _, ok := c.Take(udp, 0x1234); ok {
-		t.Fatalf("a UDP lookup must not return bytes captured over TCP for the same ip:port")
-	}
-	if got, ok := c.Take(tcp, 0x1234); !ok || string(got) != string(msg) {
-		t.Fatalf("expected the TCP entry back, got %v %v", got, ok)
 	}
 }

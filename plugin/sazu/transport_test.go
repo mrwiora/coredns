@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"net"
+	"net/http"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func (w fakeResponseWriterAddr) RemoteAddr() net.Addr { return w.addr }
 func TestConnectionOrientedUDPIsNotConnectionOriented(t *testing.T) {
 	w := fakeResponseWriterAddr{addr: fakeAddr{network: "udp"}}
 	if connectionOriented(context.Background(), w) {
-		t.Fatalf("expected a plain UDP address, with no RawRequestKey, to be reported as NOT connection-oriented")
+		t.Fatalf("expected a plain UDP address, to be reported as NOT connection-oriented")
 	}
 }
 
@@ -42,25 +43,35 @@ func TestConnectionOrientedTCPIsConnectionOriented(t *testing.T) {
 	}
 }
 
-// TestConnectionOrientedHTTP3ShapedUDPAddrIsStillConnectionOriented
-// proves the specific reason connectionOriented checks RawRequestKey
-// first, rather than relying on RemoteAddr()'s network type alone:
-// ServerHTTPS3 constructs its DoHWriter's RemoteAddr as a *net.UDPAddr
-// (QUIC itself runs over UDP), which would otherwise be indistinguishable
-// from plain, spoofable UDP -- even though QUIC's own handshake makes an
-// HTTP/3 request just as address-validated as TCP.
-func TestConnectionOrientedHTTP3ShapedUDPAddrIsStillConnectionOriented(t *testing.T) {
+// TestConnectionOrientedFollowsTheServerTransport: DNS over HTTP/3 and
+// QUIC report a UDP remote address but are address-validated by QUIC's
+// handshake, so the serving server's scheme decides; plain dns:// over
+// UDP is the one unvalidated case. Raw request bytes on the context say
+// nothing about the transport.
+func TestConnectionOrientedFollowsTheServerTransport(t *testing.T) {
 	w := fakeResponseWriterAddr{addr: fakeAddr{network: "udp"}}
-	ctx := context.WithValue(context.Background(), dnsserver.RawRequestKey{}, []byte("wire bytes"))
+	for addr, want := range map[string]bool{
+		"quic://127.0.0.1:853":   true,
+		"https3://127.0.0.1:443": true,
+		"dns://127.0.0.1:53":     false,
+	} {
+		srv := &dnsserver.Server{Addr: addr}
+		ctx := context.WithValue(context.Background(), dnsserver.Key{}, srv)
+		ctx = context.WithValue(ctx, dnsserver.RawRequestKey{}, []byte("wire bytes"))
+		if got := connectionOriented(ctx, w); got != want {
+			t.Errorf("%s over a UDP remote address: connection-oriented = %v, want %v", addr, got, want)
+		}
+	}
+	ctx := context.WithValue(context.Background(), dnsserver.HTTPRequestKey{}, &http.Request{})
 	if !connectionOriented(ctx, w) {
-		t.Fatalf("expected RawRequestKey's presence to mark this as connection-oriented, regardless of the UDP-shaped RemoteAddr")
+		t.Errorf("a DNS over HTTPS request is connection-oriented")
 	}
 }
 
 func TestConnectionOrientedNilAddrIsNotConnectionOriented(t *testing.T) {
 	w := fakeResponseWriterAddr{addr: nil}
 	if connectionOriented(context.Background(), w) {
-		t.Fatalf("expected a nil RemoteAddr, with no RawRequestKey, to be reported as NOT connection-oriented")
+		t.Fatalf("expected a nil RemoteAddr, to be reported as NOT connection-oriented")
 	}
 }
 

@@ -30,17 +30,14 @@ func newTestSazu(zone string) *Sazu {
 		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Contacts:                    NewContactRegistry(),
 		Validator:                   NewValidator(),
-		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
 	}
 }
 
 // serveThroughRealServer starts a real dnsserver.Server (as CoreDNS
 // itself would) with s installed as the sole plugin, listening on both
-// UDP and TCP on the same port -- exactly like a real deployment -- so
-// its DecorateReaderFunc-based raw capture is genuinely exercised over a
-// real round trip on either transport, not called directly, which would
-// prove nothing about the wiring this depends on.
+// UDP and TCP on the same port, so the core's raw request capture is
+// exercised over a real round trip on either transport.
 func serveThroughRealServer(t *testing.T, s *Sazu) string {
 	t.Helper()
 	cfg := &dnsserver.Config{
@@ -54,8 +51,7 @@ func serveThroughRealServer(t *testing.T, s *Sazu) string {
 		return s
 	})
 	cfg.AllowOpcode(dns.OpcodeUpdate)
-	cfg.UDPDecorateReaderFunc = s.Capture.DecorateReaderFunc
-	cfg.TCPDecorateReaderFunc = s.Capture.DecorateReaderFunc
+	cfg.CaptureRawRequests(dns.OpcodeUpdate)
 
 	srv, err := dnsserver.NewServer("127.0.0.1:0", []*dnsserver.Config{cfg})
 	if err != nil {
@@ -801,7 +797,6 @@ func TestIPRateLimiterCoversScanningAcrossManyDistinctZoneNames(t *testing.T) {
 		Versions:                    NewVersionRegistry(),
 		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
-		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
 		IPRateLimiter:               NewIPRateLimiter(3),
 	}
@@ -1425,7 +1420,6 @@ func TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges(t *testing.T
 		Versions:                    NewVersionRegistry(),
 		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
-		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
 	}
 	addr := serveThroughRealServer(t, s)
@@ -1466,7 +1460,6 @@ func TestWildcardScopeFallsThroughForNeverOnboardedNames(t *testing.T) {
 		Versions:                    NewVersionRegistry(),
 		SkipVersionCheck:            true, // see version_test.go for the check itself
 		Validator:                   NewValidator(),
-		Capture:                     NewRawCapture(5*time.Second, 64),
 		InsecureSkipChainValidation: true,
 	}
 	fallback := &fallthroughHandler{}
@@ -1477,8 +1470,7 @@ func TestWildcardScopeFallsThroughForNeverOnboardedNames(t *testing.T) {
 		return s
 	})
 	cfg.AllowOpcode(dns.OpcodeUpdate)
-	cfg.UDPDecorateReaderFunc = s.Capture.DecorateReaderFunc
-	cfg.TCPDecorateReaderFunc = s.Capture.DecorateReaderFunc
+	cfg.CaptureRawRequests(dns.OpcodeUpdate)
 	srv, err := dnsserver.NewServer("127.0.0.1:0", []*dnsserver.Config{cfg})
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)
