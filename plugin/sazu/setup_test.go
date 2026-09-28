@@ -1,11 +1,13 @@
 package sazu
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/coredns/caddy"
+	"github.com/coredns/coredns/core/dnsserver"
 )
 
 func TestParseSazu(t *testing.T) {
@@ -270,5 +272,44 @@ func TestParseSazuRolloverHoldDown(t *testing.T) {
 		if _, err := parseSazu(caddy.NewTestController("dns", "sazu example.org. {\n"+bad+"\n}")); err == nil {
 			t.Errorf("%q: expected an error", bad)
 		}
+	}
+}
+
+func TestSetupConventions(t *testing.T) {
+	for _, input := range []string{
+		"sazu example.org.\nsazu example.net.",
+		`sazu example.org. {
+			no_such_option
+		}`,
+	} {
+		if err := setup(caddy.NewTestController("dns", input)); err == nil {
+			t.Errorf("expected an error for %q", input)
+		}
+	}
+}
+
+// TestSetupResolvesPathsBelowRoot: relative db and trust_anchor paths are
+// relative to the root plugin's directory.
+func TestSetupResolvesPathsBelowRoot(t *testing.T) {
+	root := t.TempDir()
+	c := caddy.NewTestController("dns", `sazu example.org. {
+		db sazu.db
+	}`)
+	dnsserver.GetConfig(c).Root = root
+	if err := setup(c); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "sazu.db")); err != nil {
+		t.Fatalf("expected the database below root: %v", err)
+	}
+	if got := underRoot(root, "/abs/anchors.xml"); got != "/abs/anchors.xml" {
+		t.Fatalf("an absolute path must be kept, got %q", got)
+	}
+}
+
+func TestCacheBypassZones(t *testing.T) {
+	s := newTestSazu("example.org.")
+	if got := s.CacheBypassZones(); len(got) != 1 || got[0] != "example.org." {
+		t.Fatalf("CacheBypassZones = %v", got)
 	}
 }

@@ -1,6 +1,7 @@
 package sazu
 
 import (
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -26,6 +27,9 @@ func setup(c *caddy.Controller) error {
 
 	// SIG(0) is verified over the exact bytes the client sent.
 	config.CaptureRawRequests(dns.OpcodeUpdate)
+
+	cfg.dbPath = underRoot(config.Root, cfg.dbPath)
+	cfg.trustAnchorPath = underRoot(config.Root, cfg.trustAnchorPath)
 
 	validator := NewValidator()
 	if cfg.trustAnchorPath != "" {
@@ -113,15 +117,16 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 		maxSIG0Lifetime:           DefaultMaxSIG0Lifetime,
 		rolloverHoldDown:          DefaultRolloverHoldDown,
 	}
+	seen := false
 	for c.Next() {
+		if seen {
+			return sazuConfig{}, plugin.ErrOnce
+		}
+		seen = true
 		args := c.RemainingArgs()
 		cfg.zones = plugin.OriginsFromArgsOrServerBlock(args, c.ServerBlockKeys)
 
 		for c.NextBlock() {
-			// RemainingArgs, not NextArg/c.Val(), for both cases below --
-			// the idiomatic way elsewhere in this codebase (see e.g.
-			// plugin/hosts/setup.go) to collect a directive's own
-			// arguments within a block, and to reject the wrong count.
 			switch c.Val() {
 			case "insecure_skip_chain_validation":
 				if len(c.RemainingArgs()) != 0 {
@@ -199,9 +204,18 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 				}
 				cfg.maxSIG0Lifetime = d
 			default:
-				return sazuConfig{}, c.ArgErr()
+				return sazuConfig{}, c.Errf("unknown property %q", c.Val())
 			}
 		}
 	}
 	return cfg, nil
+}
+
+// underRoot resolves a relative path below the root plugin's directory,
+// as other plugins' file arguments are.
+func underRoot(root, path string) string {
+	if path == "" || filepath.IsAbs(path) || root == "" {
+		return path
+	}
+	return filepath.Join(root, path)
 }

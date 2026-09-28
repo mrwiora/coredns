@@ -11,6 +11,7 @@ import (
 
 	"github.com/coredns/coredns/core/dnsserver"
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/plugin/metrics"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/plugin/pkg/transport"
 	"github.com/coredns/coredns/request"
@@ -115,6 +116,11 @@ func (s *Sazu) updateLockFor(zone string) *sync.Mutex {
 }
 
 func (s *Sazu) Name() string { return "sazu" }
+
+// CacheBypassZones implements cache.ZoneBypasser: a push must be visible
+// as soon as it is acknowledged, so the cache plugin doesn't cache
+// answers for the zones this instance accepts.
+func (s *Sazu) CacheBypassZones() []string { return s.Zones }
 
 // ServeDNS implements plugin.Handler.
 // ServeDNS implements plugin.Handler. s.Zones (from the Corefile) sets
@@ -249,6 +255,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// reason an UPDATE itself fails: it's just logged, since the audit
 	// trail is a record of what happened, not a gate on whether it can.
 	reply := func(rcode int, status string) (int, error) {
+		updatesTotal.WithLabelValues(metrics.WithServer(ctx), dns.RcodeToString[rcode], status).Inc()
 		// Deliberately skip the audit-trail write for the two rejections
 		// that exist specifically to bound a flood/scan: statusErrRateLimited
 		// and statusErrTransportNotAllowed. IPRateLimiter bounds attempts
