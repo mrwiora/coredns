@@ -8,8 +8,8 @@
 
 The *file* plugin is used for an "old-style" DNS server. It serves from a preloaded file that exists
 on disk contained RFC 1035 styled data. If the zone file contains signatures (i.e., is signed using
-DNSSEC), correct DNSSEC answers are returned. Only NSEC is supported! If you use this setup *you*
-are responsible for re-signing the zonefile.
+DNSSEC), correct DNSSEC answers are returned, with the zone's NSEC or NSEC3 records as proof of
+non-existence. If you use this setup *you* are responsible for re-signing the zonefile.
 
 ## Syntax
 
