@@ -9,40 +9,18 @@ import (
 	"github.com/miekg/dns"
 )
 
-// SignZoneContent produces an RFC 4034 RRSIG for every RRset in rrs
-// (grouped by owner name + type), signed with signer -- SAZU's original,
-// still-default single-key model (§9.1): the one key that authenticates
-// a push over SIG(0) is the same key that signs the zone content itself,
-// so there is no separate DNSSEC signing step or key to manage. The
-// DNSKEY RRset gets signed exactly the same way as everything else here
-// (a self-signature, since it's just another RRset in rrs), which is why
-// this single-key model doesn't need a KSK/ZSK split to produce a
-// validly self-signed DNSKEY RRset. A zone that registers an optional
-// ZSK (see keys.go) instead uses SignZoneContentSplit, below; this
-// function is simply that one called with the same key on both sides,
-// preserved as its own entry point so every existing single-key caller
-// and test is completely unaffected by the ZSK addition.
-//
-// Returns rrs unchanged plus one RRSIG per distinct (name, type) group,
-// in the order those groups first appeared. Pass a signer/dnskeyRR pair
-// that actually match (dnskeyRR.KeyTag() must equal what signer will
-// produce) -- this function does not check that itself; VerifySignedRRsets
-// is what a receiver uses to confirm it.
+// SignZoneContent signs every authoritative RRset in rrs (grouped by
+// owner name and type) with one key: SignZoneContentSplit with the same
+// key as KSK and ZSK. Returns rrs plus one RRSIG per signed RRset, in the
+// order the RRsets first appear. dnskeyRR must be signer's public key.
 func SignZoneContent(rrs []dns.RR, dnskeyRR *dns.DNSKEY, signer crypto.Signer, inception, expiration time.Time) ([]dns.RR, error) {
 	return SignZoneContentSplit(rrs, dnskeyRR, signer, dnskeyRR, signer, inception, expiration)
 }
 
-// SignZoneContentSplit is SignZoneContent's ZSK-aware generalization: it
-// signs the DNSKEY RRset specifically with ksk/kskSigner -- RFC 4034's
-// own convention, that the key-signing key signs the key set -- and
-// every other RRset with zsk/zskSigner, the key designated to sign
-// ordinary zone content. Passing the same key/signer pair for both
-// reproduces SignZoneContent's original behavior exactly (byte-for-byte:
-// it's the same code path with the same key on both sides), which is
-// what SignZoneContent itself now does. rrs need not actually contain a
-// DNSKEY RRset -- an ordinary publish-zone content push, signed entirely
-// with the active ZSK, never does -- in which case kskSigner is simply
-// never used.
+// SignZoneContentSplit signs the DNSKEY RRset with ksk and every other
+// authoritative RRset with zsk (RFC 4034's KSK/ZSK convention). The NS
+// RRset at a delegation and glue below it are left unsigned (RFC 4035
+// §2.2). kskSigner is unused when rrs holds no DNSKEY RRset.
 func SignZoneContentSplit(rrs []dns.RR, ksk *dns.DNSKEY, kskSigner crypto.Signer, zsk *dns.DNSKEY, zskSigner crypto.Signer, inception, expiration time.Time) ([]dns.RR, error) {
 	groups := groupRRsets(rrs)
 	apex := zoneApex(rrs)
@@ -96,22 +74,10 @@ func groupRRsets(rrs []dns.RR) [][]dns.RR {
 	return result
 }
 
-// signOneRRset signs one RRset, filling in the RRSIG fields Sign itself
-// doesn't derive from the RRset (TypeCovered, Labels, OrigTtl, and the
-// owner/class/type of the RRSIG record are all set by Sign itself from
-// rrset[0]'s header) -- with one exception. Sign sets OrigTtl (the RDATA
-// field carried inside the signed data itself, per RFC 4034 §3.1.5) but
-// deliberately never touches Hdr.Ttl, the RRSIG record's own wire TTL:
-// miekg/dns leaves that to the caller. RFC 4034 §3 requires it to match
-// the covered RRset's TTL exactly ("the TTL value of an RRSIG RR MUST
-// match the TTL value of the RRset it covers"); left unset, it silently
-// defaults to zero. A zero-TTL record isn't just a hygiene nit here --
-// found the hard way against a real validating resolver (Unbound):
-// treating a just-received RRSIG as instantly-expired and dropping it
-// from its cache mid-validation corrupts its own multi-step recursive
-// validation state, producing an opaque, misleading SERVFAIL
-// ("Cannot retrieve DS for signature") for answers that are otherwise
-// completely valid.
+// signOneRRset signs one RRset. The RRSIG's own TTL is set to the
+// RRset's (RFC 4034 §3): miekg/dns's Sign sets only the Original TTL
+// field, and a zero-TTL RRSIG is dropped from resolver caches mid-
+// validation, which makes validation fail.
 func signOneRRset(rrset []dns.RR, dnskeyRR *dns.DNSKEY, signer crypto.Signer, inception, expiration time.Time) (*dns.RRSIG, error) {
 	sig := &dns.RRSIG{
 		Hdr:        dns.RR_Header{Ttl: rrset[0].Header().Ttl},

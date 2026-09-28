@@ -242,59 +242,12 @@ func (z *ZoneData) deleteRRLocked(rr dns.RR) {
 	byType[rr.Header().Rrtype] = kept
 }
 
-// PurgeNSEC removes every stored NSEC or NSEC3(PARAM) record (and their
-// covering RRSIGs) across the whole zone -- whichever scheme, if either,
-// the zone was last pushed with. serveUpdate no longer needs it -- it
-// refuses any content change that isn't a full push, which
-// PurgeContentAndApply handles -- but it remains available to callers
-// that apply partial changes to a ZoneData directly. SAZU's
-// split-signing model means only a freshly,
-// completely recomputed chain -- from a full push, the only kind that
-// sees the zone's entire name set at once -- can be trusted as correct,
-// so any existing chain is invalidated up front rather than risked
-// going stale. Serving no negative-existence proof is safe; serving a
-// stale one that contradicts what the zone actually contains now is
-// not. A subsequent full push's own NSEC or NSEC3 records (see
-// BuildNSECChain / BuildNSEC3Chain) repopulate the chain; a push that
-// changed chain-relevant content without supplying a replacement chain
-// leaves the zone with none until then.
-func (z *ZoneData) PurgeNSEC() {
-	z.mu.Lock()
-	defer z.mu.Unlock()
-	for _, byType := range z.rrsets {
-		delete(byType, dns.TypeNSEC)
-		delete(byType, dns.TypeNSEC3)
-		delete(byType, dns.TypeNSEC3PARAM)
-		sigs, ok := byType[dns.TypeRRSIG]
-		if !ok {
-			continue
-		}
-		kept := sigs[:0]
-		for _, rr := range sigs {
-			if sig, ok := rr.(*dns.RRSIG); !ok ||
-				(sig.TypeCovered != dns.TypeNSEC && sig.TypeCovered != dns.TypeNSEC3 && sig.TypeCovered != dns.TypeNSEC3PARAM) {
-				kept = append(kept, rr)
-			}
-		}
-		byType[dns.TypeRRSIG] = kept
-	}
-}
-
-// PurgeContent removes every ordinary RRset at every name in the zone --
-// apex DNSKEY, and its own covering RRSIG, excepted, since key
-// management is independent of zone content and must never be touched
-// by a content-only operation (see keys.go's KeyRole doc comment).
-// Called before applying a full content push (containsAPEXSOA --
-// sazuctl publish-zone always sends one, as the zone's complete,
-// authoritative content): without this, a record dropped from the zone
-// file would simply linger on the server forever, since an ordinary RFC
-// 2136 add is never itself a deletion. This also clears any existing
-// NSEC/NSEC3(PARAM) chain and its covering RRSIGs, same as PurgeNSEC --
-// they're ordinary (non-DNSKEY) content -- so a full push never needs to
-// call both. The push's own content (SOA, every record, and a fresh
-// chain) repopulates the zone in the same update, immediately after --
-// see PurgeContentAndApply, which does both under one lock so a
-// concurrent query can never observe the zone in between.
+// PurgeContent removes every RRset in the zone except the apex DNSKEY
+// RRset and its RRSIGs (key management is separate from content). A full
+// content push replaces the zone, so this runs first; an RFC 2136 add
+// alone never removes a record the new zone file no longer has. See
+// PurgeContentAndApply, which does both under one lock so no query sees
+// the zone in between.
 func (z *ZoneData) PurgeContent() {
 	z.mu.Lock()
 	defer z.mu.Unlock()

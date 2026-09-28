@@ -16,22 +16,15 @@ import (
 	"github.com/miekg/dns"
 )
 
-// log follows the same convention as every other CoreDNS plugin (see
-// e.g. plugin/hosts): log.Info/Warning/Error are always visible; log.Debug
-// only prints once the Corefile also loads the `debug` plugin. There was
-// no logging anywhere in this plugin before -- added specifically because
-// a real production hang (a first-contact push that got no response at
-// all, even after a minute) turned out to be undiagnosable without it:
-// nothing here distinguished "stuck in the chain-of-trust network walk"
-// from "silently dropped" from the outside.
+// log follows the CoreDNS convention: Info/Warning/Error always print;
+// Debug only once the Corefile loads the debug plugin.
 var log = clog.NewWithPlugin("sazu")
 
-// Sazu is the CoreDNS plugin implementing SAZU (Self-Authenticated Zone
-// Update): a customer's own signer pushes DNSSEC-signed zone content,
-// authenticated purely by SIG(0) (RFC 2931) riding on an RFC 2136 dynamic
-// UPDATE, with no separate account/API-key handshake (§10.1/§10.2), over
-// UDP, TCP, or HTTPS (§7.3). See the protocol specification (readme.md in github.com/mrwiora/sazu) for the full design;
-// see plugin/sazu/docs/SAZU-PLAN.md for exactly what of it this port implements today.
+// Sazu is the CoreDNS plugin implementing SAZU: zone owners push
+// DNSSEC-signed zone content in RFC 2136 UPDATE messages authenticated by
+// SIG(0) (RFC 2931) with the zone's own keys, over UDP, TCP or DNS over
+// HTTPS (§9). See the protocol specification (readme.md in
+// github.com/mrwiora/sazu).
 type Sazu struct {
 	Next plugin.Handler
 
@@ -44,7 +37,7 @@ type Sazu struct {
 	RateLimiter *RateLimiter
 
 	// IPRateLimiter enforces a global, per-source-IP flood/scan throttle
-	// (§12's ERR_RATE_LIMITED), independent of RateLimiter's per-zone
+	// (§11.2's ERR_RATE_LIMITED), independent of RateLimiter's per-zone
 	// daily quota: it bounds total UPDATE attempt volume from one address
 	// regardless of which zone name(s) it targets, closing the gap a
 	// per-zone-only quota leaves open against an attacker probing many
@@ -88,7 +81,7 @@ type Sazu struct {
 	// this package's unit tests still use).
 	DB *DB
 
-	// InsecureSkipChainValidation disables the §10.2 chain-of-trust
+	// InsecureSkipChainValidation disables the §7.2 chain-of-trust
 	// cross-check at first contact. It exists purely for local testing,
 	// where there is no real parent zone to publish a DS record against
 	// -- see the onboarding guide. Never set true in production: with it
@@ -97,33 +90,16 @@ type Sazu struct {
 	// cross-check exists to prevent.
 	InsecureSkipChainValidation bool
 
-	// updateLocks serializes the whole authenticate-evaluate-apply
-	// sequence for UPDATE requests -- but only against other requests
-	// for the *same* zone, not every zone this instance serves. See
-	// zoneLockStripes' own doc comment for why this is a fixed-size
-	// array of stripes rather than one lock per zone name, or (the
-	// original design) one lock for every zone at once: with a single
-	// global lock, an expensive first-contact/rollover chain-of-trust
-	// walk for one zone -- a real outbound network round trip that can
-	// take a real amount of time -- blocked every *other* zone's
-	// ordinary, already-authenticated pushes for its entire duration,
-	// even though the two share no state that actually needs it.
+	// updateLocks serializes the authenticate-evaluate-apply sequence of
+	// UPDATEs to the same zone, so a slow chain-of-trust walk for one
+	// zone doesn't hold up pushes to others. See zoneLockStripes.
 	updateLocks [zoneLockStripes]sync.Mutex
 }
 
 // zoneLockStripes is how many lock stripes updateLockFor spreads zone
-// names across. Fixed-size and allocated once as part of the Sazu
-// struct itself (see updateLocks), rather than a map that would grow by
-// one entry per distinct zone name ever presented -- exactly the kind
-// of attacker-controllable unbounded growth the per-source-IP and
-// per-zone rate limiters already have to guard against (see
-// ipratelimit.go's own doc comment on why that matters), avoided here
-// by construction instead of a sweep. 64 stripes make two different
-// zones collide onto the same lock only 1-in-64 of the time at random
-// -- more than enough to eliminate the original design's actual
-// problem (one global lock, 1-in-1 collision, always) for the request
-// volumes this plugin serves, without the complexity of an exact
-// per-zone lock that would need its own lifecycle management.
+// names across: a fixed array rather than a map with an entry per zone
+// name ever presented, which an attacker could grow without bound. Two
+// zones share a stripe 1 time in 64.
 const zoneLockStripes = 64
 
 // updateLockFor returns the lock stripe for zone -- the same stripe
@@ -266,14 +242,14 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	// verified is not proof of anything, and attributing an audit entry to
 	// it would let an attacker frame an arbitrary key tag in the log
 	// merely by naming it, with no need to ever prove possession of it.
-	// statusDetail, when set, adds a human-readable second string to the
-	// diagnostic TXT record (currently only a pending rollover's earliest
+	// statusDetail, when set, is appended to the status in the Extended
+	// DNS Error's EXTRA-TEXT (e.g. a pending rollover's earliest
 	// completion time).
 	var statusDetail string
 	var authKeyTag *uint16
 	var authKeyRole string
 	// reply is the sole exit point for this function: every response,
-	// accepted or refused, goes through it, so the §12 audit trail (when
+	// accepted or refused, goes through it, so the §11.5 audit trail (when
 	// s.DB is configured) sees every transaction this server decided on,
 	// not just the successful ones -- an operator investigating "why did
 	// my push fail" needs the rejected attempts at least as much as the
@@ -320,16 +296,11 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 
 	if !ok {
-		// §7.3 HTTPS/JSON carrier: UDP/TCP get here via
-		// UDPDecorateReaderFunc/TCPDecorateReaderFunc into s.Capture, but
-		// HTTPS/HTTP3 never go through a dns.Server's DecorateReader at
-		// all -- core/dnsserver's ServerHTTPS/ServerHTTPS3 instead stash
-		// the exact wire bytes doh.RequestToMsgWireWithAccept already
-		// extracted (already decoded out of a JSON wire envelope, if the
-		// client used one) directly on the request context, precisely so
-		// a plugin like this one -- whose SIG(0)/RFC 2931 authentication
-		// must verify against literal wire bytes, never a re-encoding --
-		// has something to check over that transport too.
+		// DNS over HTTPS (§9.2): UDP and TCP requests are captured by
+		// s.Capture's DecorateReaderFunc, but HTTPS and HTTP/3 never pass
+		// a dns.Server's reader. core/dnsserver puts the exact request
+		// bytes on the context instead, since SIG(0) verifies literal wire
+		// bytes, never a re-encoding.
 		if httpRaw, isHTTP := ctx.Value(dnsserver.RawRequestKey{}).([]byte); isHTTP {
 			raw, ok = httpRaw, true
 		}
@@ -388,7 +359,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 			}
 		}
 		if candidate == nil {
-			// §10.4 KSK rollover: none of today's authenticators signed
+			// §8.2 KSK rollover: none of today's authenticators signed
 			// this transaction -- before giving up, check whether a
 			// *different*, KSK-shaped (SEP-flagged) candidate DNSKEY
 			// also present in these ops does. If so, this zone already
@@ -500,7 +471,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 		return reply(dns.RcodeFormatError, "")
 	}
 
-	// §10.6 registration record: a contact address (if this push carries
+	// §11.4 registration record: a contact address (if this push carries
 	// one) rides the same authenticated UPDATE as everything else, at a
 	// reserved owner name -- see contact.go. Stripped out here, before
 	// anything below treats r.Ns as zone content: it needs SIG(0)'s
@@ -584,7 +555,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 
 	// isFullPush: a real content push always carries the apex SOA
-	// (sazuctl publish-zone) -- used for §12 quota metering, below, to
+	// (sazuctl publish-zone) -- used for §11.2 quota metering, below, to
 	// bucket it separately from a pure key-management push
 	// (publish-trust's first contact, a KSK rollover, or a ZSK
 	// add/retire), which changes no served content at all and costs this
@@ -634,7 +605,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 	}
 
 	if s.RateLimiter != nil {
-		// §12 quota: a content push and a key-management push are
+		// §11.2 quota: a content push and a key-management push are
 		// metered separately, since they cost very different amounts of
 		// server effort. Checked here, before the expensive first-contact
 		// chain-of-trust walk below, so an
@@ -678,7 +649,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 				if ce, ok := err.(*ChainError); ok {
 					switch ce.Op {
 					case "no-ds-published":
-						// §12's status-code convention: the specific, by far
+						// §10's status-code convention: the specific, by far
 						// most common first-contact failure -- "you haven't
 						// told your registrar about this key yet" -- gets its
 						// own diagnostic so a client can say exactly that,
@@ -687,7 +658,7 @@ func (s *Sazu) serveUpdate(ctx context.Context, w dns.ResponseWriter, r *dns.Msg
 						status = statusErrNoDSPublished
 					case "weak-ds-digest":
 						// The key does match a published DS, but only a
-						// SHA-1 one -- the §10.7 digest floor.
+						// SHA-1 one -- the §11.3 digest floor.
 						status = statusErrWeakDSDigest
 					case "key-mismatch":
 						// A DS *is* published for this zone, just not for
@@ -998,7 +969,7 @@ func connectionOriented(ctx context.Context, w dns.ResponseWriter) bool {
 
 // findCandidateKey looks for the Add-shaped, SEP-flagged (KSK-shaped)
 // DNSKEY at zone's apex among update ops -- the candidate key a
-// first-contact or §10.4 KSK-rollover push introduces itself with. A
+// first-contact or §8.2 KSK-rollover push introduces itself with. A
 // first-contact push (sazuctl publish-trust) always establishes a KSK
 // and a ZSK together, and a rollover re-asserts every registered ZSK
 // alongside the new KSK; those non-SEP keys are never candidates here
@@ -1299,94 +1270,55 @@ func writeMsg(w dns.ResponseWriter, m *dns.Msg) (int, error) {
 	return dns.RcodeSuccess, nil
 }
 
-// statusErrNoDSPublished is one of §12's SAZU status codes, carried as a
-// diagnostic TXT record per that section: "On the raw-DNS carrier this
-// rides as a short diagnostic TXT record in the response's Additional
-// section." Every status code in §12's list is implemented at this
-// point (see the other statusErr* constants below and in prereq.go/
-// sign.go); see plugin/sazu/docs/SAZU-PLAN.md for the full accounting.
+// The SAZU status codes (§10), reported in an RFC 8914 Extended DNS
+// Error (see replyWithStatus and edeCodes).
+
+// statusErrNoDSPublished: the parent publishes no DS for the zone, so a
+// first-contact or rollover key can't be anchored yet.
 const statusErrNoDSPublished = "ERR_NO_DS_PUBLISHED"
 
-// statusErrUnknownSigner is another of §12's status codes: a DS record is
-// published for the target zone, but none of them match the candidate
-// key. Unlike statusErrNoDSPublished, this does not mean "nothing is
-// there yet" -- something else already has DNSSEC set up for this zone,
-// which the operator needs to understand (it may simply be the zone's
-// current host, e.g. mid-migration) before doing anything that might
-// disturb it.
+// statusErrUnknownSigner: the parent publishes a DS for the zone, but
+// none matches the candidate key -- typically the zone's current host
+// already signs it (e.g. mid-migration).
 const statusErrUnknownSigner = "ERR_UNKNOWN_SIGNER"
 
-// statusErrSigInvalid is another of §12's status codes: emitted when a
-// pushed RRset's RRSIG doesn't actually verify against the
-// candidate/pinned key -- content-signature verification is mandatory
-// on every push.
+// statusErrSigInvalid: a pushed RRset has no RRSIG that verifies against
+// a key allowed to sign it.
 const statusErrSigInvalid = "ERR_SIG_INVALID"
 
-// statusErrWeakAlgorithm is another of §12's status codes: a first-contact
-// candidate key's algorithm doesn't meet §10.7's minimum floor (RFC 8624
-// §3.1) -- see algorithm.go.
+// statusErrWeakAlgorithm: the candidate key's algorithm is below the
+// §11.3 floor (RFC 8624 §3.1) -- see algorithm.go.
 const statusErrWeakAlgorithm = "ERR_WEAK_ALGORITHM"
 
-// statusErrQuotaExceeded is another of §12's status codes: this zone has
-// already used up its content-push or key-management-push quota for the
-// current rolling 24h window -- see RateLimiter and containsAPEXSOA.
-// §12 also names a distinct ERR_RATE_LIMITED code (see
-// statusErrRateLimited) -- that one is a separate, faster-timescale,
-// per-source-IP flood throttle, not just a synonym for this.
+// statusErrQuotaExceeded: the zone has used its content-push or
+// key-management quota for the rolling 24 hours (§11.2, RateLimiter).
 const statusErrQuotaExceeded = "ERR_QUOTA_EXCEEDED"
 
-// statusErrRateLimited is §12's remaining status code: remoteAddr has
-// exceeded IPRateLimiter's global, per-source-IP UPDATE rate over the
-// current rolling 1-minute window -- distinct from statusErrQuotaExceeded
-// (a per-*zone* daily churn quota, checked only after SIG(0) verifies)
-// specifically because this one bounds raw attempt volume from an
-// address regardless of which zone it targets or whether the attempt is
-// even well-formed.
+// statusErrRateLimited: the source address exceeded the per-address
+// UPDATE rate (§11.2, IPRateLimiter), whatever zone it targets.
 const statusErrRateLimited = "ERR_RATE_LIMITED"
 
-// statusErrTransportNotAllowed: this first-contact or key-rollover
-// attempt arrived over a connectionless transport (plain UDP) -- see
-// connectionOriented. Not one of §12's named codes (the design doc
-// predates the HTTPS/JSON carrier and this specific spoofing concern),
-// but the same diagnostic-TXT convention as the rest of them.
+// statusErrTransportNotAllowed: a first-contact or KSK-rollover attempt
+// arrived over UDP, where the source address isn't validated -- see
+// connectionOriented.
 const statusErrTransportNotAllowed = "ERR_TRANSPORT_NOT_ALLOWED"
 
-// statusErrStaleSerial is another of §12's status codes: a push built
-// with BuildFullZonePush's previousSOA staleness guard (RFC 2136 §2.4.2)
-// was rejected because the zone's current SOA no longer matches what the
-// push was built against -- see EvaluatePrerequisites.
+// statusErrStaleSerial: the push's SOA serial isn't newer than the served
+// one, or its SOA prerequisite (RFC 2136 §2.4.2) no longer matches -- see
+// EvaluatePrerequisites.
 const statusErrStaleSerial = "ERR_STALE_SERIAL"
 
-// statusErrFirstContactNeedsKSK is not one of §12's original status
-// codes (the design doc predates the optional KSK/ZSK split) but follows
-// its same diagnostic-TXT convention: a first-contact candidate DNSKEY
-// was presented without the SEP (KSK) flag set. See keys.go's KeyRole
-// doc comment for why a ZSK can never be what establishes a zone's
-// initial trust -- only a KSK can, so first contact refuses anything
-// else with this specific diagnostic rather than a bare, uninformative
-// REFUSED.
+// statusErrFirstContactNeedsKSK: a first-contact candidate DNSKEY lacks
+// the SEP (KSK) flag; only a KSK can establish a zone's trust (keys.go).
 const statusErrFirstContactNeedsKSK = "ERR_FIRST_CONTACT_REQUIRES_KSK"
 
-// statusErrExpiredSignature is another of §12's status codes: distinct
-// from the more general statusErrSigInvalid -- emitted when a pushed
-// RRset's RRSIG would otherwise verify against the candidate/pinned key
-// (right name, type,
-// key tag, and algorithm, and a cryptographically valid signature) but
-// falls outside its own inception/expiration window. Telling this apart
-// from "no valid signature at all" matters operationally: this one means
-// "re-sign and re-push," not "something is wrong with the key or the
-// content."
+// statusErrExpiredSignature: a pushed RRSIG verifies but is outside its
+// validity window -- re-sign and push again.
 const statusErrExpiredSignature = "ERR_EXPIRED_SIGNATURE"
 
-// statusErrDecommissionRequiresKSK is not one of §12's original status
-// codes (decommissioning a zone didn't exist when the design doc was
-// written) but follows its same diagnostic-TXT convention: a
-// decommission directive (decommission.go) was authenticated by
-// something other than the zone's own currently-pinned KSK -- an
-// already-registered ZSK, or a rollover-shaped candidate. Removing a
-// zone entirely is at least as consequential as establishing or rolling
-// over its KSK, so it requires exactly the same authenticator those do,
-// never the lighter-weight ZSK routine content pushes use.
+// statusErrDecommissionRequiresKSK: a decommission directive
+// (decommission.go) was authenticated by something other than the
+// pinned KSK.
 const statusErrDecommissionRequiresKSK = "ERR_DECOMMISSION_REQUIRES_KSK"
 
 // statusErrRequiresKSK: an update that changes the zone's DNSKEY RRset

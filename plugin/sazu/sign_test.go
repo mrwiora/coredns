@@ -52,17 +52,10 @@ func TestSignZoneContentProducesOneRRSIGPerRRset(t *testing.T) {
 	}
 }
 
-// TestSignZoneContentRRSIGsCarryTheCoveredRRsetsTTL proves a real,
-// previously-shipped bug stays fixed: RFC 4034 §3 requires an RRSIG's own
-// TTL to match the TTL of the RRset it covers, but miekg/dns's
-// RRSIG.Sign only sets OrigTtl (the RDATA field carried inside the
-// signed data) and deliberately leaves Hdr.Ttl -- the RRSIG's own wire
-// TTL -- for the caller to set. Left unset, it silently defaults to
-// zero. Found against a real validating resolver (Unbound): a zero-TTL
-// RRSIG gets dropped from its cache immediately upon receipt, which
-// corrupts its own multi-step recursive validation state and produces
-// an opaque SERVFAIL ("Cannot retrieve DS for signature") for an
-// otherwise completely valid, correctly signed answer.
+// TestSignZoneContentRRSIGsCarryTheCoveredRRsetsTTL: an RRSIG's own TTL
+// matches the RRset it covers (RFC 4034 §3). miekg/dns's Sign sets only
+// the Original TTL field; a zero-TTL RRSIG is dropped from resolver
+// caches mid-validation, which makes validation fail.
 func TestSignZoneContentRRSIGsCarryTheCoveredRRsetsTTL(t *testing.T) {
 	key, priv, err := GenerateEd25519Key("example.org.", true)
 	if err != nil {

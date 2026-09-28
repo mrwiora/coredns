@@ -7,9 +7,8 @@ import (
 	"time"
 )
 
-// DefaultIPUpdatesPerMinute is §12's starting number for the global,
-// per-source-IP flood/scan throttle (the ERR_RATE_LIMITED status code
-// this document's own earlier notes named but hadn't built yet). This is
+// DefaultIPUpdatesPerMinute is §11.2's starting number for the global,
+// per-source-IP flood/scan throttle (ERR_RATE_LIMITED). This is
 // deliberately distinct from, and enforced independently of,
 // RateLimiter's per-zone daily push quota: that quota is keyed by zone
 // name, so it does nothing against an attacker who varies the *target*

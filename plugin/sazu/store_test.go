@@ -317,30 +317,3 @@ func TestZoneDataInsertNSECReplacesRatherThanAccumulates(t *testing.T) {
 	}
 }
 
-func TestZoneDataPurgeNSECRemovesRecordsAndTheirRRSIGs(t *testing.T) {
-	z := NewZoneData("example.org.")
-	z.Insert(testA("www.example.org.", net.IPv4(203, 0, 113, 10)))
-	z.Insert(testNSEC("example.org.", "www.example.org.", dns.TypeSOA, dns.TypeNSEC))
-	z.Insert(testRRSIGCoveringNSEC("example.org.", 2000))
-	z.Insert(testNSEC("www.example.org.", "example.org.", dns.TypeA, dns.TypeNSEC))
-	z.Insert(testRRSIGCoveringNSEC("www.example.org.", 2000))
-
-	z.PurgeNSEC()
-
-	if got := z.Lookup("example.org.", dns.TypeNSEC); len(got) != 0 {
-		t.Fatalf("expected the apex NSEC to be purged, got %+v", got)
-	}
-	if got := z.LookupRRSIG("example.org.", dns.TypeNSEC); len(got) != 0 {
-		t.Fatalf("expected the apex NSEC's RRSIG to be purged, got %+v", got)
-	}
-	if got := z.Lookup("www.example.org.", dns.TypeNSEC); len(got) != 0 {
-		t.Fatalf("expected www's NSEC to be purged, got %+v", got)
-	}
-	if got := z.LookupRRSIG("www.example.org.", dns.TypeNSEC); len(got) != 0 {
-		t.Fatalf("expected www's NSEC RRSIG to be purged, got %+v", got)
-	}
-	// Purging NSEC must not touch unrelated content.
-	if got := z.Lookup("www.example.org.", dns.TypeA); len(got) != 1 {
-		t.Fatalf("expected the A record to survive PurgeNSEC, got %+v", got)
-	}
-}

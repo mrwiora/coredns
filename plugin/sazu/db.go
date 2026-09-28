@@ -17,14 +17,11 @@ CREATE TABLE IF NOT EXISTS zones (
 );
 
 -- One row per key currently trusted for a zone: exactly one role='KSK'
--- row (first contact and every §10.4 rollover replace it, never add a
+-- row (first contact and every §8.2 rollover replace it, never add a
 -- second) plus zero or more role='ZSK' rows (see keys.go's KeyRole doc
 -- comment for what the optional ZSK split is for). can_auth_tx mirrors
 -- ManagedKey.CanAuthenticateTx -- always 1 for a KSK, customer's choice
--- for a ZSK. A DB created before ZSKs existed has an older-shaped
--- version of this table (zone as its sole primary key, no keytag/role/
--- can_auth_tx columns); see migrateKeysTableIfNeeded for how that gets
--- upgraded in place the first time such a database is opened.
+-- for a ZSK.
 CREATE TABLE IF NOT EXISTS keys (
 	zone        TEXT NOT NULL REFERENCES zones(origin),
 	keytag      INTEGER NOT NULL,
@@ -37,15 +34,9 @@ CREATE TABLE IF NOT EXISTS keys (
 	pinned_at   INTEGER NOT NULL,
 	PRIMARY KEY (zone, keytag)
 );
--- keys_zone_role is deliberately NOT created here: on a database
--- created before ZSK support existed, the keys table above is a no-op
--- (IF NOT EXISTS -- the old-shape table already exists) and has no
--- role column yet for an index to reference, which would make this
--- entire schema script fail before migrateKeysTableIfNeeded ever gets a
--- chance to run. Open creates this index separately, after migration
--- has guaranteed the column exists either way.
+CREATE INDEX IF NOT EXISTS keys_zone_role ON keys(zone, role);
 
--- §10.6 registration record: a zone's registered contact address(es),
+-- §11.4 registration record: a zone's registered contact address(es),
 -- newline-joined when there is more than one (see ContactUpdate/
 -- splitContactOps in contact.go for the wire-side convention).
 CREATE TABLE IF NOT EXISTS contacts (
@@ -63,16 +54,14 @@ CREATE TABLE IF NOT EXISTS rrs (
 );
 CREATE INDEX IF NOT EXISTS rrs_zone_name_type ON rrs(zone, name, rrtype);
 
--- §12 audit trail: one row per UPDATE transaction this server decided on,
+-- §11.5 audit trail: one row per UPDATE transaction this server decided on,
 -- accepted or rejected. zone is NOT a foreign key into zones(origin) --
 -- unlike every other table here, an audit entry is written for a zone
 -- that was refused at first contact and so never got a zones row at all,
 -- which is exactly the kind of attempt an audit trail exists to remember.
 -- key_tag/key_role identify the key whose verified SIG(0) signature
 -- authenticated this transaction -- both NULL when it never got that far
--- (see AuditEntry's own doc comment). A database created before these
--- columns existed has neither; see migrateAuditLogTableIfNeeded for how
--- that gets upgraded in place the first time such a database is opened.
+-- (see AuditEntry's own doc comment).
 CREATE TABLE IF NOT EXISTS audit_log (
 	id          TEXT PRIMARY KEY,
 	zone        TEXT NOT NULL,
@@ -85,11 +74,6 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 CREATE INDEX IF NOT EXISTS audit_log_zone_at ON audit_log(zone, at);
 
--- Every zone's control-state version (see version.go): the counter a
--- control change must name as a prerequisite, incremented by each one.
--- Deliberately not a foreign key into zones(origin) and never deleted --
--- DeleteZone increments it instead -- so a message signed for an older
--- version can't re-create or change a decommissioned zone later.
 -- A DS-only KSK rollover waiting out its hold-down (see rollover.go):
 -- at most one per zone. Any control change clears it (setVersion), in the
 -- same transaction as that change.
@@ -102,6 +86,11 @@ CREATE TABLE IF NOT EXISTS pending_rollovers (
 	requested_at INTEGER NOT NULL
 );
 
+-- Every zone's control-state version (see version.go): the counter a
+-- control change must name as a prerequisite, incremented by each one.
+-- Deliberately not a foreign key into zones(origin) and never deleted --
+-- DeleteZone increments it instead -- so a message signed for an older
+-- version can't re-create or change a decommissioned zone later.
 CREATE TABLE IF NOT EXISTS zone_versions (
 	zone    TEXT PRIMARY KEY,
 	version INTEGER NOT NULL
@@ -110,8 +99,7 @@ CREATE TABLE IF NOT EXISTS zone_versions (
 
 // DB is SAZU's SQLite persistence backend, via modernc.org/sqlite -- a
 // pure-Go driver, no cgo, keeping this in line with the rest of the tree
-// (CoreDNS has no cgo dependencies today; a cgo-based driver like
-// mattn/go-sqlite3 would be a real departure from that, affecting
+// (CoreDNS has no cgo dependencies; a cgo driver would affect
 // cross-compilation and static builds).
 //
 // Store/ZoneData/KeyRegistry stay pure in-memory and untouched by this
@@ -119,9 +107,8 @@ CREATE TABLE IF NOT EXISTS zone_versions (
 // successful UPDATE writes through to it (commit-then-apply-to-memory, so
 // a persistence failure can't leave memory and disk disagreeing), and
 // LoadAll hydrates memory from it once at startup. Nothing about DB is
-// required: a plugin instance configured without a `db` directive never
-// constructs one, and behaves exactly as it did before persistence
-// existed.
+// required: a plugin instance configured without a `db` directive keeps
+// everything in memory only.
 type DB struct {
 	sql *sql.DB
 }
@@ -141,16 +128,10 @@ const maxOpenConns = 8
 // exists.
 func Open(path string) (*DB, error) {
 	// WAL mode lets readers (LoadZoneKeys, the audit trail) proceed
-	// without waiting behind an in-flight writer, and lets more than one
-	// connection be open on this file at once -- neither is true of
-	// SQLite's default rollback-journal mode, which is why this replaces
-	// the previous single-connection workaround. Concurrent writers
-	// (different zones' CommitUpdate calls, now free to race here since
-	// Sazu.updateLocks only ever serialized them per-zone) still take
-	// their turn at SQLite's own one-writer-at-a-time lock either way --
-	// WAL doesn't change that -- but busy_timeout makes them wait for it
-	// instead of failing immediately with SQLITE_BUSY; 5s is comfortably
-	// longer than a write against local disk should ever take.
+	// without waiting behind a writer and allows several connections.
+	// Writers for different zones (Sazu.updateLocks serializes only per
+	// zone) still take turns at SQLite's single write lock; busy_timeout
+	// makes them wait up to 5s for it instead of failing with SQLITE_BUSY.
 	dsn := path + "?_journal_mode=WAL&_busy_timeout=5000"
 	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -162,164 +143,7 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("creating schema in %s: %w", path, err)
 	}
 	db := &DB{sql: sqlDB}
-	if err := db.migrateKeysTableIfNeeded(); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("migrating keys table in %s: %w", path, err)
-	}
-	// See the schema constant's comment on why this index is created
-	// here rather than as part of schema itself: by this point the keys
-	// table is guaranteed to have a role column either way (a fresh
-	// table always did; migrateKeysTableIfNeeded just added it to an
-	// old one), so this is always safe.
-	if _, err := sqlDB.Exec(`CREATE INDEX IF NOT EXISTS keys_zone_role ON keys(zone, role)`); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("creating keys_zone_role index in %s: %w", path, err)
-	}
-	if err := db.migrateAuditLogTableIfNeeded(); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("migrating audit_log table in %s: %w", path, err)
-	}
 	return db, nil
-}
-
-// migrateAuditLogTableIfNeeded upgrades an audit_log table written before
-// key_tag/key_role existed by adding both columns, defaulting to NULL on
-// every pre-existing row -- there is no key to attribute those rows to
-// after the fact, and NULL (rather than some sentinel) is exactly what
-// AuditEntry's own KeyTag already means for "not applicable." A plain
-// ALTER TABLE ADD COLUMN suffices here, unlike migrateKeysTableIfNeeded's
-// full rebuild: this only ever adds nullable columns, never changes what
-// the table's existing rows or primary key mean.
-func (db *DB) migrateAuditLogTableIfNeeded() error {
-	hasKeyTag, err := db.columnExists("audit_log", "key_tag")
-	if err != nil {
-		return fmt.Errorf("inspecting audit_log table: %w", err)
-	}
-	if hasKeyTag {
-		return nil
-	}
-	if _, err := db.sql.Exec(`ALTER TABLE audit_log ADD COLUMN key_tag INTEGER`); err != nil {
-		return fmt.Errorf("adding key_tag column: %w", err)
-	}
-	if _, err := db.sql.Exec(`ALTER TABLE audit_log ADD COLUMN key_role TEXT`); err != nil {
-		return fmt.Errorf("adding key_role column: %w", err)
-	}
-	return nil
-}
-
-// migrateKeysTableIfNeeded upgrades a keys table written before ZSK
-// support existed (one row per zone: zone TEXT PRIMARY KEY, no keytag/
-// role/can_auth_tx columns) to the current shape (one row per key,
-// PRIMARY KEY (zone, keytag)) in place. A fresh database, or one already
-// on the current schema, has nothing to do here -- schema's own
-// CREATE TABLE IF NOT EXISTS already gave it the current shape, and this
-// detects that via the keytag column's presence before touching
-// anything. Every pre-existing row becomes that zone's KSK
-// (can_auth_tx=1) -- exactly what it always was before ZSKs existed, so
-// no existing deployment needs to change anything to keep working.
-func (db *DB) migrateKeysTableIfNeeded() error {
-	hasKeytag, err := db.columnExists("keys", "keytag")
-	if err != nil {
-		return fmt.Errorf("inspecting keys table: %w", err)
-	}
-	if hasKeytag {
-		return nil
-	}
-
-	rows, err := db.sql.Query(`SELECT zone, flags, protocol, algorithm, public_key, pinned_at FROM keys`)
-	if err != nil {
-		return fmt.Errorf("reading pre-ZSK keys table: %w", err)
-	}
-	type oldRow struct {
-		zone                       string
-		flags, protocol, algorithm int64
-		publicKey                  string
-		pinnedAt                   int64
-	}
-	var old []oldRow
-	for rows.Next() {
-		var r oldRow
-		if err := rows.Scan(&r.zone, &r.flags, &r.protocol, &r.algorithm, &r.publicKey, &r.pinnedAt); err != nil {
-			rows.Close()
-			return err
-		}
-		old = append(old, r)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-
-	tx, err := db.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback() //nolint:errcheck // no-op after a successful Commit
-
-	if _, err := tx.Exec(`ALTER TABLE keys RENAME TO keys_pre_zsk`); err != nil {
-		return fmt.Errorf("renaming old keys table: %w", err)
-	}
-	if _, err := tx.Exec(`
-		CREATE TABLE keys (
-			zone        TEXT NOT NULL REFERENCES zones(origin),
-			keytag      INTEGER NOT NULL,
-			role        TEXT NOT NULL,
-			flags       INTEGER NOT NULL,
-			protocol    INTEGER NOT NULL,
-			algorithm   INTEGER NOT NULL,
-			public_key  TEXT NOT NULL,
-			can_auth_tx INTEGER NOT NULL,
-			pinned_at   INTEGER NOT NULL,
-			PRIMARY KEY (zone, keytag)
-		)`); err != nil {
-		return fmt.Errorf("creating current-shape keys table: %w", err)
-	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS keys_zone_role ON keys(zone, role)`); err != nil {
-		return fmt.Errorf("creating keys_zone_role index: %w", err)
-	}
-	for _, r := range old {
-		dnskey := &dns.DNSKEY{
-			Hdr:       dns.RR_Header{Name: dns.Fqdn(r.zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET},
-			Flags:     uint16(r.flags),
-			Protocol:  uint8(r.protocol),
-			Algorithm: uint8(r.algorithm),
-			PublicKey: r.publicKey,
-		}
-		if _, err := tx.Exec(
-			`INSERT INTO keys (zone, keytag, role, flags, protocol, algorithm, public_key, can_auth_tx, pinned_at)
-			 VALUES (?, ?, 'KSK', ?, ?, ?, ?, 1, ?)`,
-			r.zone, dnskey.KeyTag(), r.flags, r.protocol, r.algorithm, r.publicKey, r.pinnedAt,
-		); err != nil {
-			return fmt.Errorf("migrating key for %s: %w", r.zone, err)
-		}
-	}
-	if _, err := tx.Exec(`DROP TABLE keys_pre_zsk`); err != nil {
-		return fmt.Errorf("dropping old keys table: %w", err)
-	}
-	return tx.Commit()
-}
-
-// columnExists reports whether table has a column named column, via
-// SQLite's PRAGMA table_info introspection.
-func (db *DB) columnExists(table, column string) (bool, error) {
-	rows, err := db.sql.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, ctype string
-		var notNull, pk int
-		var dflt any
-		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
-			return false, err
-		}
-		if name == column {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
 }
 
 // Close closes the underlying database connection.
@@ -333,7 +157,7 @@ func (db *DB) Close() error { return db.sql.Close() }
 // CommitUpdate itself doesn't assume that; it just applies whichever are
 // non-nil.
 type KeyChange struct {
-	// PinKSK is set on first contact or a successful §10.4 KSK rollover.
+	// PinKSK is set on first contact or a successful §8.2 KSK rollover.
 	PinKSK *dns.DNSKEY
 	// AddZSK is set when this push registers a new optional ZSK.
 	AddZSK *ManagedKey
@@ -806,7 +630,7 @@ func (db *DB) LoadAll() (*Store, *KeyRegistry, *ContactRegistry, error) {
 		case ok:
 			contacts.Set(origin, addrs)
 		default:
-			// No contact registered for this zone -- fine, §10.6 is optional.
+			// No contact registered for this zone -- fine, §11.4 is optional.
 		}
 	}
 
@@ -814,7 +638,7 @@ func (db *DB) LoadAll() (*Store, *KeyRegistry, *ContactRegistry, error) {
 }
 
 // ListZones returns every onboarded zone's origin -- a lighter-weight
-// alternative to LoadAll for a caller (like sazu-watchd, §11) that needs
+// alternative to LoadAll for a caller (like sazu-watchd, §11.4) that needs
 // to enumerate zones without loading their full content.
 func (db *DB) ListZones() ([]string, error) {
 	rows, err := db.sql.Query(`SELECT origin FROM zones`)
@@ -834,7 +658,7 @@ func (db *DB) ListZones() ([]string, error) {
 }
 
 // LoadKey returns zone's KSK, if any -- a lighter-weight alternative to
-// LoadAll/LoadZoneKeys for a caller (like sazu-watchd, §11) that only
+// LoadAll/LoadZoneKeys for a caller (like sazu-watchd, §11.4) that only
 // needs the one key its chain-of-trust re-check actually cares about:
 // a ZSK is never DS-anchored, so it has nothing for that check to verify
 // in the first place.
@@ -901,7 +725,7 @@ func (db *DB) LoadZoneKeys(zone string) (*ZoneKeys, bool, error) {
 	return zk, true, nil
 }
 
-// LoadContact returns the registered §10.6 contact addresses for zone, if
+// LoadContact returns the registered §11.4 contact addresses for zone, if
 // any -- a lighter-weight alternative to LoadAll for a caller that only
 // needs one zone's contact.
 func (db *DB) LoadContact(zone string) ([]string, bool, error) {
@@ -916,7 +740,7 @@ func (db *DB) LoadContact(zone string) ([]string, bool, error) {
 	}
 }
 
-// RecordTransaction appends one row to the §12 audit trail: entry.ID must
+// RecordTransaction appends one row to the §11.5 audit trail: entry.ID must
 // be unique (it's the primary key), which newTransactionID's randomness
 // already guarantees in practice. A write here is independent of, and
 // never rolled back by, CommitUpdate's own transaction -- the audit
@@ -945,7 +769,7 @@ func nullIfEmpty(s string) any {
 }
 
 // RecentTransactions returns up to limit audit-log entries for zone,
-// newest first -- the read side of the §12 audit trail, for an operator
+// newest first -- the read side of the §11.5 audit trail, for an operator
 // (or a future admin surface) asking "what happened to this zone's
 // pushes recently."
 func (db *DB) RecentTransactions(zone string, limit int) ([]AuditEntry, error) {

@@ -16,7 +16,7 @@ import (
 // prerequisite.
 //
 // Returns the RFC 2136-appropriate rcode for the first failure (matching
-// §2.6's rcode table), a §12 SAZU status code if this specific failure has
+// §2.6's rcode table), a §10 SAZU status code if this specific failure has
 // one (currently just the SOA-serial staleness guard's ERR_STALE_SERIAL;
 // "" for every other, more generic RFC 2136 prerequisite failure), and a
 // human-readable reason -- or (dns.RcodeSuccess, "", nil) if every

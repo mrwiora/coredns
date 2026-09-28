@@ -171,10 +171,8 @@ func queryDO(t *testing.T, addr, name string, qtype uint16) *dns.Msg {
 // real signatures actually reach a validating client: once onboarded (via
 // BuildFullZonePush, which signs everything), a DO-bit query for A gets
 // back both the A record and its covering RRSIG in the same answer --
-// what a real validating resolver needs, and specifically what was
-// missing when this was tested against a real domain (a published DS
-// with no RRSIGs served at all produces exactly the "bogus"/SERVFAIL
-// state this closes). A query without the DO bit gets no RRSIG, matching
+// what a validating resolver needs (a published DS with no RRSIGs served
+// makes the zone bogus). A query without the DO bit gets no RRSIG, matching
 // ordinary non-DNSSEC client expectations.
 func TestOnboardedZoneServesRRSIGsWithDOBit(t *testing.T) {
 	s := newTestSazu("example.org.")
@@ -632,8 +630,8 @@ func soaFromAuthority(t *testing.T, resp *dns.Msg) *dns.SOA {
 	return nil
 }
 
-// TestOnboardWithoutSOAIsAccepted proves first contact no longer
-// requires establishing a real SOA in the same push: sazuctl
+// TestOnboardWithoutSOAIsAccepted: first contact needn't carry a SOA:
+// sazuctl
 // publish-trust deliberately sends a KSK+ZSK-only, content-free first
 // contact (see BuildTrustPush), so the server must accept and pin a KSK
 // candidate regardless of what content, if any, rides along with it. A
@@ -675,7 +673,7 @@ func TestOnboardWithoutSOAIsAccepted(t *testing.T) {
 	}
 }
 
-// TestOnboardWithWeakAlgorithmKeyIsRejected proves §10.7's algorithm
+// TestOnboardWithWeakAlgorithmKeyIsRejected proves §11.3's algorithm
 // floor: a first-contact push whose candidate DNSKEY declares an
 // algorithm RFC 8624 §3.1 rates MUST NOT/NOT RECOMMENDED for zone signing
 // (RSASHA1 here) is refused with the ERR_WEAK_ALGORITHM diagnostic and
@@ -723,7 +721,7 @@ func TestOnboardWithWeakAlgorithmKeyIsRejected(t *testing.T) {
 	}
 }
 
-// TestRateLimiterExceededRejectsFurtherKeyManagementPushes proves §12's
+// TestRateLimiterExceededRejectsFurtherKeyManagementPushes proves §11.2's
 // quota is actually wired into serveUpdate: once a zone's key-management
 // (non-full-content) push quota for the rolling window is used up, a
 // further otherwise perfectly valid non-full-content update is refused
@@ -896,7 +894,7 @@ func TestIPRateLimiterCountsEveryUpdateAttemptNotJustFirstContact(t *testing.T) 
 }
 
 // TestServeUpdateRecordsAuditTrailForAcceptedAndRejectedTransactions
-// proves §12's audit trail actually captures both outcomes an operator
+// proves §11.5's audit trail actually captures both outcomes an operator
 // would want to investigate later: a successful onboarding, and a
 // rejected first-contact attempt (a non-SEP-flagged, ZSK-shaped
 // candidate -- first contact can only ever establish a KSK) that never
@@ -1187,7 +1185,7 @@ func TestOnboardDeniedForOtherChainReasonsCarriesNoDiagnostic(t *testing.T) {
 	}
 }
 
-// TestKeyRolloverSwitchesToNewKey proves §10.4: an already-pinned zone
+// TestKeyRolloverSwitchesToNewKey proves §8.2: an already-pinned zone
 // can roll over to a brand new key, without a server restart or any
 // out-of-band step, by sending a push signed by (and introducing) the new
 // key -- provided that new key also independently passes the exact same
@@ -1315,7 +1313,7 @@ func TestKeyRolloverFailsWithoutADSForTheNewKey(t *testing.T) {
 	}
 }
 
-// TestKeyRolloverRejectedForWeakAlgorithm proves §10.7's algorithm floor
+// TestKeyRolloverRejectedForWeakAlgorithm proves §11.3's algorithm floor
 // applies to a rollover's new candidate key exactly as it does at first
 // contact -- checked before any chain-of-trust effort is spent on it.
 func TestKeyRolloverRejectedForWeakAlgorithm(t *testing.T) {
@@ -1416,11 +1414,9 @@ func onboard(t *testing.T, addr, zone string) *dns.DNSKEY {
 // exact scenario a real multi-tenant hoster needs: one Corefile entry
 // ("sazu ." -- accept any domain), and every actual zone this instance
 // serves comes entirely from what's been onboarded at runtime, with no
-// Corefile edit or restart needed per new customer domain. This is the
-// regression test for a real bug: zone routing used to conflate "which
-// static Corefile entry matched" with "which zone is this request
-// about," which under a wildcard "." scope collapsed every distinct
-// domain onto the single literal zone ".".
+// Corefile edit or restart needed per new customer domain: the zone an
+// UPDATE names, not the Corefile entry that matched it, decides which
+// zone it changes.
 func TestWildcardScopeOnboardsMultipleDomainsWithoutCorefileChanges(t *testing.T) {
 	s := &Sazu{
 		Zones:                       []string{"."}, // catch-all: accept any domain
@@ -1572,7 +1568,7 @@ func TestUpdateOutsideZoneScopeIsRefusedNotServerFailureWithNoNextPlugin(t *test
 	}
 }
 
-// TestContactRegistrationRidesOrdinaryPushAndIsNeverServed proves §10.6's
+// TestContactRegistrationRidesOrdinaryPushAndIsNeverServed proves §11.4's
 // registration record: a contact address travels inside an otherwise
 // ordinary, already-authenticated push (no separate protocol/transport of
 // its own), ends up in s.Contacts, and -- unlike a DNSKEY -- is never

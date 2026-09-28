@@ -153,9 +153,8 @@ func TestDBCommitUpdatePurgesStaleNSECOnNextFullPush(t *testing.T) {
 	}
 }
 
-// TestServeUpdateFullPushDoesNotResurrectDroppedRecordsAfterRestart is
-// the regression test for full pushes only ever being purged in memory:
-// a record dropped from the zone by a later full push -- whose RRSIG is
+// TestServeUpdateFullPushDoesNotResurrectDroppedRecordsAfterRestart: a
+// full push's purge reaches the database too, so a record dropped from the zone by a later full push -- whose RRSIG is
 // still well inside its validity window -- must stay gone after the
 // server reloads its state from disk, not come back from rows the purge
 // never deleted.
@@ -315,7 +314,7 @@ func TestDBCommitUpdateRollsBackOnMalformedOp(t *testing.T) {
 	}
 }
 
-// TestDBCommitUpdatePersistsAndClearsContact proves §10.6's registration
+// TestDBCommitUpdatePersistsAndClearsContact proves §11.4's registration
 // record survives a restart (LoadAll rehydrates ContactRegistry, not just
 // Store/KeyRegistry) and that a later clearing update actually removes the
 // row rather than leaving stale contact data behind.
@@ -355,7 +354,7 @@ func TestDBCommitUpdatePersistsAndClearsContact(t *testing.T) {
 }
 
 // TestDBListZonesLoadKeyLoadContact proves the lighter-weight,
-// single-zone accessors sazu-watchd (§11) uses agree with what LoadAll
+// single-zone accessors sazu-watchd (§11.4) uses agree with what LoadAll
 // itself would have loaded, without needing to load full zone content.
 func TestDBListZonesLoadKeyLoadContact(t *testing.T) {
 	db := openTestDB(t)
@@ -395,7 +394,7 @@ func TestDBListZonesLoadKeyLoadContact(t *testing.T) {
 	}
 }
 
-// TestDBRecordTransactionAndRecentTransactions proves §12's audit trail
+// TestDBRecordTransactionAndRecentTransactions proves §11.5's audit trail
 // persistence: entries survive, come back newest first, and a zone with
 // no entries at all (rather than an error) just gets an empty result --
 // exactly what a never-onboarded zone's first, rejected attempt would
@@ -443,84 +442,6 @@ func TestDBRecordTransactionAndRecentTransactions(t *testing.T) {
 	if limited, err := db.RecentTransactions("example.org.", 1); err != nil || len(limited) != 1 || limited[0].ID != "tx-2" {
 		t.Fatalf("expected limit to cap results to the single newest entry, got %+v err=%v", limited, err)
 	}
-}
-
-// TestDBOpenMigratesPreKeyAttributionAuditLog proves an audit_log table
-// written before key_tag/key_role existed is transparently upgraded in
-// place the first time it's opened with this version -- an existing
-// deployment's audit history survives the upgrade with no operator
-// action, its pre-existing rows simply carrying no key attribution
-// (there is nothing to attribute them to after the fact).
-func TestDBOpenMigratesPreKeyAttributionAuditLog(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sazu.db")
-
-	// Build a database in the pre-key-attribution shape directly via SQL,
-	// bypassing Open (which would create the current-shape table from the
-	// start).
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	if _, err := raw.Exec(`
-		CREATE TABLE audit_log (
-			id          TEXT PRIMARY KEY,
-			zone        TEXT NOT NULL,
-			remote_addr TEXT NOT NULL,
-			rcode       TEXT NOT NULL,
-			status      TEXT NOT NULL,
-			at          INTEGER NOT NULL
-		);
-	`); err != nil {
-		t.Fatalf("creating pre-key-attribution schema: %v", err)
-	}
-	if _, err := raw.Exec(
-		`INSERT INTO audit_log (id, zone, remote_addr, rcode, status, at) VALUES (?, ?, ?, ?, ?, ?)`,
-		"old-tx", "example.org.", "203.0.113.1:5353", "NOERROR", "", time.Now().Unix(),
-	); err != nil {
-		t.Fatalf("inserting pre-key-attribution row: %v", err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatalf("closing raw handle: %v", err)
-	}
-
-	db, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open (expected to migrate transparently): %v", err)
-	}
-	defer db.Close()
-
-	got, err := db.RecentTransactions("example.org.", 10)
-	if err != nil {
-		t.Fatalf("RecentTransactions after migration: %v", err)
-	}
-	if len(got) != 1 || got[0].ID != "old-tx" {
-		t.Fatalf("expected the pre-existing row to survive migration, got %+v", got)
-	}
-	if got[0].KeyTag != nil || got[0].KeyRole != "" {
-		t.Fatalf("expected a pre-migration row to carry no key attribution, got tag=%v role=%q", got[0].KeyTag, got[0].KeyRole)
-	}
-
-	// A fresh row recorded after migration must round-trip its key
-	// attribution normally.
-	tag := uint16(999)
-	if err := db.RecordTransaction(AuditEntry{ID: "new-tx", Zone: "example.org.", RemoteAddr: "203.0.113.1:5353", Rcode: "NOERROR", At: time.Now(), KeyTag: &tag, KeyRole: "KSK"}); err != nil {
-		t.Fatalf("RecordTransaction after migration: %v", err)
-	}
-	got, err = db.RecentTransactions("example.org.", 10)
-	if err != nil {
-		t.Fatalf("RecentTransactions after post-migration write: %v", err)
-	}
-	if got[0].ID != "new-tx" || got[0].KeyTag == nil || *got[0].KeyTag != tag || got[0].KeyRole != "KSK" {
-		t.Fatalf("expected the post-migration row's key attribution to round-trip, got %+v", got[0])
-	}
-
-	// A second Open (simulating a restart) must be a no-op migration --
-	// the table is already current-shape.
-	db2, err := Open(path)
-	if err != nil {
-		t.Fatalf("second Open: %v", err)
-	}
-	defer db2.Close()
 }
 
 // TestDBCommitUpdateAddsAndRetiresZSK proves the optional ZSK split
@@ -622,81 +543,6 @@ func TestDBCommitUpdateKSKRolloverReplacesRowNotAdds(t *testing.T) {
 	}
 	if kskRowCount != 1 {
 		t.Fatalf("expected exactly one KSK row after a rollover, got %d", kskRowCount)
-	}
-}
-
-// TestDBOpenMigratesPreZSKKeysTable proves a database written before ZSK
-// support existed (the old keys table shape: zone as its sole primary
-// key, no keytag/role/can_auth_tx columns) is transparently upgraded in
-// place the first time it's opened with this version -- an existing
-// deployment's zones and keys survive the upgrade with no operator
-// action, and every pre-existing key becomes that zone's KSK.
-func TestDBOpenMigratesPreZSKKeysTable(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sazu.db")
-
-	// Build a database in the pre-ZSK shape directly via SQL, bypassing
-	// Open (which would create the current-shape table from the start).
-	raw, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("sql.Open: %v", err)
-	}
-	if _, err := raw.Exec(`
-		CREATE TABLE zones (origin TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
-		CREATE TABLE keys (
-			zone       TEXT PRIMARY KEY REFERENCES zones(origin),
-			flags      INTEGER NOT NULL,
-			protocol   INTEGER NOT NULL,
-			algorithm  INTEGER NOT NULL,
-			public_key TEXT NOT NULL,
-			pinned_at  INTEGER NOT NULL
-		);
-	`); err != nil {
-		t.Fatalf("creating pre-ZSK schema: %v", err)
-	}
-
-	key, _, err := GenerateEd25519Key("example.org.", true)
-	if err != nil {
-		t.Fatalf("generating key: %v", err)
-	}
-	if _, err := raw.Exec(`INSERT INTO zones (origin, created_at) VALUES (?, ?)`, "example.org.", 1000); err != nil {
-		t.Fatalf("inserting pre-ZSK zone row: %v", err)
-	}
-	if _, err := raw.Exec(
-		`INSERT INTO keys (zone, flags, protocol, algorithm, public_key, pinned_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		"example.org.", key.Flags, key.Protocol, key.Algorithm, key.PublicKey, 1000,
-	); err != nil {
-		t.Fatalf("inserting pre-ZSK key row: %v", err)
-	}
-	if err := raw.Close(); err != nil {
-		t.Fatalf("closing raw handle: %v", err)
-	}
-
-	db, err := Open(path)
-	if err != nil {
-		t.Fatalf("Open (expected to migrate transparently): %v", err)
-	}
-	defer db.Close()
-
-	zk, ok, err := db.LoadZoneKeys("example.org.")
-	if err != nil || !ok {
-		t.Fatalf("LoadZoneKeys after migration: ok=%v err=%v", ok, err)
-	}
-	if zk.KSK.DNSKEY.PublicKey != key.PublicKey || zk.KSK.Role != RoleKSK || !zk.KSK.CanAuthenticateTx {
-		t.Fatalf("expected the pre-existing key to become the zone's KSK, got %+v", zk.KSK)
-	}
-	if len(zk.ZSKs) != 0 {
-		t.Fatalf("expected no ZSKs from a migrated pre-ZSK database, got %+v", zk.ZSKs)
-	}
-
-	// A second Open (simulating a restart) must be a no-op migration --
-	// the table is already current-shape.
-	db2, err := Open(path)
-	if err != nil {
-		t.Fatalf("second Open: %v", err)
-	}
-	defer db2.Close()
-	if zk2, ok, err := db2.LoadZoneKeys("example.org."); err != nil || !ok || zk2.KSK.DNSKEY.PublicKey != key.PublicKey {
-		t.Fatalf("expected the migrated data to still be there after a second Open: ok=%v err=%v zk=%+v", ok, err, zk2)
 	}
 }
 

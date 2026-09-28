@@ -146,7 +146,7 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 				}
 				cfg.dbPath = args[0]
 			case "rate_limit":
-				// §12: <full-pushes-per-day> <key-management-pushes-per-day>,
+				// §11.2: <full-pushes-per-day> <key-management-pushes-per-day>,
 				// both over a rolling 24h window -- see ratelimit.go.
 				// Defaults (5/50) apply if this directive is omitted
 				// entirely.
@@ -165,7 +165,7 @@ func parseSazu(c *caddy.Controller) (sazuConfig, error) {
 				cfg.fullPushesPerDay = full
 				cfg.keyManagementPushesPerDay = keyMgmt
 			case "ip_rate_limit":
-				// §12: <updates-per-minute>, the global, per-source-IP
+				// §11.2: <updates-per-minute>, the global, per-source-IP
 				// flood/scan throttle -- see ipratelimit.go. Default (30)
 				// applies if this directive is omitted entirely.
 				args := c.RemainingArgs()

@@ -295,11 +295,8 @@ func TestNXDOMAINCarriesValidNSEC3Proof(t *testing.T) {
 	}
 }
 
-// TestPartialPushInvalidatesNSEC3UntilNextFullPush mirrors
-// TestPartialPushInvalidatesNSECUntilNextFullPush for the NSEC3 case:
-// PurgeNSEC purges NSEC3(PARAM) too, so a partial push right after an
-// NSEC3 onboarding still leaves the zone with no denial-of-existence
-// proof at all until the next full push.
+// TestPartialPushIsRefusedAndNSEC3ChainSurvives: a partial content push
+// is refused, so the NSEC3 chain from the last full push keep serving.
 func TestPartialPushIsRefusedAndNSEC3ChainSurvives(t *testing.T) {
 	s := newTestSazu("example.org.")
 	addr := serveThroughRealServer(t, s)

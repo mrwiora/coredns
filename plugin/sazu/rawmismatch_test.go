@@ -9,9 +9,8 @@ import (
 	"github.com/miekg/dns"
 )
 
-// TestForgedMessagePairedWithCapturedSignedBytesIsRefused is the
-// regression test for SIG(0) being verified over the captured bytes
-// while the separately parsed message got applied. An attacker who
+// TestForgedMessagePairedWithCapturedSignedBytesIsRefused: the server
+// applies only the message whose bytes SIG(0) verified. An attacker who
 // spoofs the victim's source address and message ID pairs an unsigned
 // decommission (carrying a copy of the victim's SIG(0) record) with the
 // victim's genuinely KSK-signed bytes. Only what the signature covers

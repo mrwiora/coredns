@@ -19,7 +19,7 @@ type DNSKEYFetcher interface {
 
 // liveDNSKEYFetcher queries a zone's own current authoritative servers
 // directly for its DNSKEY RRset -- an ordinary, unauthenticated query,
-// the same kind §11's NS/DS watch loop already makes. This is
+// the same kind §11.4's NS/DS watch loop already makes. This is
 // deliberately not chain.go's Validator: that performs a full,
 // cryptographically anchored root-to-parent walk for a first-contact or
 // rollover push to trust a *new* key, which is real per-request latency

@@ -83,7 +83,7 @@ func sendOverHTTPS(t *testing.T, baseURL string, wire []byte) *dns.Msg {
 	return m
 }
 
-// TestOnboardOverHTTPSRawWireBytes proves §7.3's HTTPS carrier for
+// TestOnboardOverHTTPSRawWireBytes proves §9.2's HTTPS carrier for
 // real: a first-contact push sent as a raw application/dns-message POST
 // -- the RFC 8484 DoH convention, reused as-is -- reaches this plugin's
 // exact same authenticate-evaluate-apply pipeline every other transport

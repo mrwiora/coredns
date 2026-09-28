@@ -451,7 +451,7 @@ func TestFirstContactRejectsNonKSKCandidate(t *testing.T) {
 	}
 }
 
-// TestAddZSKRejectsWeakAlgorithm proves §10.7's algorithm floor applies
+// TestAddZSKRejectsWeakAlgorithm proves §11.3's algorithm floor applies
 // to a ZSK registration exactly as it does at first contact and KSK
 // rollover -- checked before the key is registered.
 func TestAddZSKRejectsWeakAlgorithm(t *testing.T) {

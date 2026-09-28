@@ -12,28 +12,18 @@ import (
 	"golang.org/x/crypto/scrypt"
 )
 
-// §10.8 key custody hardening: sazuctl's private-key file is, by default,
-// BIND9's plain private-key-file format (see key.go) -- readable by
-// standard DNSSEC tooling, but also readable by anyone who gets the file.
-// This adds an opt-in, passphrase-encrypted alternative: still a single
-// self-contained file, still no external key-management service or
-// hardware dependency, but no longer plaintext at rest. Real HSM/PKCS#11
-// support (holding the key in hardware entirely, never as bytes on disk
-// at all) is a materially bigger step -- a new dependency, a real or
-// software HSM to test against, and an API redesign for signing -- and is
-// left for if/when this actually needs that; this covers the common case
-// (a laptop or CI secret store gets compromised or synced somewhere it
-// shouldn't) without it.
+// §11.6 key custody: by default sazuctl's private-key file is BIND's
+// plain private-key-file format (key.go), readable by standard DNSSEC
+// tooling and by anyone who gets the file. This is the opt-in
+// passphrase-encrypted alternative: still one self-contained file with
+// no external service or hardware, but not plaintext at rest. Keys held
+// in an HSM (PKCS#11) are not supported.
 //
-// Encrypted file format: a fixed magic line (so LoadPrivateKey can tell
-// this apart from a plain BIND-format file at a glance, without first
-// trying and failing to parse it as one) followed by a JSON envelope
-// carrying everything needed to decrypt except the passphrase itself:
-// the scrypt parameters and salt used to derive the AES-256 key, the
-// AES-GCM nonce, and the ciphertext. The plaintext sealed inside is
-// exactly what SavePrivateKey would have written -- the ordinary
-// BIND-format key file bytes -- so decrypting one out-of-band (should
-// that ever be needed) yields a file usable with standard tooling too.
+// File format: a magic line, then a JSON object with everything needed
+// to decrypt except the passphrase -- the scrypt (RFC 7914) parameters
+// and salt that derive the AES-256 key, the AES-GCM nonce, and the
+// ciphertext. The plaintext is exactly the BIND-format file
+// SavePrivateKey writes.
 const encryptedKeyFileMagic = "SAZU-ENCRYPTED-KEY-v1\n"
 
 // scrypt parameters: N=2^15 costs roughly 100-200ms on typical hardware

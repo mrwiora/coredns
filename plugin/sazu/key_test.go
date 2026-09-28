@@ -63,7 +63,7 @@ func TestLoadOrGenerateKeyGeneratesThenReusesSameKey(t *testing.T) {
 	}
 }
 
-// TestSaveLoadEncryptedKeyRoundTripsToIdenticalKey proves §10.8's
+// TestSaveLoadEncryptedKeyRoundTripsToIdenticalKey proves §11.6's
 // passphrase-encrypted key file round-trips to exactly the same key
 // material as the plain format does.
 func TestSaveLoadEncryptedKeyRoundTripsToIdenticalKey(t *testing.T) {

@@ -11,8 +11,7 @@ import (
 )
 
 // RootHints are the 13 IANA root server addresses, "ip:53" ready to pass to
-// a dns.Client. Pure data, hardcoded like the corresponding Rust/rDNS port
-// -- no runtime parsing that could panic.
+// a dns.Client.
 var RootHints = []string{
 	"198.41.0.4:53",
 	"199.9.14.201:53",
@@ -57,7 +56,7 @@ func chainErr(op, format string, args ...any) error {
 // a bare "rejected."
 var errNoDSRecords = errors.New("no DS records found")
 
-// ChainValidator is the interface Sazu depends on for the §10.2
+// ChainValidator is the interface Sazu depends on for the §7.2
 // chain-of-trust cross-check -- satisfied by *Validator, and small enough
 // that tests can supply a fake implementation to exercise handler.go's
 // response-shaping logic (in particular the ERR_NO_DS_PUBLISHED path)
@@ -68,7 +67,7 @@ type ChainValidator interface {
 
 // Validator performs DNSSEC chain-of-trust validation from the hardcoded
 // root trust anchor down to a zone's immediate parent -- the cryptographic
-// check SAZU's design doc §10.2 calls the "chain-of-trust cross-check,"
+// check SAZU's design doc §7.2 calls the "chain-of-trust cross-check,"
 // and that a first-contact SAZU push depends on for its security: without
 // it, a DS lookup is just a plaintext UDP answer anyone off-path could
 // forge, and "anchored to the root" would be a claim with nothing behind

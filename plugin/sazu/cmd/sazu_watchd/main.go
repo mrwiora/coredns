@@ -1,10 +1,10 @@
-// Command sazu-watchd is SAZU's §11 delegation-change monitor: a
+// Command sazu-watchd is SAZU's §11.4 delegation-change monitor: a
 // standalone daemon, deliberately outside CoreDNS itself, that
 // periodically re-checks every onboarded zone's chain of trust (the same
 // "does a DS matching this zone's pinned key exist at the parent" check
-// first contact and a §10.4 key rollover already perform), that its
+// first contact and a §8.2 key rollover already perform), that its
 // registered ZSKs are still served, and how soon its earliest RRSIG
-// expires, and alerts the zone's registered §10.6 contact when any of
+// expires, and alerts the zone's registered §11.4 contact when any of
 // those needs attention.
 //
 // Kept out of CoreDNS on purpose: this is a periodic background job, not

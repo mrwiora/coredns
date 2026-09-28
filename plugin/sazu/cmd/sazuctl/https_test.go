@@ -12,8 +12,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// TestSendOverHTTPRoundTrips is CARRIER-06's missing coverage: sendOverHTTP
-// is sazuctl's own client-side code for pushing over an https://
+// TestSendOverHTTPRoundTrips: sendOverHTTP is sazuctl's own client-side code for pushing over an https://
 // target, distinct from plugin/sazu/https_test.go's coverage of the
 // *server* side of this same wire protocol via a hand-built HTTP client.
 // Runs against a real httptest.Server, exactly like that server-side test

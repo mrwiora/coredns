@@ -16,11 +16,9 @@ import (
 )
 
 // Notifier sends one Alert to each of its registered contact addresses,
-// dispatching on scheme: "mailto:" via SMTP, "https://" via a
-// webhook POST -- both alerting mechanisms §11's design left "TBD"
-// between, kept both rather than picking one so a zone's registered
-// contact (sazuctl contact -address ...) decides per-address which
-// channel(s) it wants, with no separate per-zone daemon configuration.
+// dispatching on scheme: "mailto:" (RFC 6068) via SMTP, "https://" via a
+// webhook POST. The zone's registered contact (sazuctl contact -address)
+// picks the channels, with no per-zone daemon configuration.
 type Notifier struct {
 	SMTPAddr     string // host:port, e.g. "smtp.example.org:587"; empty disables email entirely
 	SMTPFrom     string

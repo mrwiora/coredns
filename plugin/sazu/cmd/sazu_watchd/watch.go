@@ -8,18 +8,12 @@ import (
 	"github.com/coredns/coredns/plugin/sazu"
 )
 
-// zoneState is this process's own, purely in-memory memory of whether a
-// zone's chain-of-trust check last succeeded, and which of its
-// registered ZSKs were last found present in the zone's live-served
-// DNSKEY RRset -- the "last known good" plugin/sazu/docs/SAZU-PLAN.md's design for this
-// daemon compares against. Not persisted: a restart just re-establishes
-// a fresh baseline on its first pass rather than resuming exactly where
-// a previous run left off. That's a deliberate simplification for this
-// first cut, not an oversight -- the failure mode is narrow (a zone that
-// broke and recovered entirely within one restart window goes
-// unremarked) and safe (nothing is ever mis-reported, an alert is just
-// possibly missed once), which is an acceptable trade for not needing
-// yet another persisted table for a purely advisory monitoring signal.
+// zoneState is this process's in-memory record of a zone's last
+// chain-of-trust outcome and which registered ZSKs were last seen in the
+// served DNSKEY RRset -- the baseline each pass compares against. It is
+// not persisted: after a restart the first pass sets a fresh baseline,
+// so a zone that broke and recovered while the daemon was down goes
+// unreported. Nothing is ever misreported.
 type zoneState struct {
 	lastOK bool
 
@@ -106,7 +100,7 @@ type Alert struct {
 
 // checkOnce runs one pass over every zone db knows about: re-validating
 // each one's chain of trust via validator exactly the way first contact
-// (and a §10.4 key rollover) already does -- "does a DS matching this
+// (and a §8.2 key rollover) already does -- "does a DS matching this
 // zone's pinned key exist at the parent" -- and, separately, confirming
 // via dnskeys that every ZSK currently registered for the zone is still
 // present in what the zone is actually serving. Returns the alerts (if
@@ -296,7 +290,7 @@ func checkZSKPresence(db *sazu.DB, zone string, zk *sazu.ZoneKeys, dnskeys DNSKE
 	return alerts
 }
 
-// contactAddresses looks up zone's registered §10.6 contact, tolerating
+// contactAddresses looks up zone's registered §11.4 contact, tolerating
 // a lookup failure (or no contact registered at all) by returning no
 // addresses rather than failing the whole check pass over it -- an alert
 // with nothing to notify still gets logged by the caller, which is

@@ -104,9 +104,8 @@ func sendRawUDP(t *testing.T, addr string, wire []byte) *dns.Msg {
 // bigger than this: every extra byte only costs them packets-per-second,
 // buying nothing. This is deliberately smaller than a realistic
 // legitimate push (which always includes at least a SOA and, from a full
-// push, an NSEC chain and RRSIGs -- routinely well over 512 bytes, as
-// found the hard way testing this package against real UDP paths
-// elsewhere) specifically so the test exercises connectionOriented's own
+// push, an NSEC chain and RRSIGs -- routinely well over 512 bytes)
+// specifically so the test exercises connectionOriented's own
 // gate rather than incidentally tripping RFC 1035's unrelated 512-byte
 // UDP truncation limit first.
 func minimalFirstContactWire(t *testing.T, zone string, key *dns.DNSKEY, priv ed25519.PrivateKey) []byte {
